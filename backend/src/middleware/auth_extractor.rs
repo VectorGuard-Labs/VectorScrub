@@ -67,10 +67,7 @@ impl FromRequestParts<AppState> for AgentAuth {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        // The agent API key is derived from the JWT secret — in production
-        // use a separate secret stored in the environment.
-        let expected = format!("agent-{}", &state.config.jwt_secret[..16]);
-        if key != expected {
+        if key != state.config.agent_api_key {
             return Err((StatusCode::UNAUTHORIZED, "Invalid agent key".into()));
         }
         Ok(AgentAuth)

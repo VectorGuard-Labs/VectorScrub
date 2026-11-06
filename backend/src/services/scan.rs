@@ -18,8 +18,10 @@ pub async fn initiate_scan(
     identity_token: String,
 ) -> Result<ScanJob> {
     // Enforce per-tier scan rate limits (simplified — production should use sliding window)
+    // Development: 1 minute for testing, production: 24 hours
+    let rate_limit_interval = if cfg!(debug_assertions) { "1 minute" } else { "24 hours" };
     let recent_scan: Option<(OffsetDateTime,)> = sqlx::query_as(
-        "SELECT queued_at FROM scan_jobs WHERE customer_id = $1 AND queued_at > NOW() - INTERVAL '24 hours' ORDER BY queued_at DESC LIMIT 1"
+        &format!("SELECT queued_at FROM scan_jobs WHERE customer_id = $1 AND queued_at > NOW() - INTERVAL '{}' ORDER BY queued_at DESC LIMIT 1", rate_limit_interval)
     )
     .bind(customer_id)
     .fetch_optional(pool)
@@ -28,7 +30,12 @@ pub async fn initiate_scan(
     if recent_scan.is_some() {
         match tier {
             SubscriptionTier::Free => {
-                return Err(anyhow!("Free accounts can run one scan per 24 hours"))
+                let msg = if cfg!(debug_assertions) {
+                    "Free accounts can run one scan per minute (dev mode)"
+                } else {
+                    "Free accounts can run one scan per 24 hours"
+                };
+                return Err(anyhow!(msg))
             }
             _ => {} // Paid tiers allow multiple scans per day
         }

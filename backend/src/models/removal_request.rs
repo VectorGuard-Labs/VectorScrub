@@ -5,6 +5,7 @@ use uuid::Uuid;
 /// Lifecycle state of a data removal request.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "removal_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum RemovalStatus {
     /// Customer has authorized; request not yet submitted
     Authorized,

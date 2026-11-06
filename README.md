@@ -29,8 +29,9 @@ Built by **VectorGuard Labs** — the same team behind PyHSM, VectorLedger, and 
 17. [California DROP Integration](#california-drop-integration)
 18. [Competitive Landscape](#competitive-landscape)
 19. [VectorGuard Labs Product Family](#vectorguard-labs-product-family)
-20. [Contributing](#contributing)
-21. [License](#license)
+20. [Recent Updates](#recent-updates)
+21. [Contributing](#contributing)
+22. [License](#license)
 
 ---
 
@@ -196,13 +197,13 @@ The Rust backend owns all PII. The Python agent layer never has the master encry
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-| Layer      | Technology                              | Responsibility                               |
-|------------|-----------------------------------------|----------------------------------------------|
-| Backend    | Rust · Axum · SQLx · AES-256-GCM        | API, auth (Argon2id + JWT), PII encryption, audit trail |
-| Agents     | Python · LangChain · httpx · Playwright | Discovery, detection, removal, monitoring    |
-| Frontend   | Next.js 15 · Tailwind CSS 4 · TypeScript | Landing page, auth, customer dashboard       |
-| Database   | PostgreSQL 16                           | All persistent state — PII stored encrypted  |
-| Queue      | Redis 7                                 | Scan job dispatch from Rust to Python        |
+| Layer      | Technology                                      | Responsibility                               |
+|------------|-------------------------------------------------|----------------------------------------------|
+| Backend    | Rust · Axum · SQLx · AES-256-GCM                | API, auth (Argon2id + JWT), PII encryption, audit trail |
+| Agents     | Python · LangChain · httpx · Playwright         | Discovery, detection, removal, monitoring    |
+| Frontend   | Next.js 15.5.29 · Tailwind CSS 4.1.8 · TypeScript 5.8.3 | Landing page, auth, customer dashboard       |
+| Database   | PostgreSQL 16                                   | All persistent state — PII stored encrypted  |
+| Queue      | Redis 7                                         | Scan job dispatch from Rust to Python        |
 
 **Why Rust for the backend?** Memory safety, no garbage collector, predictable performance under load, and a strong cryptography ecosystem. The backend handles every operation that touches raw customer PII — authentication, encryption, database writes, and the audit trail.
 
@@ -304,6 +305,8 @@ VectorScrub/
 ├── frontend/                         # Next.js 15 customer dashboard
 │   ├── package.json
 │   ├── next.config.ts                # API proxy rewrites
+│   ├── postcss.config.mjs            # Tailwind CSS 4 PostCSS plugin config
+│   ├── tailwind.config.ts            # Tailwind CSS 4 configuration
 │   ├── tsconfig.json
 │   └── src/
 │       ├── app/
@@ -314,6 +317,7 @@ VectorScrub/
 │       │   ├── login/page.tsx        # Sign in
 │       │   ├── dashboard/
 │       │   │   ├── page.tsx          # Privacy dashboard (authenticated)
+│       │   │   ├── profile/page.tsx  # Identity profile management
 │       │   │   └── removals/page.tsx # Removal request tracking
 │       ├── lib/
 │       │   ├── api.ts                # Typed API client (all endpoints)
@@ -346,7 +350,7 @@ Before setting up VectorScrub locally, make sure you have the following installe
 |------|---------|---------|
 | Rust | 1.82+ | Backend compilation (`rustup` recommended) |
 | Python | 3.11+ | AI agent layer |
-| Node.js | 20+ | Next.js frontend |
+| Node.js | 22 LTS | Next.js frontend |
 | Docker | 24+ | PostgreSQL and Redis |
 | Docker Compose | 2.20+ | Multi-service orchestration |
 | OpenSSL | Any | Key generation script |
@@ -464,7 +468,7 @@ Open [http://localhost:3000](http://localhost:3000) in your browser. You should 
 
 To verify the end-to-end removal workflow:
 
-1. **Register and submit identity**: Create an account at http://localhost:3000/register, then submit your identity profile on the dashboard
+1. **Register and submit identity**: Create an account at http://localhost:3000/register, then submit your identity profile at http://localhost:3000/dashboard/profile
 2. **Run a scan**: Click "Start New Scan" and wait for the orchestrator to process it (watch the orchestrator logs)
 3. **View exposures**: Once the scan completes, you'll see discovered exposures on your dashboard
 4. **Authorize removal**: Click the "Remove" button on any active exposure
@@ -795,6 +799,43 @@ This software is proprietary and confidential. Unauthorized copying, distributio
 - Family accounts with shared dashboard
 - Privacy score trend charts
 - Email and SMS alerts
+
+---
+
+## Recent Updates
+
+### Frontend Modernization (Latest)
+
+**Tailwind CSS 4.1.8 Upgrade**
+- Migrated from Tailwind CSS 3 to 4.1.8 using the new PostCSS plugin architecture (`@tailwindcss/postcss`)
+- Updated configuration to minimal Tailwind v4 format in `tailwind.config.ts`
+- Added `postcss.config.mjs` with the new PostCSS plugin setup
+- Maintained all existing styles and design system with zero visual regression
+
+**Next.js 15.5.29**
+- Upgraded from Next.js 15 to 15.5.29 for stability improvements
+- Fixed hydration mismatch issues that caused blank page rendering
+- Enhanced server-side rendering stability
+
+**New Profile Page**
+- Added dedicated `/dashboard/profile` page for identity profile management
+- Clean, structured form for entering personal information (name, addresses, phones, emails, date of birth)
+- Dynamic field management: add/remove multiple previous addresses, phone numbers, and email addresses
+- Real-time form validation with helpful error messages
+- Visual security indicators explaining AES-256-GCM encryption
+- Improved user experience with loading states and success confirmations
+
+**Dependencies Updated**
+- React 19.1.0 and React DOM 19.1.0
+- TypeScript 5.8.3
+- lucide-react 0.511.0 for consistent iconography
+- clsx and tailwind-merge for utility class management
+
+**Bug Fixes**
+- Fixed hydration mismatch causing blank page in browser
+- Resolved PostCSS configuration issues for Tailwind v4
+- Corrected agent requirements and import structure
+- Suppressed dead-code warnings on Phase 2/3 scaffold code
 
 ---
 

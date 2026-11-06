@@ -146,21 +146,6 @@ pub async fn get_removal_request(
     Ok(request)
 }
 
-/// Returns a single removal request by ID (no customer check).
-/// Used by internal agent endpoints.
-pub async fn get_removal_request_by_id(
-    pool: &PgPool,
-    request_id: Uuid,
-) -> Result<Option<RemovalRequest>> {
-    let request = sqlx::query_as("SELECT * FROM removal_requests WHERE id = $1")
-        .bind(request_id)
-        .fetch_optional(pool)
-        .await
-        .context("get removal request by id")?;
-
-    Ok(request)
-}
-
 /// Updates removal request status and related metadata.
 /// Sets submitted_at when status=Submitted, verified_at when status=VerifiedRemoved.
 pub async fn update_removal_status(

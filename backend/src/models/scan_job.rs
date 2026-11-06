@@ -5,6 +5,7 @@ use uuid::Uuid;
 /// The current state of a scan job in its lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "scan_job_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ScanJobStatus {
     Queued,
     Running,

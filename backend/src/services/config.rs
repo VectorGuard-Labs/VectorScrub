@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub redis_url: String,
     pub jwt_secret: String,
     pub master_key_b64: String,
+    pub agent_api_key: String,
     pub port: u16,
     pub db_pool_size: u32,
     pub agent_service_url: String,
@@ -29,6 +30,7 @@ impl AppConfig {
             redis_url: env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
             jwt_secret: required("JWT_SECRET")?,
             master_key_b64: required("MASTER_ENCRYPTION_KEY")?,
+            agent_api_key: required("AGENT_API_KEY")?,
             port: env::var("PORT")
                 .unwrap_or_else(|_| "8080".into())
                 .parse()

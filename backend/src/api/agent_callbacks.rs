@@ -81,3 +81,46 @@ pub async fn record_exposure(
 
     Ok(StatusCode::CREATED)
 }
+
+#[derive(Debug, Deserialize)]
+pub struct GetIdentityRequest {
+    pub customer_id: Uuid,
+    pub identity_token: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct IdentityResponse {
+    pub full_name: String,
+    pub current_address: String,
+    pub previous_addresses: Vec<String>,
+    pub phone_numbers: Vec<String>,
+    pub email_addresses: Vec<String>,
+    pub date_of_birth: Option<String>,
+}
+
+/// POST /api/v1/internal/identity
+/// Decrypts and returns customer identity for scan processing
+pub async fn get_identity(
+    _auth: AgentAuth,
+    State(state): State<AppState>,
+    Json(req): Json<GetIdentityRequest>,
+) -> Result<Json<IdentityResponse>, (StatusCode, String)> {
+    use crate::crypto::MasterKey;
+    use crate::services::customer as customer_svc;
+
+    let master = MasterKey::from_base64(&state.config.master_key_b64)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let identity = customer_svc::load_cleartext_identity(&state.pool, &master, req.customer_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(IdentityResponse {
+        full_name: identity.full_name.clone(),
+        current_address: identity.current_address.clone(),
+        previous_addresses: identity.previous_addresses.clone(),
+        phone_numbers: identity.phone_numbers.clone(),
+        email_addresses: identity.email_addresses.clone(),
+        date_of_birth: identity.date_of_birth.clone(),
+    }))
+}

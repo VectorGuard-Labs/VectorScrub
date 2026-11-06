@@ -5,6 +5,7 @@ use uuid::Uuid;
 /// Category of exposed personal information.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "pii_category", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum PiiCategory {
     FullName,
     HomeAddress,
@@ -22,6 +23,7 @@ pub enum PiiCategory {
 /// Severity of the exposure finding.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, PartialOrd)]
 #[sqlx(type_name = "exposure_severity", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum ExposureSeverity {
     Low,
     Medium,

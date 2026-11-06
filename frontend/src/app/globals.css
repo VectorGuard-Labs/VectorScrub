@@ -1,7 +1,6 @@
 @import "tailwindcss";
 
-/* Tell Tailwind v4 where to scan for utility classes */
-@source "../../**/*.{ts,tsx}";
+@config "../../tailwind.config.ts";
 
 :root {
   --vs-teal: #0d9488;

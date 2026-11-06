@@ -118,8 +118,14 @@ export default function DashboardPage() {
         </div>
         <div className="flex items-center gap-4">
           <button
+            onClick={() => router.push("/dashboard/profile")}
+            className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
+          >
+            Identity
+          </button>
+          <button
             onClick={() => router.push("/dashboard/removals")}
-            className="text-teal-400 hover:text-teal-300 text-sm font-medium transition-colors"
+            className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
           >
             Removals
           </button>
