@@ -3,6 +3,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// Lifecycle state of a data removal request.
+/// Phase 2 — used when removal workflow is wired up.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "removal_status", rename_all = "snake_case")]
 pub enum RemovalStatus {
@@ -23,6 +25,7 @@ pub enum RemovalStatus {
 }
 
 /// A single data removal request targeting one exposure on one source.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RemovalRequest {
     pub id: Uuid,
@@ -47,6 +50,7 @@ pub struct RemovalRequest {
 
 /// Audit log entry for every action taken on a removal request.
 /// Append-only; never updated or deleted.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RemovalAuditEntry {
     pub id: Uuid,

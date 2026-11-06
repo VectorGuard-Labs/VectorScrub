@@ -68,6 +68,7 @@ pub fn encrypt(customer_key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Decrypt a blob produced by `encrypt`.
+#[allow(dead_code)]
 pub fn decrypt(customer_key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
     if blob.len() < 28 {
         // 12 nonce + 16 tag minimum
@@ -88,6 +89,7 @@ pub fn encrypt_str(customer_key: &[u8; 32], plaintext: &str) -> Result<Vec<u8>> 
 }
 
 /// Convenience: decrypt and return a UTF-8 string.
+#[allow(dead_code)]
 pub fn decrypt_str(customer_key: &[u8; 32], blob: &[u8]) -> Result<String> {
     let bytes = decrypt(customer_key, blob)?;
     String::from_utf8(bytes).context("Decrypted bytes are not valid UTF-8")

@@ -15,6 +15,7 @@ use crate::services::auth::{validate_token, Claims};
 
 /// Extractor that validates a Bearer JWT and provides the customer's UUID
 /// and subscription tier to route handlers.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AuthenticatedCustomer {
     pub id: Uuid,

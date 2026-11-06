@@ -109,6 +109,8 @@ pub async fn get_exposure_summary(pool: &PgPool, customer_id: Uuid) -> Result<Ex
 }
 
 /// Mark an exposure as removed (called when removal is verified).
+/// Phase 2 — wired up when removal workflow is complete.
+#[allow(dead_code)]
 pub async fn mark_removed(pool: &PgPool, exposure_id: Uuid, customer_id: Uuid) -> Result<()> {
     sqlx::query(
         "UPDATE exposures SET is_active = false, removed_at = $1 WHERE id = $2 AND customer_id = $3"

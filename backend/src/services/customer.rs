@@ -127,6 +127,8 @@ pub async fn save_identity(
 
 /// Load and decrypt an identity profile for internal use (e.g., before dispatching a scan job).
 /// The returned CleartextIdentity is zeroized on drop.
+/// Phase 1 — called by the agent identity endpoint (wired in Phase 1 completion).
+#[allow(dead_code)]
 pub async fn load_cleartext_identity(
     pool: &PgPool,
     master: &MasterKey,
@@ -161,6 +163,8 @@ pub async fn load_cleartext_identity(
 }
 
 /// Update a customer's privacy score based on current exposure data.
+/// Called after each completed scan job.
+#[allow(dead_code)]
 pub async fn update_privacy_score(pool: &PgPool, customer_id: Uuid, score: f32) -> Result<()> {
     sqlx::query(
         "UPDATE customers SET privacy_score = $1, updated_at = $2 WHERE id = $3",

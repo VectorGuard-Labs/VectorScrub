@@ -50,6 +50,7 @@ pub struct IdentityProfile {
 /// Cleartext identity — NEVER persisted, held in memory only during a scan.
 /// All fields are types that implement Zeroize. Dropped and zeroed automatically.
 /// customer_id stored as String because Uuid does not implement Zeroize.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Zeroize)]
 #[zeroize(drop)]
 pub struct CleartextIdentity {
