@@ -1,3 +1,3 @@
-from .agent import DiscoveryAgent
+from discovery.agent import DiscoveryAgent
 
 __all__ = ["DiscoveryAgent"]

@@ -2,15 +2,15 @@
 # Python 3.11+
 
 # LLM / AI orchestration
-langchain==0.3.25
-langchain-openai==0.3.17
-langchain-anthropic==0.3.15
-langgraph==0.4.8
-openai==1.82.1
-anthropic==0.51.0
+langchain==1.4.9
+langchain-openai==1.7.4
+langchain-anthropic==1.7.10
+langgraph==1.2.20
+openai==3.46.0
+anthropic==2.6.0
 
 # Web scraping & browser automation
-playwright==1.50.0
+playwright==1.64.1
 beautifulsoup4==4.12.3
 lxml==5.3.0
 httpx==0.28.1
@@ -18,23 +18,17 @@ aiohttp==3.11.11
 
 # Job queue
 redis==5.2.1
-rq==2.3.3
+rq==3.0.0
 
 # Data handling
 pydantic==2.11.4
-pydantic-settings==2.8.2
-
-# API calls back to Rust backend
-httpx==0.28.1
-
-# Structured output / JSON
-jsonschema==4.23.0
+pydantic-settings==2.8.1
 
 # Observability
-structlog==25.3.0
+structlog==26.1.0
 opentelemetry-sdk==1.33.0
 opentelemetry-exporter-otlp==1.33.0
 
 # Utilities
-python-dotenv==1.1.0
-tenacity==9.1.2
+python-dotenv==1.2.4
+tenacity==9.2.1

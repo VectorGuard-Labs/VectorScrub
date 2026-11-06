@@ -13,8 +13,8 @@ import httpx
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from ..shared.config import get_config
-from ..shared.models import DiscoveryResult, IdentityContext
+from shared.config import get_config
+from shared.models import DiscoveryResult, IdentityContext
 
 log = structlog.get_logger(__name__)
 

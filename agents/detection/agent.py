@@ -17,8 +17,8 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
-from ..shared.config import get_config
-from ..shared.models import (
+from shared.config import get_config
+from shared.models import (
     DetectionResult,
     DiscoveryResult,
     ExposureSeverity,

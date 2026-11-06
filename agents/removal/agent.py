@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import structlog
 
-from ..shared.models import DetectionResult, RemovalProcedure
+from shared.models import DetectionResult, RemovalProcedure
 
 log = structlog.get_logger(__name__)
 

@@ -1,3 +1,3 @@
-from .agent import MonitoringAgent
+from monitoring.agent import MonitoringAgent
 
 __all__ = ["MonitoringAgent"]

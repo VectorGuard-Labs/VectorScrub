@@ -17,12 +17,12 @@ import uuid
 import redis.asyncio as aioredis
 import structlog
 
-from ..detection import DetectionAgent
-from ..discovery import DiscoveryAgent
-from ..removal import RemovalAgent
-from ..shared.backend_client import BackendClient
-from ..shared.config import get_config
-from ..shared.models import IdentityContext, ScanJobPayload, ScanJobStatus
+from detection import DetectionAgent
+from discovery import DiscoveryAgent
+from removal import RemovalAgent
+from shared.backend_client import BackendClient
+from shared.config import get_config
+from shared.models import IdentityContext, ScanJobPayload, ScanJobStatus
 
 log = structlog.get_logger(__name__)
 

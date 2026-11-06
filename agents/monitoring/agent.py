@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import structlog
 
-from ..shared.backend_client import BackendClient
-from ..shared.models import IdentityContext
+from shared.backend_client import BackendClient
+from shared.models import IdentityContext
 
 log = structlog.get_logger(__name__)
 
@@ -34,7 +34,7 @@ class MonitoringAgent:
         Returns True if the record appears to have reappeared at the given URL.
         """
         import httpx
-        from ..discovery.agent import DiscoveryAgent
+        from discovery.agent import DiscoveryAgent  # noqa: F401 — available for future use
 
         headers = {"User-Agent": "Mozilla/5.0 (compatible; VectorScrubBot/1.0)"}
         try:

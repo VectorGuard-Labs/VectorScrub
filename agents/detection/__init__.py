@@ -1,3 +1,3 @@
-from .agent import DetectionAgent
+from detection.agent import DetectionAgent
 
 __all__ = ["DetectionAgent"]
