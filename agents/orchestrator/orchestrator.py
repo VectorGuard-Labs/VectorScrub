@@ -1,0 +1,162 @@
+"""
+VectorScrub AI Orchestrator
+Coordinates the full scan pipeline:
+  1. Pull job from Redis queue
+  2. Run Discovery Agent
+  3. Run Detection Agent on candidates
+  4. Record confirmed exposures via backend API
+  5. Prepare Removal Agent procedures
+  6. Update scan job status
+
+This is the main entry point for the Python agent layer.
+"""
+import asyncio
+import json
+import uuid
+
+import redis.asyncio as aioredis
+import structlog
+
+from ..detection import DetectionAgent
+from ..discovery import DiscoveryAgent
+from ..removal import RemovalAgent
+from ..shared.backend_client import BackendClient
+from ..shared.config import get_config
+from ..shared.models import IdentityContext, ScanJobPayload, ScanJobStatus
+
+log = structlog.get_logger(__name__)
+
+
+class Orchestrator:
+    def __init__(self) -> None:
+        self.cfg = get_config()
+        self.backend = BackendClient()
+        self.removal_agent = RemovalAgent()
+
+    async def process_job(self, payload: ScanJobPayload) -> None:
+        job_id = str(payload.job_id)
+        customer_id = str(payload.customer_id)
+
+        log.info("job_started", job_id=job_id, customer_id=customer_id, tier=payload.tier)
+
+        # Mark job as running
+        await self.backend.update_scan_status(job_id, ScanJobStatus.RUNNING)
+
+        try:
+            # Retrieve decrypted identity from backend using the identity token
+            identity = await self._fetch_identity(payload)
+
+            # Phase 1a: Discovery
+            discovery_agent = DiscoveryAgent(tier=payload.tier)
+            candidates = await discovery_agent.run(identity)
+
+            # Phase 1b: Detection
+            detection_agent = DetectionAgent()
+            confirmed_exposures = await detection_agent.run(candidates, identity)
+
+            # Record each confirmed exposure via backend API
+            for exposure in confirmed_exposures:
+                await self.backend.record_exposure(customer_id, job_id, exposure)
+
+            # Phase 2 prep: Identify removal procedures (stored for customer review)
+            removal_pairs = self.removal_agent.prepare_removal_requests(confirmed_exposures)
+            sources_with_procedures = sum(1 for _, p in removal_pairs if p is not None)
+
+            log.info(
+                "job_completed",
+                job_id=job_id,
+                candidates=len(candidates),
+                confirmed=len(confirmed_exposures),
+                removal_procedures_found=sources_with_procedures,
+            )
+
+            await self.backend.update_scan_status(
+                job_id,
+                ScanJobStatus.COMPLETED,
+                sources_completed=len(candidates),
+                exposures_found=len(confirmed_exposures),
+            )
+
+        except Exception as exc:
+            log.error("job_failed", job_id=job_id, error=str(exc), exc_info=True)
+            await self.backend.update_scan_status(
+                job_id,
+                ScanJobStatus.FAILED,
+                error_message=str(exc)[:500],
+            )
+
+    async def _fetch_identity(self, payload: ScanJobPayload) -> IdentityContext:
+        """
+        The Python agent does NOT decrypt PII itself.
+        It calls the Rust backend's internal identity endpoint,
+        which decrypts using the master key and returns minimal fields.
+        This keeps the master key out of the Python process entirely.
+        """
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{self.cfg.backend_api_url}/api/v1/internal/identity",
+                json={
+                    "customer_id": str(payload.customer_id),
+                    "identity_token": payload.identity_token,
+                },
+                headers={"X-Agent-Key": self.cfg.agent_api_key},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        return IdentityContext(
+            customer_id=payload.customer_id,
+            full_name=data.get("full_name", ""),
+            current_address=data.get("current_address", ""),
+            previous_addresses=data.get("previous_addresses", []),
+            phone_numbers=data.get("phone_numbers", []),
+            email_addresses=data.get("email_addresses", []),
+            date_of_birth=data.get("date_of_birth"),
+        )
+
+    async def run_worker(self) -> None:
+        """
+        Long-running worker loop. Blocks on Redis BRPOP and processes
+        scan jobs as they arrive.
+        """
+        redis_client = await aioredis.from_url(self.cfg.redis_url)
+        log.info("orchestrator_worker_started", queue=self.cfg.scan_queue_key)
+
+        while True:
+            try:
+                # BRPOP blocks until a job is available (5-second timeout for clean shutdown)
+                item = await redis_client.brpop(self.cfg.scan_queue_key, timeout=5)
+                if item is None:
+                    continue
+
+                _, raw = item
+                payload_data = json.loads(raw)
+                payload = ScanJobPayload(**payload_data)
+                await self.process_job(payload)
+
+            except asyncio.CancelledError:
+                log.info("orchestrator_worker_shutting_down")
+                break
+            except Exception as exc:
+                log.error("worker_loop_error", error=str(exc), exc_info=True)
+                await asyncio.sleep(2)
+
+        await redis_client.aclose()
+
+
+async def main() -> None:
+    import structlog
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer(),
+        ]
+    )
+    orchestrator = Orchestrator()
+    await orchestrator.run_worker()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

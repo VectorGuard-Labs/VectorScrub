@@ -1,0 +1,272 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  Shield,
+  Search,
+  AlertTriangle,
+  CheckCircle,
+  LogOut,
+  RefreshCw,
+  ExternalLink,
+} from "lucide-react";
+import {
+  getProfile,
+  getExposureSummary,
+  listExposures,
+  initiateSccan,
+} from "@/lib/api";
+import {
+  privacyScoreLabel,
+  severityColor,
+  formatDate,
+  piiCategoryLabel,
+} from "@/lib/utils";
+import type { CustomerProfile, ExposureSummary, Exposure } from "@/types";
+
+export default function DashboardPage() {
+  const router = useRouter();
+  const [profile, setProfile] = useState<CustomerProfile | null>(null);
+  const [summary, setSummary] = useState<ExposureSummary | null>(null);
+  const [exposures, setExposures] = useState<Exposure[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [scanLoading, setScanLoading] = useState(false);
+  const [scanMessage, setScanMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const token = localStorage.getItem("vs_token");
+    if (!token) {
+      router.push("/login");
+      return;
+    }
+    loadData();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function loadData() {
+    setLoading(true);
+    try {
+      const [p, s, e] = await Promise.all([
+        getProfile(),
+        getExposureSummary(),
+        listExposures(),
+      ]);
+      setProfile(p);
+      setSummary(s.summary);
+      setExposures(e.exposures);
+    } catch {
+      setError("Failed to load dashboard. Please try signing in again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleScan() {
+    setScanLoading(true);
+    setScanMessage("");
+    try {
+      const result = await initiateSccan();
+      setScanMessage(result.message);
+      setTimeout(loadData, 3000);
+    } catch (err: unknown) {
+      setScanMessage(err instanceof Error ? err.message : "Scan failed");
+    } finally {
+      setScanLoading(false);
+    }
+  }
+
+  function handleSignOut() {
+    localStorage.removeItem("vs_token");
+    router.push("/");
+  }
+
+  const scoreInfo = summary
+    ? privacyScoreLabel(summary.privacy_score)
+    : { label: "—", color: "text-gray-500" };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-gray-400 text-sm animate-pulse">
+          Loading your privacy dashboard…
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen">
+      {/* Top nav */}
+      <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Shield className="text-teal-400 w-5 h-5" aria-hidden="true" />
+          <span className="text-white font-bold">VectorScrub</span>
+        </div>
+        <div className="flex items-center gap-4">
+          <span className="text-gray-500 text-sm hidden sm:block">
+            {profile?.email}
+          </span>
+          <button
+            onClick={handleSignOut}
+            className="flex items-center gap-1.5 text-gray-400 hover:text-white text-sm transition-colors"
+            aria-label="Sign out"
+          >
+            <LogOut className="w-4 h-4" />
+            Sign out
+          </button>
+        </div>
+      </nav>
+
+      <main className="max-w-6xl mx-auto px-6 py-10">
+        {error && (
+          <div
+            role="alert"
+            className="bg-red-950 border border-red-800 text-red-300 rounded-lg px-4 py-3 mb-6 text-sm"
+          >
+            {error}
+          </div>
+        )}
+
+        {/* Header row */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-10">
+          <div>
+            <h1 className="text-2xl font-bold text-white mb-1">
+              Privacy Dashboard
+            </h1>
+            <p className="text-gray-400 text-sm">
+              {summary?.last_scan_at
+                ? `Last scan: ${formatDate(summary.last_scan_at)}`
+                : "No scans yet — run your first scan below."}
+            </p>
+          </div>
+          <button
+            onClick={handleScan}
+            disabled={scanLoading}
+            className="flex items-center gap-2 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
+          >
+            <RefreshCw
+              className={`w-4 h-4 ${scanLoading ? "animate-spin" : ""}`}
+              aria-hidden="true"
+            />
+            {scanLoading ? "Scanning…" : "Run Scan"}
+          </button>
+        </div>
+
+        {scanMessage && (
+          <div className="bg-teal-950 border border-teal-800 text-teal-300 rounded-lg px-4 py-3 mb-6 text-sm">
+            {scanMessage}
+          </div>
+        )}
+
+        {/* Summary cards */}
+        {summary && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-10">
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+              <div className={`text-3xl font-bold mb-1 ${scoreInfo.color}`}>
+                {Math.round(summary.privacy_score)}
+              </div>
+              <div className="text-gray-400 text-sm">Privacy Score</div>
+              <div className={`text-xs mt-1 ${scoreInfo.color}`}>
+                {scoreInfo.label}
+              </div>
+            </div>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+              <div className="text-3xl font-bold text-white mb-1">
+                {summary.active_exposures}
+              </div>
+              <div className="text-gray-400 text-sm">Active Exposures</div>
+            </div>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+              <div className="text-3xl font-bold text-green-400 mb-1">
+                {summary.removed_exposures}
+              </div>
+              <div className="text-gray-400 text-sm">Removed</div>
+            </div>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+              <div className="text-3xl font-bold text-red-400 mb-1">
+                {summary.critical_count + summary.high_count}
+              </div>
+              <div className="text-gray-400 text-sm">High/Critical</div>
+            </div>
+          </div>
+        )}
+
+        {/* Exposures list */}
+        <div>
+          <h2 className="text-lg font-semibold text-white mb-4">
+            Discovered Exposures
+          </h2>
+          {exposures.length === 0 ? (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
+              <Search
+                className="w-10 h-10 text-gray-600 mx-auto mb-3"
+                aria-hidden="true"
+              />
+              <p className="text-gray-400 mb-1">No exposures found yet.</p>
+              <p className="text-gray-600 text-sm">
+                Run a scan to discover where your information is exposed.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {exposures.map((exp) => (
+                <div
+                  key={exp.id}
+                  className="bg-gray-900 border border-gray-800 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center gap-4"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <span className="text-white font-medium text-sm">
+                        {exp.source_name}
+                      </span>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded-full border font-medium ${severityColor(
+                          exp.severity
+                        )}`}
+                      >
+                        {exp.severity}
+                      </span>
+                      <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full">
+                        {piiCategoryLabel(exp.pii_category)}
+                      </span>
+                    </div>
+                    <p className="text-gray-400 text-sm truncate">
+                      {exp.pii_summary}
+                    </p>
+                    <p className="text-gray-600 text-xs mt-1">
+                      Discovered {formatDate(exp.discovered_at)} · Confidence{" "}
+                      {Math.round(exp.confidence * 100)}%
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 flex-shrink-0">
+                    {exp.is_active ? (
+                      <span className="flex items-center gap-1 text-orange-400 text-xs">
+                        <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+                        Active
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1 text-green-400 text-xs">
+                        <CheckCircle className="w-3.5 h-3.5" aria-hidden="true" />
+                        Removed
+                      </span>
+                    )}
+                    <a
+                      href={exp.source_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-gray-500 hover:text-teal-400 transition-colors"
+                      aria-label={`View ${exp.source_name} listing`}
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                    </a>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  );
+}

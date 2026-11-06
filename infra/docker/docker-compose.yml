@@ -1,0 +1,88 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vectorscrub-postgres
+    environment:
+      POSTGRES_DB: vectorscrub
+      POSTGRES_USER: vectorscrub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_production}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vectorscrub"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: vectorscrub-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme_in_production}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: ../infra/docker/Dockerfile.backend
+    container_name: vectorscrub-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://vectorscrub:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/vectorscrub
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme_in_production}@redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  agents:
+    build:
+      context: ../../agents
+      dockerfile: ../infra/docker/Dockerfile.agents
+    container_name: vectorscrub-agents
+    depends_on:
+      - backend
+      - redis
+    environment:
+      BACKEND_API_URL: http://backend:8080
+      AGENT_API_KEY: ${AGENT_API_KEY}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme_in_production}@redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-openai}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: ../infra/docker/Dockerfile.frontend
+    container_name: vectorscrub-frontend
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: http://backend:8080
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

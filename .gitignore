@@ -1,0 +1,33 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Rust
+/backend/target/
+backend/Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+agents/.venv/
+agents/venv/
+agents/*.egg-info/
+agents/dist/
+agents/.pytest_cache/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp

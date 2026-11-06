@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+:root {
+  --vs-teal: #0d9488;
+  --vs-teal-light: #14b8a6;
+  --vs-dark: #030712;
+}
+
+body {
+  background-color: var(--vs-dark);
+}
+
+.gradient-brand {
+  background: linear-gradient(135deg, #0d9488 0%, #6366f1 100%);
+}
+
+.score-ring {
+  stroke-dasharray: 251;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 1s ease-in-out;
+}
