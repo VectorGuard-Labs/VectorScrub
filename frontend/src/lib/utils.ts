@@ -53,3 +53,34 @@ export function piiCategoryLabel(cat: string): string {
   };
   return labels[cat] ?? cat;
 }
+
+import type { RemovalStatus } from "@/types";
+
+export function removalStatusLabel(status: RemovalStatus): string {
+  const labels: Record<RemovalStatus, string> = {
+    authorized: "Authorized",
+    submitted: "In Progress",
+    acknowledged: "Acknowledged",
+    verified_removed: "Verified Removed",
+    rejected: "Rejected",
+    unverifiable: "Unverifiable",
+    reappeared: "Reappeared",
+  };
+  return labels[status];
+}
+
+export function removalStatusColor(status: RemovalStatus): string {
+  switch (status) {
+    case "verified_removed":
+      return "text-green-400 border-green-800 bg-green-950";
+    case "submitted":
+    case "acknowledged":
+      return "text-blue-400 border-blue-800 bg-blue-950";
+    case "authorized":
+      return "text-yellow-400 border-yellow-800 bg-yellow-950";
+    case "rejected":
+    case "unverifiable":
+    case "reappeared":
+      return "text-red-400 border-red-800 bg-red-950";
+  }
+}

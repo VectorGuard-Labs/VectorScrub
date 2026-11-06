@@ -89,3 +89,31 @@ export interface AuthResponse {
   token: string;
   customer: CustomerProfile;
 }
+
+export interface RemovalRequest {
+  id: string;
+  customer_id: string;
+  exposure_id: string;
+  source_name: string;
+  source_url: string;
+  status: RemovalStatus;
+  procedure_used: string;
+  confirmation_ref: string | null;
+  evidence_hash: string | null;
+  customer_authorized_at: string;
+  submitted_at: string | null;
+  verified_at: string | null;
+  next_check_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RemovalAuditEntry {
+  id: string;
+  removal_request_id: string;
+  customer_id: string;
+  action: string;
+  actor: string;
+  details: Record<string, unknown>;
+  recorded_at: string;
+}

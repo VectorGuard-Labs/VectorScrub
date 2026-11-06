@@ -52,7 +52,10 @@ class IdentityContext(BaseModel):
     Never logged or stored — zeroized after use.
     """
     customer_id: uuid.UUID
+    first_name: str = ""
+    last_name: str = ""
     full_name: str = ""
+    email: Optional[str] = None
     current_address: str = ""
     previous_addresses: list[str] = Field(default_factory=list)
     phone_numbers: list[str] = Field(default_factory=list)

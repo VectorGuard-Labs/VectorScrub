@@ -50,6 +50,14 @@ pub async fn record_exposure(
     Ok(exposure)
 }
 
+/// Retrieve a single exposure by ID.
+pub async fn get_exposure(pool: &PgPool, exposure_id: Uuid) -> Result<Option<Exposure>> {
+    Ok(sqlx::query_as::<_, Exposure>("SELECT * FROM exposures WHERE id = $1")
+        .bind(exposure_id)
+        .fetch_optional(pool)
+        .await?)
+}
+
 /// Retrieve all active exposures for a customer.
 pub async fn list_exposures(pool: &PgPool, customer_id: Uuid) -> Result<Vec<Exposure>> {
     Ok(sqlx::query_as::<_, Exposure>(

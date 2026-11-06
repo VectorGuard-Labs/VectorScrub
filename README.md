@@ -79,11 +79,11 @@ A detection agent analyzes each discovery candidate using a large language model
 
 **Critical security note:** Raw customer PII is never sent to an external LLM. The detection agent anonymizes identity fields into masked tokens (e.g., `J*** S***` for a name, `1** M*** St***` for an address) before passing anything to the model. Matching is done by reasoning about patterns, not by exposing real values.
 
-### 3. Automated Removal Request Preparation
-For each confirmed exposure, VectorScrub identifies the correct opt-out procedure for that specific data source — web form, email submission, or the California DROP API. It prepares a complete, authorized removal request. No request is ever submitted without explicit customer authorization.
+### 3. Automated Removal Request Submission
+For each confirmed exposure, VectorScrub identifies the correct opt-out procedure for that specific data source — web form, email submission, or the California DROP API. After explicit customer authorization, VectorScrub automatically submits removal requests using Playwright browser automation for web forms, capturing screenshots as evidence and extracting confirmation references.
 
 ### 4. Removal Tracking and Verification
-Every removal request is tracked through its full lifecycle: authorized → submitted → acknowledged → verified removed. VectorScrub distinguishes between these states clearly so customers always know the true status of their records — not just that a request was sent, but whether removal was actually confirmed.
+Every removal request is tracked through its full lifecycle: authorized → submitted → acknowledged → verified removed. VectorScrub distinguishes between these states clearly so customers always know the true status of their records — not just that a request was sent, but whether removal was actually confirmed. All actions are logged to an immutable, append-only audit trail enforced at the database level.
 
 ### 5. Continuous Monitoring
 After removals, VectorScrub continues to monitor sources on a scheduled basis. If a removed record reappears (which happens frequently as data brokers re-acquire information), an alert is sent and a new removal request is prepared automatically.
@@ -99,7 +99,7 @@ Customers see a live **Privacy Score** (0–100) that reflects their current exp
 Most people discover they have dozens of active exposures on their first scan. VectorScrub surfaces the full picture in a single dashboard rather than requiring customers to check each site manually.
 
 ### Get it removed — with proof
-VectorScrub prepares and submits opt-out requests to data brokers, tracks responses, and records evidence of verified removals. Customers see a clear before-and-after record, not just a promise that "we tried."
+VectorScrub prepares and submits opt-out requests to data brokers using intelligent browser automation. Every submission is captured with screenshot evidence (SHA-256 hashed for tamper-resistance), confirmation references are extracted, and all actions are logged to an immutable audit trail. Customers see a clear before-and-after record, not just a promise that "we tried."
 
 ### Stop it from coming back
 Data brokers regularly re-acquire and republish information even after opt-outs. Continuous monitoring and automatic re-removal means customers don't have to manage this cycle themselves.
@@ -128,7 +128,8 @@ Customer Identity Profile (encrypted)
             ▼
   ┌─────────────────────┐
   │   Orchestrator      │  Pulls scan jobs from Redis queue,
-  │                     │  coordinates agent pipeline
+  │                     │  coordinates agent pipeline, polls for
+  │                     │  authorized removal requests (dual workers)
   └────────┬────────────┘
            │
            ▼
@@ -148,6 +149,12 @@ Customer Identity Profile (encrypted)
   ┌─────────────────────┐
   │   Removal Agent     │  Looks up opt-out procedure for each
   │                     │  source, prepares authorized requests
+  └────────┬────────────┘
+           │  customer authorizes via dashboard
+           ▼
+  ┌─────────────────────┐
+  │  Removal Executor   │  Submits via Playwright (web forms),
+  │                     │  email, or DROP API; captures evidence
   └────────┬────────────┘
            │  (Phase 3)
            ▼
@@ -212,8 +219,9 @@ Security is the core architectural constraint, not an afterthought. Every design
 | PII at rest | AES-256-GCM encryption with a per-customer key derived from the master key via HMAC-SHA256. Each customer's ciphertext can only be decrypted with their derived key. |
 | Master key | Loaded once into the Rust process from an environment variable (or PyHSM in production). Never written to disk, never accessible to the Python agent layer. |
 | PII and LLMs | Raw customer values are never sent to any external LLM API. The detection agent receives only anonymized tokens (first letter + asterisks) for pattern matching. |
-| Removal authorization | No removal request is ever submitted to a data source without an explicit customer authorization recorded in the database. The agent prepares; the customer approves. |
-| Audit trail | Every action taken on a removal request is recorded in an append-only audit log. The database enforces `NO UPDATE` and `NO DELETE` rules on the audit table. |
+| Removal authorization | No removal request is ever submitted to a data source without an explicit customer authorization recorded in the database with timestamp. The agent prepares; the customer approves; the executor submits. |
+| Audit trail | Every action taken on a removal request is recorded in an append-only `removal_audit_log` table. PostgreSQL rules enforce `NO UPDATE` and `NO DELETE` at the database level, making the log immutable and tamper-evident. |
+| Evidence collection | Screenshot evidence captured during web form submission is SHA-256 hashed. The hash is stored in the database; screenshots can be stored in encrypted S3 for retrieval. Hashes prove authenticity without storing large binary data. |
 | Model training | Customer PII is never used to fine-tune or train any AI model — not VectorScrub's, not a provider's. |
 | Agent authentication | Rust internal endpoints accept only the `X-Agent-Key` header, not customer JWTs. The agent key is never exposed to the frontend. |
 | Tenant isolation | Per-customer encryption keys mean a compromise of one customer's encrypted data does not affect others. |
@@ -242,7 +250,8 @@ VectorScrub/
 ├── backend/                          # Rust API service
 │   ├── Cargo.toml                    # Dependencies and build config
 │   ├── migrations/
-│   │   └── 0001_initial_schema.sql   # Full PostgreSQL schema
+│   │   ├── 0001_initial_schema.sql   # Full PostgreSQL schema
+│   │   └── 0002_removal_requests_index.sql  # Performance index for removal polling
 │   └── src/
 │       ├── main.rs                   # Entry point, server setup
 │       ├── db.rs                     # Shared AppState (pool, redis, config)
@@ -252,6 +261,7 @@ VectorScrub/
 │       │   ├── customers.rs          # GET /me, POST /me/identity
 │       │   ├── scans.rs              # POST /scans, GET /scans, GET /scans/:id
 │       │   ├── exposures.rs          # GET /exposures, GET /exposures/summary
+│       │   ├── removals.rs           # GET /removal-requests, POST /removal-requests/:id/authorize
 │       │   └── agent_callbacks.rs    # Internal: PUT /internal/scan/status, POST /internal/exposures
 │       ├── crypto/
 │       │   └── mod.rs                # AES-256-GCM encrypt/decrypt, key derivation
@@ -268,6 +278,7 @@ VectorScrub/
 │       │   ├── config.rs             # AppConfig from env vars
 │       │   ├── customer.rs           # Account creation, identity encrypt/decrypt
 │       │   ├── exposure.rs           # Record exposures, privacy score calculation
+│       │   ├── removal.rs            # Removal request lifecycle, audit log
 │       │   └── scan.rs               # Scan job lifecycle, Redis dispatch
 │       └── jobs/
 │           └── scheduler.rs          # Scheduled rescan dispatcher (Phase 3)
@@ -283,7 +294,8 @@ VectorScrub/
 │   ├── detection/
 │   │   └── agent.py                  # LLM-based PII classification (anonymized tokens)
 │   ├── removal/
-│   │   └── agent.py                  # Opt-out procedure registry + request preparation
+│   │   ├── agent.py                  # Opt-out procedure registry + request preparation
+│   │   └── executor.py               # Playwright automation, email/DROP submission
 │   ├── monitoring/
 │   │   └── agent.py                  # Reappearance detection for removed records
 │   └── orchestrator/
@@ -300,7 +312,9 @@ VectorScrub/
 │       │   ├── page.tsx              # Public landing page
 │       │   ├── register/page.tsx     # Account creation
 │       │   ├── login/page.tsx        # Sign in
-│       │   └── dashboard/page.tsx    # Privacy dashboard (authenticated)
+│       │   ├── dashboard/
+│       │   │   ├── page.tsx          # Privacy dashboard (authenticated)
+│       │   │   └── removals/page.tsx # Removal request tracking
 │       ├── lib/
 │       │   ├── api.ts                # Typed API client (all endpoints)
 │       │   └── utils.ts              # Privacy score labels, severity colors, formatters
@@ -336,6 +350,7 @@ Before setting up VectorScrub locally, make sure you have the following installe
 | Docker | 24+ | PostgreSQL and Redis |
 | Docker Compose | 2.20+ | Multi-service orchestration |
 | OpenSSL | Any | Key generation script |
+| Chromium | Latest | Playwright browser automation (installed via `playwright install chromium`) |
 
 **Install Rust** (if not already installed):
 ```bash
@@ -408,6 +423,8 @@ On first run, Cargo downloads and compiles all dependencies (this takes a few mi
 {"level":"INFO","message":"VectorScrub API listening on 0.0.0.0:8080"}
 ```
 
+**Note**: Phase 2 added a new migration (`0002_removal_requests_index.sql`) for removal request polling performance. If you're upgrading from Phase 1, this migration will be applied automatically on the next backend start.
+
 ### Step 6 — Start the Python agent worker
 
 Open a new terminal tab for this.
@@ -417,13 +434,18 @@ cd agents
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Install Playwright browsers for removal automation
+playwright install chromium
+
 python -m orchestrator.orchestrator
 ```
 
-The worker connects to Redis and blocks waiting for scan jobs:
+The worker connects to Redis and blocks waiting for scan jobs. It now runs two concurrent loops: one for scan jobs, one for removal execution:
 
 ```
 {"event":"orchestrator_worker_started","queue":"vectorscrub:scan_jobs"}
+{"event":"removal_worker_started"}
 ```
 
 ### Step 7 — Start the frontend
@@ -437,6 +459,23 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) in your browser. You should see the VectorScrub landing page.
+
+### Step 8 — Test the full removal workflow (optional)
+
+To verify the end-to-end removal workflow:
+
+1. **Register and submit identity**: Create an account at http://localhost:3000/register, then submit your identity profile on the dashboard
+2. **Run a scan**: Click "Start New Scan" and wait for the orchestrator to process it (watch the orchestrator logs)
+3. **View exposures**: Once the scan completes, you'll see discovered exposures on your dashboard
+4. **Authorize removal**: Click the "Remove" button on any active exposure
+5. **Watch orchestrator logs**: The removal worker polls every 60 seconds. You'll see:
+   ```
+   {"event":"processing_removals","count":1}
+   {"event":"submit_web_form","opt_out_url":"https://..."}
+   {"event":"web_form_submitted","confirmation_ref":"...","evidence_hash":"..."}
+   ```
+6. **View removal status**: Navigate to the "Removals" page to see the status change from `authorized` → `submitted`
+7. **Check audit trail**: Each action is logged to `removal_audit_log` with actor and timestamp
 
 ---
 
@@ -485,7 +524,7 @@ cargo build --release
 cd agents
 source .venv/bin/activate
 
-# Run the orchestrator worker
+# Run the orchestrator worker (runs both scan and removal workers)
 python -m orchestrator.orchestrator
 
 # Run individual agents in isolation for testing
@@ -497,13 +536,34 @@ import uuid
 
 identity = IdentityContext(
     customer_id=uuid.uuid4(),
+    first_name='Jane',
+    last_name='Smith',
     full_name='Jane Smith',
+    email='jane@example.com',
     current_address='123 Main Street, Los Angeles, CA',
     email_addresses=['jane@example.com'],
     phone_numbers=['555-123-4567'],
 )
 results = asyncio.run(DiscoveryAgent(tier='personal').run(identity))
 print(f'Found {len(results)} candidates')
+"
+
+# Test removal executor (without submitting)
+python -c "
+import asyncio
+from removal.executor import RemovalExecutor
+from removal.agent import RemovalAgent
+from shared.models import IdentityContext
+import uuid
+
+executor = RemovalExecutor()
+agent = RemovalAgent()
+
+# Get opt-out procedure for a known source
+procedure = agent.get_procedure('spokeo.com')
+print(f'Procedure type: {procedure.procedure_type}')
+print(f'Opt-out URL: {procedure.opt_out_url}')
+print(f'Estimated days: {procedure.estimated_days}')
 "
 ```
 
@@ -569,12 +629,23 @@ All endpoints are prefixed with `/api/v1`. Customer endpoints require a `Bearer`
 | `GET` | `/exposures` | JWT | List all exposures (active and removed) for the authenticated customer. |
 | `GET` | `/exposures/summary` | JWT | Aggregated summary: counts by severity, privacy score, affected sources, last scan date. |
 
+### Removal Requests
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| `GET` | `/removal-requests` | JWT | List all removal requests for the authenticated customer. |
+| `POST` | `/removal-requests/:exposure_id/authorize` | JWT | Authorize a removal request for a specific exposure. Creates audit trail entry. |
+| `GET` | `/removal-requests/:id` | JWT | Get a specific removal request with full audit log. |
+
 ### Internal Agent Endpoints
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | `PUT` | `/internal/scan/status` | Agent key | Update scan job progress (called by the orchestrator). |
 | `POST` | `/internal/exposures` | Agent key | Record a confirmed exposure found by the detection agent. |
+| `GET` | `/internal/removal-requests` | Agent key | Poll for authorized removal requests ready for execution. |
+| `PUT` | `/internal/removal-requests/:id/status` | Agent key | Update removal request status after submission. |
+| `POST` | `/internal/removal-requests/:id/audit` | Agent key | Record an audit log entry for a removal request. |
 
 ---
 
@@ -603,7 +674,7 @@ A customer with no active exposures scores 100. Each critical exposure (e.g., fu
 
 ## MVP Roadmap
 
-### Phase 1 — Find My Information ✅ Built
+### Phase 1 — Find My Information ✅ Complete
 
 - Customer account creation and authentication
 - Encrypted identity profile submission
@@ -612,14 +683,19 @@ A customer with no active exposures scores 100. Each critical exposure (e.g., fu
 - Exposure dashboard with privacy score
 - Scan job lifecycle management
 
-### Phase 2 — Remove My Information (Next)
+### Phase 2 — Remove My Information ✅ Complete
 
+- Customer authorization workflow with database audit trail
 - Opt-out form submission via Playwright browser automation
-- Email-based opt-out for sources that require it
-- California DROP API integration for 600+ brokers (California residents)
-- Removal request status tracking (submitted → acknowledged → verified)
-- Evidence collection (screenshot hashes, confirmation references)
-- Before/after exposure reports
+- Generic web form detection and field population
+- Screenshot capture and SHA-256 evidence hashing
+- Confirmation reference extraction from success pages
+- Removal request status tracking (authorized → submitted → verified_removed)
+- Dual-worker orchestrator (scans + removal jobs in parallel)
+- Immutable append-only audit log (enforced by PostgreSQL rules)
+- Removal tracking dashboard showing all request statuses
+- Email-based opt-out (stub for Phase 3 completion)
+- California DROP API integration (stub for Phase 3 completion)
 
 ### Phase 3 — Keep Me Protected (Roadmap)
 
@@ -694,6 +770,31 @@ VectorScrub is currently in active private development under VectorGuard Labs. I
 Copyright © 2026 VectorGuard Labs. All rights reserved.
 
 This software is proprietary and confidential. Unauthorized copying, distribution, or use of this software, in whole or in part, is strictly prohibited without express written permission from VectorGuard Labs.
+
+---
+
+## What's New in Phase 2
+
+**Phase 2 is now complete.** VectorScrub can now automatically remove your information from data brokers, not just find it.
+
+### Key Features Added:
+- **Customer Authorization Workflow**: Click "Remove" on any exposure to authorize removal with database audit trail
+- **Automated Form Submission**: Playwright browser automation fills out opt-out forms and captures screenshots as evidence
+- **Evidence Collection**: SHA-256 hashed screenshots and extracted confirmation references prove removal was submitted
+- **Status Tracking**: Real-time updates from `authorized` → `submitted` → `verified_removed`
+- **Dual-Worker Architecture**: Orchestrator runs scan jobs and removal jobs concurrently in parallel
+- **Immutable Audit Log**: Every action logged to append-only table with PostgreSQL enforcement
+- **Removal Dashboard**: Dedicated `/dashboard/removals` page shows all request statuses, confirmation refs, and verification dates
+- **Generic Form Detection**: MVP supports common web form patterns; site-specific handlers coming in Phase 3
+
+### What's Next (Phase 3):
+- Email-based opt-out completion (currently stubbed)
+- California DROP API integration (currently stubbed)
+- Scheduled monitoring for reappearance
+- Automatic re-removal when records come back
+- Family accounts with shared dashboard
+- Privacy score trend charts
+- Email and SMS alerts
 
 ---
 

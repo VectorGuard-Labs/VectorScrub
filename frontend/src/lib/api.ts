@@ -7,6 +7,8 @@ import type {
   CustomerProfile,
   Exposure,
   ExposureSummary,
+  RemovalAuditEntry,
+  RemovalRequest,
   ScanJob,
 } from "@/types";
 
@@ -117,6 +119,37 @@ export async function getExposureSummary(): Promise<{
   summary: ExposureSummary;
 }> {
   const res = await fetch(`${BASE}/exposures/summary`, {
+    headers: authHeaders(),
+  });
+  return handleResponse(res);
+}
+
+// Removal Requests
+export async function listRemovalRequests(): Promise<{
+  requests: RemovalRequest[];
+}> {
+  const res = await fetch(`${BASE}/removal-requests`, {
+    headers: authHeaders(),
+  });
+  return handleResponse(res);
+}
+
+export async function authorizeRemoval(exposureId: string): Promise<{
+  request: RemovalRequest;
+  message: string;
+}> {
+  const res = await fetch(`${BASE}/removal-requests/${exposureId}/authorize`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handleResponse(res);
+}
+
+export async function getRemovalRequest(requestId: string): Promise<{
+  request: RemovalRequest;
+  audit_log: RemovalAuditEntry[];
+}> {
+  const res = await fetch(`${BASE}/removal-requests/${requestId}`, {
     headers: authHeaders(),
   });
   return handleResponse(res);

@@ -19,7 +19,7 @@ import structlog
 
 from detection import DetectionAgent
 from discovery import DiscoveryAgent
-from removal import RemovalAgent
+from removal import RemovalAgent, RemovalExecutor
 from shared.backend_client import BackendClient
 from shared.config import get_config
 from shared.models import IdentityContext, ScanJobPayload, ScanJobStatus
@@ -32,6 +32,7 @@ class Orchestrator:
         self.cfg = get_config()
         self.backend = BackendClient()
         self.removal_agent = RemovalAgent()
+        self.removal_executor = RemovalExecutor()
 
     async def process_job(self, payload: ScanJobPayload) -> None:
         job_id = str(payload.job_id)
@@ -145,6 +146,114 @@ class Orchestrator:
 
         await redis_client.aclose()
 
+    async def process_removal_jobs(self) -> None:
+        """
+        Poll for authorized removal requests and execute them.
+        Runs continuously alongside the scan worker.
+        """
+        log.info("removal_worker_started")
+
+        while True:
+            try:
+                # Fetch pending removals from backend
+                pending = await self.backend.get_pending_removals()
+
+                if not pending:
+                    await asyncio.sleep(60)  # Poll every 60 seconds
+                    continue
+
+                log.info("processing_removals", count=len(pending))
+
+                for request in pending:
+                    request_id = request["id"]
+                    customer_id = request["customer_id"]
+                    source_name = request["source_name"]
+                    source_url = request["source_url"]
+
+                    # Get procedure from removal_agent
+                    procedure = self.removal_agent.get_procedure(source_name)
+                    if not procedure:
+                        log.warning("no_procedure", source=source_name, request_id=request_id)
+                        await self.backend.record_removal_audit(
+                            removal_request_id=request_id,
+                            customer_id=customer_id,
+                            action="skipped",
+                            actor="removal_executor",
+                            details={"error": "No removal procedure found for source"},
+                        )
+                        continue
+
+                    # Fetch decrypted identity from backend
+                    identity = await self._fetch_identity_for_customer(customer_id)
+
+                    # Execute removal
+                    result = await self.removal_executor.submit_removal_request(
+                        removal_request_id=request_id,
+                        customer_id=customer_id,
+                        procedure=procedure,
+                        identity=identity,
+                        source_url=source_url,
+                    )
+
+                    # Update backend status
+                    await self.backend.update_removal_status(
+                        removal_request_id=request_id,
+                        status=result["status"],
+                        confirmation_ref=result.get("confirmation_ref"),
+                        evidence_hash=result.get("evidence_hash"),
+                        next_check_days=procedure.estimated_days if result["status"] == "submitted" else None,
+                    )
+
+                    # Log to audit trail
+                    await self.backend.record_removal_audit(
+                        removal_request_id=request_id,
+                        customer_id=customer_id,
+                        action=result["status"],
+                        actor="removal_executor",
+                        details={
+                            "procedure_type": procedure.procedure_type,
+                            "error": result.get("error"),
+                            "confirmation_ref": result.get("confirmation_ref"),
+                        },
+                    )
+
+                await asyncio.sleep(60)  # Poll every 60 seconds
+
+            except asyncio.CancelledError:
+                log.info("removal_worker_shutting_down")
+                break
+            except Exception as exc:
+                log.error("removal_loop_error", error=str(exc), exc_info=True)
+                await asyncio.sleep(5)
+
+    async def _fetch_identity_for_customer(self, customer_id: str) -> IdentityContext:
+        """
+        Fetch decrypted identity for a customer by customer_id.
+        Used by removal worker to get PII for form submission.
+        """
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{self.cfg.backend_api_url}/api/v1/internal/customers/{customer_id}/identity",
+                headers={"X-Agent-Key": self.cfg.agent_api_key},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        return IdentityContext(
+            customer_id=uuid.UUID(customer_id),
+            first_name=data.get("first_name", ""),
+            last_name=data.get("last_name", ""),
+            full_name=data.get("full_name", ""),
+            email=data.get("email"),
+            current_address=data.get("current_address", ""),
+            previous_addresses=data.get("previous_addresses", []),
+            phone_numbers=data.get("phone_numbers", []),
+            email_addresses=data.get("email_addresses", []),
+            date_of_birth=data.get("date_of_birth"),
+        )
+
 
 async def main() -> None:
     import structlog
@@ -155,7 +264,12 @@ async def main() -> None:
         ]
     )
     orchestrator = Orchestrator()
-    await orchestrator.run_worker()
+
+    # Run both scan worker and removal worker concurrently
+    await asyncio.gather(
+        orchestrator.run_worker(),
+        orchestrator.process_removal_jobs(),
+    )
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ import {
   getExposureSummary,
   listExposures,
   initiateSccan,
+  authorizeRemoval,
 } from "@/lib/api";
 import {
   privacyScoreLabel,
@@ -81,6 +82,18 @@ export default function DashboardPage() {
     router.push("/");
   }
 
+  async function handleAuthorizeRemoval(exposureId: string) {
+    if (!confirm("Authorize removal of this exposure?")) return;
+
+    try {
+      const result = await authorizeRemoval(exposureId);
+      setScanMessage(result.message);
+      await loadData();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Authorization failed");
+    }
+  }
+
   const scoreInfo = summary
     ? privacyScoreLabel(summary.privacy_score)
     : { label: "—", color: "text-gray-500" };
@@ -104,6 +117,12 @@ export default function DashboardPage() {
           <span className="text-white font-bold">VectorScrub</span>
         </div>
         <div className="flex items-center gap-4">
+          <button
+            onClick={() => router.push("/dashboard/removals")}
+            className="text-teal-400 hover:text-teal-300 text-sm font-medium transition-colors"
+          >
+            Removals
+          </button>
           <span className="text-gray-500 text-sm hidden sm:block">
             {profile?.email}
           </span>
@@ -241,10 +260,18 @@ export default function DashboardPage() {
                   </div>
                   <div className="flex items-center gap-3 flex-shrink-0">
                     {exp.is_active ? (
-                      <span className="flex items-center gap-1 text-orange-400 text-xs">
-                        <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
-                        Active
-                      </span>
+                      <>
+                        <span className="flex items-center gap-1 text-orange-400 text-xs">
+                          <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+                          Active
+                        </span>
+                        <button
+                          onClick={() => handleAuthorizeRemoval(exp.id)}
+                          className="text-teal-400 hover:text-teal-300 text-xs font-medium transition-colors"
+                        >
+                          Remove
+                        </button>
+                      </>
                     ) : (
                       <span className="flex items-center gap-1 text-green-400 text-xs">
                         <CheckCircle className="w-3.5 h-3.5" aria-hidden="true" />
