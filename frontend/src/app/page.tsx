@@ -264,7 +264,7 @@ export default function LandingPage() {
       {/* Footer */}
       <footer className="px-6 py-6 border-t border-gray-800 text-center">
         <p className="text-gray-600 text-xs">
-          © {new Date().getFullYear()} VectorGuard Labs. All rights reserved.
+          © 2026 VectorGuard Labs. All rights reserved.
           &nbsp;·&nbsp;
           <Link href="/privacy" className="hover:text-gray-400 transition-colors">Privacy Policy</Link>
           &nbsp;·&nbsp;
