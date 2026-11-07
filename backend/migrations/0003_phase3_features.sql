@@ -57,8 +57,3 @@ ADD COLUMN last_monitored_at TIMESTAMPTZ;
 CREATE INDEX idx_exposures_monitoring
 ON exposures(customer_id, last_monitored_at)
 WHERE is_active = false;
-
--- Index for privacy score history queries (last 30/90/365 days)
-CREATE INDEX idx_privacy_score_recent
-ON privacy_score_history(customer_id, recorded_at DESC)
-WHERE recorded_at > NOW() - INTERVAL '1 year';
