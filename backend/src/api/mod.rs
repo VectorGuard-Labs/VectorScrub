@@ -1,16 +1,19 @@
 use axum::{
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 
 use crate::db::AppState;
 
+mod agent_callbacks;
 mod auth;
 mod customers;
 mod exposures;
+mod family;
+mod notifications;
+mod privacy_score;
 mod removals;
 mod scans;
-mod agent_callbacks;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -27,6 +30,18 @@ pub fn router(state: AppState) -> Router {
         // Exposures
         .route("/exposures", get(exposures::list))
         .route("/exposures/summary", get(exposures::summary))
+        // Privacy score history
+        .route("/privacy-score/history", get(privacy_score::get_history))
+        // Family account management
+        .route("/family/members", post(family::add_member))
+        .route("/family/members", get(family::list_members))
+        .route("/family/members/:member_id", delete(family::remove_member))
+        .route("/family/stats", get(family::get_stats))
+        // Notifications and alerts
+        .route("/notifications/preferences", get(notifications::get_preferences))
+        .route("/notifications/preferences", put(notifications::update_preferences))
+        .route("/notifications/alerts", get(notifications::get_alerts))
+        .route("/notifications/alerts/:id/read", post(notifications::mark_read))
         // Removal requests
         .route("/removal-requests", get(removals::list_requests))
         .route("/removal-requests/:exposure_id/authorize", post(removals::authorize))

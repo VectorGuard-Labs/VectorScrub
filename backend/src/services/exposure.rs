@@ -4,6 +4,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::models::exposure::{Exposure, ExposureSeverity, ExposureSummary, PiiCategory};
+use crate::services::{notification as notification_svc, privacy_score as score_svc};
 
 /// Insert a new exposure discovered by the detection agent.
 pub async fn record_exposure(
@@ -46,6 +47,16 @@ pub async fn record_exposure(
     .bind(now)
     .fetch_one(pool)
     .await?;
+
+    // Send alert for new exposure (fire and forget)
+    let severity_str = format!("{:?}", severity).to_lowercase();
+    let _ = notification_svc::alert_new_exposure(
+        pool,
+        customer_id,
+        source_name,
+        &severity_str,
+    )
+    .await;
 
     Ok(exposure)
 }
@@ -128,5 +139,45 @@ pub async fn mark_removed(pool: &PgPool, exposure_id: Uuid, customer_id: Uuid) -
     .bind(customer_id)
     .execute(pool)
     .await?;
+
+    // Update privacy score and record snapshot
+    update_privacy_score(pool, customer_id).await?;
+
+    Ok(())
+}
+
+/// Update customer's privacy score and record a historical snapshot.
+/// Called after exposure changes (new exposures found, removals verified, reappearances).
+pub async fn update_privacy_score(pool: &PgPool, customer_id: Uuid) -> Result<()> {
+    // Get current exposure summary with computed score
+    let summary = get_exposure_summary(pool, customer_id).await?;
+
+    // Update customer's privacy_score field
+    sqlx::query(
+        "UPDATE customers SET privacy_score = $1, updated_at = NOW() WHERE id = $2"
+    )
+    .bind(summary.privacy_score)
+    .bind(customer_id)
+    .execute(pool)
+    .await?;
+
+    // Record snapshot to history
+    score_svc::record_snapshot(
+        pool,
+        customer_id,
+        summary.privacy_score,
+        summary.critical_count as i32,
+        summary.high_count as i32,
+        summary.medium_count as i32,
+        summary.low_count as i32,
+    )
+    .await?;
+
+    tracing::info!(
+        customer_id = %customer_id,
+        privacy_score = summary.privacy_score,
+        "Privacy score updated"
+    );
+
     Ok(())
 }

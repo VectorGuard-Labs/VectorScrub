@@ -19,6 +19,7 @@ import structlog
 
 from detection import DetectionAgent
 from discovery import DiscoveryAgent
+from monitoring.agent import MonitoringAgent
 from removal import RemovalAgent, RemovalExecutor
 from shared.backend_client import BackendClient
 from shared.config import get_config
@@ -33,6 +34,7 @@ class Orchestrator:
         self.backend = BackendClient()
         self.removal_agent = RemovalAgent()
         self.removal_executor = RemovalExecutor()
+        self.monitoring_agent = MonitoringAgent()
 
     async def process_job(self, payload: ScanJobPayload) -> None:
         job_id = str(payload.job_id)
@@ -254,6 +256,41 @@ class Orchestrator:
             date_of_birth=data.get("date_of_birth"),
         )
 
+    async def process_monitoring_jobs(self) -> None:
+        """
+        Periodically check removed exposures for reappearance.
+        Tier-based frequency: Premium/Family (weekly), Personal (monthly).
+        """
+        log.info("monitoring_worker_started")
+
+        while True:
+            try:
+                # Fetch removed exposures due for monitoring check
+                # This would require a backend endpoint to query exposures where:
+                # - is_active = false (removed)
+                # - monitoring_enabled = true for the customer
+                # - last_monitored_at is NULL or > frequency interval
+
+                # For now, we'll poll every hour and check exposures
+                # In production, the backend should provide an endpoint like:
+                # GET /internal/exposures/due-for-monitoring
+
+                # Placeholder: sleep for monitoring interval
+                # Premium/Family: check weekly, Personal: check monthly
+                await asyncio.sleep(3600)  # Check every hour for due exposures
+
+                log.debug("monitoring_check_cycle")
+
+                # TODO: Add backend endpoint and integrate full monitoring workflow
+                # For now, this is a scaffold for Phase 3
+
+            except asyncio.CancelledError:
+                log.info("monitoring_worker_shutting_down")
+                break
+            except Exception as exc:
+                log.error("monitoring_loop_error", error=str(exc), exc_info=True)
+                await asyncio.sleep(60)
+
 
 async def main() -> None:
     import structlog
@@ -265,10 +302,11 @@ async def main() -> None:
     )
     orchestrator = Orchestrator()
 
-    # Run both scan worker and removal worker concurrently
+    # Run scan worker, removal worker, and monitoring worker concurrently
     await asyncio.gather(
         orchestrator.run_worker(),
         orchestrator.process_removal_jobs(),
+        orchestrator.process_monitoring_jobs(),
     )
 
 

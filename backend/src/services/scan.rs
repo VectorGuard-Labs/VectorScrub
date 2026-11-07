@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::models::customer::SubscriptionTier;
 use crate::models::scan_job::{ScanJob, ScanJobPayload, ScanJobStatus};
+use crate::services::exposure as exposure_svc;
 
 const SCAN_QUEUE_KEY: &str = "vectorscrub:scan_jobs";
 
@@ -124,6 +125,14 @@ pub async fn update_scan_status(
     let completed_at = matches!(status, ScanJobStatus::Completed | ScanJobStatus::Failed)
         .then(OffsetDateTime::now_utc);
 
+    // Get customer_id for privacy score update
+    let customer_id: Uuid = sqlx::query_scalar(
+        "SELECT customer_id FROM scan_jobs WHERE id = $1"
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await?;
+
     sqlx::query(
         r#"
         UPDATE scan_jobs SET
@@ -146,6 +155,11 @@ pub async fn update_scan_status(
     .bind(job_id)
     .execute(pool)
     .await?;
+
+    // Update privacy score and record snapshot when scan completes
+    if status == ScanJobStatus::Completed {
+        exposure_svc::update_privacy_score(pool, customer_id).await?;
+    }
 
     Ok(())
 }

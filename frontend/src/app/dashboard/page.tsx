@@ -25,6 +25,7 @@ import {
   piiCategoryLabel,
 } from "@/lib/utils";
 import type { CustomerProfile, ExposureSummary, Exposure } from "@/types";
+import PrivacyScoreChart from "@/components/PrivacyScoreChart";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -129,6 +130,20 @@ export default function DashboardPage() {
           >
             Removals
           </button>
+          <button
+            onClick={() => router.push("/dashboard/history")}
+            className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
+          >
+            History
+          </button>
+          {profile?.subscription_tier === "family" && (
+            <button
+              onClick={() => router.push("/dashboard/family")}
+              className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
+            >
+              Family
+            </button>
+          )}
           <span className="text-gray-500 text-sm hidden sm:block">
             {profile?.email}
           </span>
@@ -216,6 +231,11 @@ export default function DashboardPage() {
             </div>
           </div>
         )}
+
+        {/* Privacy Score Trend Charts */}
+        <div className="mb-10">
+          <PrivacyScoreChart />
+        </div>
 
         {/* Exposures list */}
         <div>

@@ -18,8 +18,8 @@ class AgentConfig(BaseSettings):
     anthropic_api_key: str = ""
 
     # Default model for classification and reasoning tasks
-    default_llm_provider: str = "openai"  # "openai" | "anthropic"
-    default_llm_model: str = "gpt-4o-mini"
+    default_llm_provider: str = "anthropic"  # "openai" | "anthropic"
+    default_llm_model: str = "claude-3-5-sonnet-20241022"
 
     # Redis
     redis_url: str = "redis://127.0.0.1:6379"
@@ -32,6 +32,20 @@ class AgentConfig(BaseSettings):
 
     # PII safety: never log or transmit raw PII beyond what's minimally needed
     pii_log_masking: bool = True
+
+    # SMTP configuration for email-based opt-out requests
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_tls: bool = True
+
+    # California DROP API configuration
+    drop_api_url: str = "https://privacy.ca.gov/api/v1"
+    drop_api_key: str = ""
+    drop_api_secret: str = ""
+    drop_enable_sandbox: bool = True  # Use sandbox environment for testing
 
 
 @lru_cache

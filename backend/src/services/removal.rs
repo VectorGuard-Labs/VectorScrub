@@ -1,4 +1,5 @@
 use crate::models::removal_request::{RemovalAuditEntry, RemovalRequest, RemovalStatus};
+use crate::services::notification as notification_svc;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -198,6 +199,31 @@ pub async fn update_removal_status(
         .execute(pool)
         .await
         .context("mark exposure inactive")?;
+    }
+
+    // Send alerts for specific status changes
+    match new_status {
+        RemovalStatus::Rejected | RemovalStatus::Unverifiable => {
+            // Removal failed - send alert
+            let error = format!("Status: {:?}", new_status);
+            let _ = notification_svc::alert_removal_failed(
+                pool,
+                request.customer_id,
+                &request.source_name,
+                &error,
+            )
+            .await;
+        }
+        RemovalStatus::Reappeared => {
+            // Data reappeared - send alert
+            let _ = notification_svc::alert_reappearance(
+                pool,
+                request.customer_id,
+                &request.source_name,
+            )
+            .await;
+        }
+        _ => {}
     }
 
     Ok(request)

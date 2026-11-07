@@ -154,3 +154,82 @@ export async function getRemovalRequest(requestId: string): Promise<{
   });
   return handleResponse(res);
 }
+
+// Privacy Score History
+export interface PrivacyScoreHistoryEntry {
+  id: string;
+  customer_id: string;
+  score: number;
+  critical_count: number;
+  high_count: number;
+  medium_count: number;
+  low_count: number;
+  total_exposures: number;
+  recorded_at: string;
+}
+
+export interface PrivacyScoreTrend {
+  current_score: number;
+  previous_score: number | null;
+  score_delta: number | null;
+  history: PrivacyScoreHistoryEntry[];
+}
+
+export async function getPrivacyScoreHistory(days: number = 30): Promise<PrivacyScoreTrend> {
+  const res = await fetch(`${BASE}/privacy-score/history?days=${days}`, {
+    headers: authHeaders(),
+  });
+  return handleResponse(res);
+}
+
+// Family Management
+export interface FamilyMember {
+  id: string;
+  member_email: string;
+  member_name: string | null;
+  privacy_score: number | null;
+  role: string;
+  invited_at: string | null;
+  accepted_at: string | null;
+}
+
+export interface FamilyStats {
+  total_members: number;
+  average_privacy_score: number;
+  total_exposures: number;
+  members: FamilyMember[];
+}
+
+export async function addFamilyMember(memberEmail: string): Promise<{ id: string; message: string }> {
+  const res = await fetch(`${BASE}/family/members`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ member_email: memberEmail }),
+  });
+  return handleResponse(res);
+}
+
+export async function removeFamilyMember(memberId: string): Promise<void> {
+  const res = await fetch(`${BASE}/family/members/${memberId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+}
+
+export async function listFamilyMembers(): Promise<FamilyMember[]> {
+  const res = await fetch(`${BASE}/family/members`, {
+    headers: authHeaders(),
+  });
+  return handleResponse(res);
+}
+
+export async function getFamilyStats(): Promise<FamilyStats> {
+  const res = await fetch(`${BASE}/family/stats`, {
+    headers: authHeaders(),
+  });
+  return handleResponse(res);
+}

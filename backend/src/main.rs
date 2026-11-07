@@ -53,10 +53,23 @@ async fn main() -> anyhow::Result<()> {
         .context("Failed to create Redis client")?;
 
     let state = AppState {
-        pool,
-        redis: redis_client,
+        pool: pool.clone(),
+        redis: redis_client.clone(),
         config: config.clone(),
     };
+
+    // Spawn scheduled rescan dispatcher as a background task
+    let scheduler_pool = pool.clone();
+    let scheduler_redis = redis_client.clone();
+    let scheduler_master_key_b64 = config.master_key_b64.clone();
+    tokio::spawn(async move {
+        jobs::scheduler::run_scheduled_rescans(
+            scheduler_pool,
+            scheduler_redis,
+            scheduler_master_key_b64,
+        )
+        .await;
+    });
 
     let app = Router::new()
         .nest("/api/v1", api::router(state.clone()));

@@ -2,5 +2,8 @@ pub mod auth;
 pub mod config;
 pub mod customer;
 pub mod exposure;
+pub mod family;
+pub mod notification;
+pub mod privacy_score;
 pub mod removal;
 pub mod scan;

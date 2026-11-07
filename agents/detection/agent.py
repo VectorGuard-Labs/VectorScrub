@@ -142,21 +142,15 @@ Anonymized identity tokens to match against:
 
 Analyze and respond with JSON only.
 """
-        # TEMPORARY: Mock detection for development - bypasses LLM API issues
-        # TODO: Fix Anthropic API key/model configuration
         try:
-            log.info("detection_mock_mode", source=candidate.source_name,
-                    note="Using mock detection - LLM bypassed for testing")
-            classification = LLMClassification(
-                is_match=True,
-                confidence=0.85,
-                pii_categories=["full_name", "home_address"],
-                severity="high",
-                pii_summary=f"Name and address found on {candidate.source_name}",
-                reasoning="Mock detection result for development testing"
-            )
+            structured_llm = self._llm.with_structured_output(LLMClassification)
+            classification = await structured_llm.ainvoke([
+                SystemMessage(content=DETECTION_SYSTEM_PROMPT),
+                HumanMessage(content=user_message),
+            ])
+            log.info("detection_classified", source=candidate.source_name, is_match=classification.is_match)
         except Exception as exc:
-            log.error("detection_mock_error", source=candidate.source_name, error=str(exc))
+            log.error("detection_llm_error", source=candidate.source_name, error=str(exc))
             return None
 
         if not classification.is_match or classification.confidence < 0.5:
