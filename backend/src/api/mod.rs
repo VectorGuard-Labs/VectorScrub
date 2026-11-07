@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/removal-requests/:id", get(removals::get_request))
         // Internal: agent callbacks (require agent API key, not customer JWT)
         .route("/internal/identity", post(agent_callbacks::get_identity))
+        .route("/internal/customers/:customer_id/identity", get(agent_callbacks::get_identity_by_customer_id))
         .route("/internal/scan/status", put(agent_callbacks::update_scan_status))
         .route("/internal/exposures", post(agent_callbacks::record_exposure))
         .route("/internal/removal-requests", get(removals::list_pending))

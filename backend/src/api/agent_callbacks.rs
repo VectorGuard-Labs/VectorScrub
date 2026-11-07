@@ -124,3 +124,30 @@ pub async fn get_identity(
         date_of_birth: identity.date_of_birth.clone(),
     }))
 }
+
+/// GET /api/v1/internal/customers/:customer_id/identity
+/// Decrypts and returns customer identity by customer_id only (for removal worker)
+pub async fn get_identity_by_customer_id(
+    _auth: AgentAuth,
+    State(state): State<AppState>,
+    axum::extract::Path(customer_id): axum::extract::Path<Uuid>,
+) -> Result<Json<IdentityResponse>, (StatusCode, String)> {
+    use crate::crypto::MasterKey;
+    use crate::services::customer as customer_svc;
+
+    let master = MasterKey::from_base64(&state.config.master_key_b64)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let identity = customer_svc::load_cleartext_identity(&state.pool, &master, customer_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(IdentityResponse {
+        full_name: identity.full_name.clone(),
+        current_address: identity.current_address.clone(),
+        previous_addresses: identity.previous_addresses.clone(),
+        phone_numbers: identity.phone_numbers.clone(),
+        email_addresses: identity.email_addresses.clone(),
+        date_of_birth: identity.date_of_birth.clone(),
+    }))
+}
