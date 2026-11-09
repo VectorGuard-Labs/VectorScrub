@@ -1,0 +1,52 @@
+{
+  "family": "vectorscrub-agents",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/vectorscrub-agents-task-role",
+  "containerDefinitions": [
+    {
+      "name": "agents",
+      "image": "<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/vectorscrub/agents:latest",
+      "essential": true,
+      "environment": [
+        {
+          "name": "DEFAULT_LLM_PROVIDER",
+          "value": "anthropic"
+        },
+        {
+          "name": "DEFAULT_LLM_MODEL",
+          "value": "claude-3-5-sonnet-20241022"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "BACKEND_API_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:vectorscrub/production/backend-url"
+        },
+        {
+          "name": "REDIS_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:vectorscrub/production/redis-url"
+        },
+        {
+          "name": "AGENT_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:vectorscrub/production/agent-api-key"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:vectorscrub/production/anthropic-api-key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/vectorscrub-agents",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

@@ -248,7 +248,7 @@ Security is the core architectural constraint, not an afterthought. Every design
 | **Free**     | $0     | Initial exposure scan, privacy score, exposure report |
 | **Personal** | $8.99  | Automated removal requests, continuous monitoring, monthly rescan, alerts |
 | **Premium**  | $14.99 | Everything in Personal + expanded source coverage, priority removal, weekly rescan, evidence collection |
-| **Family**   | $24.99 | Everything in Premium + up to 5 family members, shared dashboard |
+| **Family**   | $24.99 | Everything in Premium + up to 4 family members, shared dashboard |
 
 Free accounts are limited to one scan per 24 hours. Paid accounts can initiate multiple scans per day and have access to a wider range of data sources depending on tier.
 
@@ -817,7 +817,7 @@ A customer with no active exposures scores 100. Each critical exposure (e.g., fu
 
 - ✅ Scheduled rescans (weekly for Premium/Family, monthly for Personal)
 - ✅ Reappearance detection and automatic re-removal
-- ✅ Family accounts (up to 5 members under one subscription)
+- ✅ Family accounts (up to 4 members under one subscription)
 - ✅ Privacy score trend charts with historical analysis
 - ✅ Email and SMS alert system with customizable preferences
 - ✅ Exposure history timeline with event tracking
@@ -1072,7 +1072,7 @@ This software is proprietary and confidential. Unauthorized copying, distributio
 - Automatic fallback for non-California residents
 
 **Family Account Support:**
-- Up to 5 family members per Family plan subscription
+- Up to 4 family members per Family plan subscription
 - Owner/member role system with granular permissions
 - Individual privacy scores for each family member
 - Aggregate statistics across all members
@@ -1217,7 +1217,7 @@ This software is proprietary and confidential. Unauthorized copying, distributio
 **What Changed:**
 - **Continuous monitoring**: Scheduled rescans every 7-30 days based on subscription tier
 - **Reappearance detection**: Automatic alerts when removed records come back online
-- **Family protection**: Up to 5 family members under one Family plan subscription
+- **Family protection**: Up to 4 family members under one Family plan subscription
 - **Privacy insights**: Historical trend charts showing score changes over time
 - **Multi-channel removal**: Email opt-out and California DROP API integration now complete
 - **Alert system**: Customizable email/SMS notifications for key events

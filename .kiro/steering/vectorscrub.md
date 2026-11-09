@@ -38,7 +38,7 @@ Tagline: "Your personal information. Under your control."
 | Free     | $0       | One scan/24h, exposure report only            |
 | Personal | $8.99    | Automated removal, continuous monitoring      |
 | Premium  | $14.99   | Expanded sources, weekly rescan, evidence     |
-| Family   | $24.99   | Up to 5 members                               |
+| Family   | $24.99   | Up to 4 members                               |
 
 ## Running Locally
 See README.md for setup instructions.

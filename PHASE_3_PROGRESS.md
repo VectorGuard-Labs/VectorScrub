@@ -11,7 +11,7 @@ Phase 3 "Keep Me Protected" adds scheduled monitoring, reappearance detection, f
 **File:** `backend/migrations/0003_phase3_features.sql`
 
 **Tables Added:**
-- `family_members` - Family account associations (up to 5 members per family plan)
+- `family_members` - Family account associations (up to 4 members per family plan)
 - `privacy_score_history` - Historical privacy score snapshots for trend analysis
 - `notification_preferences` - Email/SMS alert preferences per customer
 
@@ -187,7 +187,7 @@ drop_enable_sandbox: bool = True
 - `backend/src/api/family.rs` - API endpoints
 
 **Features:**
-- Add up to 5 family members per family plan
+- Add up to 4 family members per family plan
 - Remove family members
 - List all family members with privacy scores
 - Aggregate family statistics

@@ -12,7 +12,7 @@ Phase 3 "Keep Me Protected" is fully implemented with scheduled monitoring, reap
 **File:** `backend/migrations/0003_phase3_features.sql`
 
 **Tables:**
-- `family_members` - Family associations (up to 5 members)
+- `family_members` - Family associations (up to 4 members)
 - `privacy_score_history` - Score snapshots over time
 - `notification_preferences` - Email/SMS alert settings
 
@@ -349,7 +349,7 @@ DROP_ENABLE_SANDBOX=true
 ✅ Delta calculations
 
 ### Family Protection
-✅ Up to 5 members
+✅ Up to 4 members
 ✅ Shared dashboard
 ✅ Aggregate statistics
 ✅ Individual privacy scores

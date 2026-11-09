@@ -368,7 +368,7 @@ Before production:
 All Phase 3 backend infrastructure is operational. The system can now:
 - Automatically rescan customers on schedule
 - Detect when removed data reappears
-- Manage family accounts with up to 5 members
+- Manage family accounts with up to 4 members
 - Track privacy score trends over time
 - Send alerts for new exposures, failures, and reappearances
 - Remove data via email and California DROP

@@ -1,4 +1,4 @@
-export type SubscriptionTier = "free" | "personal" | "premium" | "family";
+export type SubscriptionTier = "free" | "personal" | "premium";
 
 export type PiiCategory =
   | "full_name"

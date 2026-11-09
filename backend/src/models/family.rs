@@ -3,7 +3,7 @@ use sqlx::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Family member association for family plan subscriptions.
+/// Family member association for premium plan subscriptions.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct FamilyMember {
     pub id: Uuid,

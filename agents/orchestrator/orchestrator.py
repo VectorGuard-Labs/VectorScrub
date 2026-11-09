@@ -12,6 +12,7 @@ This is the main entry point for the Python agent layer.
 """
 import asyncio
 import json
+import logging
 import uuid
 
 import redis.asyncio as aioredis
@@ -47,7 +48,7 @@ retry_transient = retry(
         ConnectionError,
         TimeoutError,
     )),
-    before_sleep=before_sleep_log(log, structlog.INFO),
+    before_sleep=before_sleep_log(log, logging.INFO),
     reraise=True,
 )
 
@@ -285,7 +286,7 @@ class Orchestrator:
     async def process_monitoring_jobs(self) -> None:
         """
         Periodically check removed exposures for reappearance.
-        Tier-based frequency: Premium/Family (weekly), Personal (monthly).
+        Tier-based frequency: Premium (weekly), Personal (monthly).
         """
         log.info("monitoring_worker_started")
 

@@ -210,14 +210,6 @@ export default function DashboardPage() {
           >
             History
           </button>
-          {profile?.subscription_tier === "family" && (
-            <button
-              onClick={() => router.push("/dashboard/family")}
-              className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
-            >
-              Family
-            </button>
-          )}
           <span className="text-gray-500 text-sm hidden sm:block">
             {profile?.email}
           </span>

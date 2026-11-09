@@ -18,9 +18,11 @@ from shared.models import DiscoveryResult, IdentityContext
 
 log = structlog.get_logger(__name__)
 
-# Supported data broker sources — MVP tier
-# Each entry: (source_name, search_url_template, selectors)
+# Supported data broker sources
+# FREE tier: 4 brokers (acquisition tier)
+# PERSONAL/PREMIUM/FAMILY: All 15 brokers
 DISCOVERY_SOURCES = [
+    # FREE tier brokers (4)
     {
         "name": "spokeo.com",
         "url": "https://www.spokeo.com/search?q={name}",
@@ -37,8 +39,24 @@ DISCOVERY_SOURCES = [
         "tier": "free",
     },
     {
-        "name": "intelius.com",
-        "url": "https://www.intelius.com/people-search/",
+        "name": "truepeoplesearch.com",
+        "url": "https://www.truepeoplesearch.com/results?name={name}",
+        "tier": "free",
+    },
+    # PERSONAL+ brokers (11 additional, 15 total)
+    {
+        "name": "fastpeoplesearch.com",
+        "url": "https://www.fastpeoplesearch.com/name/{name_slug}",
+        "tier": "personal",
+    },
+    {
+        "name": "familytreenow.com",
+        "url": "https://www.familytreenow.com/search/genealogy/results?first={first}&last={last}",
+        "tier": "personal",
+    },
+    {
+        "name": "nuwber.com",
+        "url": "https://nuwber.com/search?name={name}",
         "tier": "personal",
     },
     {
@@ -47,23 +65,44 @@ DISCOVERY_SOURCES = [
         "tier": "personal",
     },
     {
-        "name": "instantcheckmate.com",
-        "url": "https://www.instantcheckmate.com/people/{name_slug}/",
-        "tier": "premium",
-    },
-    {
-        "name": "radaris.com",
-        "url": "https://radaris.com/p/{name_slug}/",
-        "tier": "premium",
+        "name": "intelius.com",
+        "url": "https://www.intelius.com/people-search/",
+        "tier": "personal",
     },
     {
         "name": "mylife.com",
         "url": "https://www.mylife.com/people-search/name/{name_slug}/",
         "tier": "personal",
     },
+    {
+        "name": "ussearch.com",
+        "url": "https://www.ussearch.com/search/people?firstname={first}&lastname={last}",
+        "tier": "personal",
+    },
+    {
+        "name": "peoplelooker.com",
+        "url": "https://www.peoplelooker.com/results?fn={first}&ln={last}",
+        "tier": "personal",
+    },
+    {
+        "name": "ownerly.com",
+        "url": "https://www.ownerly.com/people/{name_slug}",
+        "tier": "personal",
+    },
+    {
+        "name": "instantcheckmate.com",
+        "url": "https://www.instantcheckmate.com/people/{name_slug}/",
+        "tier": "personal",
+    },
+    {
+        "name": "radaris.com",
+        "url": "https://radaris.com/p/{name_slug}/",
+        "tier": "personal",
+    },
 ]
 
-TIER_ORDER = {"free": 0, "personal": 1, "premium": 2, "family": 2}
+# Tier hierarchy: free gets 4 brokers, all paid tiers get all 15
+TIER_ORDER = {"free": 0, "personal": 1, "premium": 1}
 
 
 class DiscoveryAgent:
@@ -87,12 +126,20 @@ class DiscoveryAgent:
         """Generate (source_name, url) pairs for this customer."""
         name_slug = identity.full_name.lower().replace(" ", "-")
         name_query = identity.full_name.replace(" ", "+")
+
+        # Extract first and last name for sources that need them separately
+        name_parts = identity.full_name.split()
+        first_name = name_parts[0] if name_parts else ""
+        last_name = name_parts[-1] if len(name_parts) > 1 else ""
+
         results = []
         for source in self._sources_for_tier():
             url = (
                 source["url"]
                 .replace("{name}", name_query)
                 .replace("{name_slug}", name_slug)
+                .replace("{first}", first_name)
+                .replace("{last}", last_name)
             )
             results.append((source["name"], url))
         return results

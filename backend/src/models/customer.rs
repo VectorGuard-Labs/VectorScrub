@@ -12,7 +12,6 @@ pub enum SubscriptionTier {
     Free,
     Personal,
     Premium,
-    Family,
 }
 
 /// A VectorScrub customer account.

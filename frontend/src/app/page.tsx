@@ -44,8 +44,13 @@ const plans = [
   {
     name: "Free",
     price: "$0",
-    description: "See your exposure",
-    features: ["Initial scan report", "Exposure summary", "Privacy score"],
+    description: "Acquisition tier",
+    features: [
+      "4 data brokers",
+      "Limited initial scan",
+      "Limited opt-out submissions",
+      "One identity",
+    ],
     cta: "Get Started",
     highlight: false,
   },
@@ -53,13 +58,13 @@ const plans = [
     name: "Personal",
     price: "$8.99",
     per: "/month",
-    description: "Remove and monitor",
+    description: "Main subscription",
     features: [
-      "Everything in Free",
-      "Automated removal requests",
-      "Continuous monitoring",
-      "Exposure alerts",
-      "Monthly rescan",
+      "All 15 individual brokers",
+      "Automated removal tracking",
+      "Monthly rescans",
+      "Reappearance alerts",
+      "One identity",
     ],
     cta: "Start Personal",
     highlight: true,
@@ -68,29 +73,16 @@ const plans = [
     name: "Premium",
     price: "$14.99",
     per: "/month",
-    description: "Maximum protection",
+    description: "Best protection",
     features: [
-      "Everything in Personal",
-      "Expanded source coverage",
-      "Priority removal handling",
-      "Weekly rescan",
-      "Detailed removal evidence",
+      "All 15 brokers + California DROP",
+      "Weekly rescans",
+      "Priority removal tracking",
+      "Historical privacy-score trends",
+      "More frequent exposure alerts",
+      "One identity",
     ],
     cta: "Start Premium",
-    highlight: false,
-  },
-  {
-    name: "Family",
-    price: "$24.99",
-    per: "/month",
-    description: "Protect everyone",
-    features: [
-      "Everything in Premium",
-      "Up to 5 family members",
-      "Shared privacy dashboard",
-      "Family exposure alerts",
-    ],
-    cta: "Start Family",
     highlight: false,
   },
 ];
@@ -198,7 +190,7 @@ export default function LandingPage() {
           <p className="text-gray-400 text-center mb-16 max-w-xl mx-auto">
             Start free. Upgrade when you&apos;re ready to start removing.
           </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {plans.map((plan) => (
               <div
                 key={plan.name}

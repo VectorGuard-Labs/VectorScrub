@@ -12,7 +12,7 @@ use crate::models::family::{AddFamilyMemberRequest, FamilyMemberResponse, Family
 use crate::services::family as family_svc;
 
 /// POST /api/v1/family/members
-/// Add a family member to the authenticated customer's family plan.
+/// Add a family member to the authenticated customer's premium plan.
 pub async fn add_member(
     auth: AuthenticatedCustomer,
     State(state): State<AppState>,
@@ -35,7 +35,7 @@ pub async fn add_member(
 }
 
 /// DELETE /api/v1/family/members/:member_id
-/// Remove a family member from the authenticated customer's family plan.
+/// Remove a family member from the authenticated customer's premium plan.
 pub async fn remove_member(
     auth: AuthenticatedCustomer,
     State(state): State<AppState>,

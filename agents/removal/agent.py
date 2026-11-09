@@ -67,6 +67,99 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
         requires_id_verification=True,
         estimated_days=30,
     ),
+    "truthfinder.com": RemovalProcedure(
+        source_name="truthfinder.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.truthfinder.com/opt-out/",
+        instructions="Search for your record, submit opt-out request with record URL. "
+                     "Identity verification required (government ID). Processing takes 5-7 business days.",
+        requires_id_verification=True,
+        estimated_days=7,
+    ),
+    "instantcheckmate.com": RemovalProcedure(
+        source_name="instantcheckmate.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.instantcheckmate.com/opt-out/",
+        instructions="Submit opt-out form with full name and state. "
+                     "Verification email sent. Removal typically completes within 48 hours.",
+        requires_id_verification=False,
+        estimated_days=2,
+    ),
+    "radaris.com": RemovalProcedure(
+        source_name="radaris.com",
+        procedure_type="web_form",
+        opt_out_url="https://radaris.com/page/how-to-remove",
+        instructions="Search for your listing, copy the URL, submit opt-out form. "
+                     "Verify via email. Removal completes within 24-72 hours.",
+        requires_id_verification=False,
+        estimated_days=3,
+    ),
+    "truepeoplesearch.com": RemovalProcedure(
+        source_name="truepeoplesearch.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.truepeoplesearch.com/removal",
+        instructions="Search for your record, click 'Remove', enter email for verification link. "
+                     "Complete removal via verification email. Removal typically within 72 hours.",
+        requires_id_verification=False,
+        estimated_days=3,
+    ),
+    "fastpeoplesearch.com": RemovalProcedure(
+        source_name="fastpeoplesearch.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.fastpeoplesearch.com/removal",
+        instructions="Search for your listing, select it, submit removal request. "
+                     "Verify via email. Removal completes within 24 hours.",
+        requires_id_verification=False,
+        estimated_days=1,
+    ),
+    "familytreenow.com": RemovalProcedure(
+        source_name="familytreenow.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.familytreenow.com/optout",
+        instructions="Search for your record, copy the URL, submit opt-out form with email. "
+                     "Verify via email confirmation. Removal within 48 hours.",
+        requires_id_verification=False,
+        estimated_days=2,
+    ),
+    "nuwber.com": RemovalProcedure(
+        source_name="nuwber.com",
+        procedure_type="web_form",
+        opt_out_url="https://nuwber.com/removal/link",
+        instructions="Search for your record, request removal, verify phone number or email. "
+                     "Complete CAPTCHA verification. Removal within 24-72 hours.",
+        requires_id_verification=False,
+        estimated_days=3,
+    ),
+    "ussearch.com": RemovalProcedure(
+        source_name="ussearch.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.ussearch.com/opt-out",
+        instructions="Part of PeopleConnect network (same as PeopleFinder). "
+                     "May be covered by PeopleFinder removal. If not, search for your record "
+                     "and submit direct opt-out form. Verify via email.",
+        requires_id_verification=False,
+        estimated_days=7,
+    ),
+    "peoplelooker.com": RemovalProcedure(
+        source_name="peoplelooker.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.peoplelooker.com/opt-out",
+        instructions="Owned by BeenVerified. May be covered by BeenVerified removal. "
+                     "If not, search for your listing, submit opt-out request with email verification. "
+                     "Removal within 48-72 hours.",
+        requires_id_verification=False,
+        estimated_days=3,
+    ),
+    "ownerly.com": RemovalProcedure(
+        source_name="ownerly.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.ownerly.com/opt-out",
+        instructions="Owned by BeenVerified. May be covered by BeenVerified removal. "
+                     "If not, submit opt-out form with property address and email. "
+                     "Focus on property records. Verify via email.",
+        requires_id_verification=False,
+        estimated_days=5,
+    ),
     # California DROP platform (batch submission for 600+ brokers)
     "ca-drop": RemovalProcedure(
         source_name="California DROP Platform",

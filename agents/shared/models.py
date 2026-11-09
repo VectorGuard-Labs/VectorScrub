@@ -42,7 +42,7 @@ class ScanJobPayload(BaseModel):
     job_id: uuid.UUID
     customer_id: uuid.UUID
     identity_token: str
-    tier: str  # free | personal | premium | family
+    tier: str  # free | personal | premium
 
 
 class IdentityContext(BaseModel):
