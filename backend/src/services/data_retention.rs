@@ -81,12 +81,10 @@ impl DataRetentionService {
 
         let result = sqlx::query!(
             r#"
-            UPDATE customers
-            SET updated_at = NOW()
+            SELECT id
+            FROM customers
             WHERE last_scan_at < $1
               AND is_active = true
-              AND warned_inactive = false
-            RETURNING id
             "#,
             warning_date
         )
@@ -232,7 +230,7 @@ impl DataRetentionService {
             r#"
             DELETE FROM exposures
             WHERE is_active = false
-              AND updated_at < $1
+              AND removed_at < $1
             "#,
             cutoff_date
         )
@@ -260,7 +258,7 @@ impl DataRetentionService {
         let result = sqlx::query!(
             r#"
             DELETE FROM scan_jobs
-            WHERE created_at < $1
+            WHERE queued_at < $1
             "#,
             cutoff_date
         )

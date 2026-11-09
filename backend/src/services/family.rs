@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::models::customer::{Customer, SubscriptionTier};
 use crate::models::family::{FamilyMember, FamilyMemberResponse, FamilyStats};
 
-const MAX_FAMILY_MEMBERS: usize = 5;
+const MAX_FAMILY_MEMBERS: usize = 4;
 
 /// Add a family member to a family plan.
 /// Requires owner to have 'family' subscription tier.

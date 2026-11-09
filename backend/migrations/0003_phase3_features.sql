@@ -1,7 +1,7 @@
 -- Phase 3: Keep Me Protected
 -- Migration 0003 — scheduled monitoring, family accounts, privacy score trends, alerts
 
--- Family member associations (up to 5 members per family plan)
+-- Family member associations (up to 4 members per family plan)
 CREATE TABLE family_members (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     owner_id        UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
