@@ -6,10 +6,12 @@ use axum::{
 use crate::db::AppState;
 
 mod agent_callbacks;
-mod auth;
+pub mod auth;
+mod csrf;
 mod customers;
 mod exposures;
 mod family;
+mod metrics;
 mod notifications;
 mod privacy_score;
 mod removals;
@@ -17,6 +19,10 @@ mod scans;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        // Metrics (Prometheus)
+        .route("/metrics", get(metrics::get_metrics))
+        // CSRF token
+        .route("/csrf-token", get(csrf::get_csrf_token))
         // Auth
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))

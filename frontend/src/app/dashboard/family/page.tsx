@@ -22,7 +22,8 @@ import {
   getProfile,
 } from "@/lib/api";
 import { privacyScoreLabel } from "@/lib/utils";
-import type { FamilyStats, FamilyMember, CustomerProfile } from "@/lib/api";
+import type { FamilyStats, FamilyMember } from "@/lib/api";
+import type { CustomerProfile } from "@/types";
 
 export default function FamilyPage() {
   const router = useRouter();

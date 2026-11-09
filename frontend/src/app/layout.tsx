@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import ErrorBoundary from "@/components/ErrorBoundary";
 
 export const metadata: Metadata = {
   title: "VectorScrub — Your personal information. Under your control.",
@@ -15,7 +16,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-screen bg-gray-950 text-gray-100 antialiased">
-        {children}
+        <ErrorBoundary>{children}</ErrorBoundary>
       </body>
     </html>
   );

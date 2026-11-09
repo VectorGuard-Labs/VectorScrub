@@ -16,6 +16,14 @@ import uuid
 
 import redis.asyncio as aioredis
 import structlog
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
+import httpx
 
 from detection import DetectionAgent
 from discovery import DiscoveryAgent
@@ -26,6 +34,22 @@ from shared.config import get_config
 from shared.models import IdentityContext, ScanJobPayload, ScanJobStatus
 
 log = structlog.get_logger(__name__)
+
+
+# Retry decorator for transient network/timeout errors
+retry_transient = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((
+        httpx.TimeoutException,
+        httpx.NetworkError,
+        httpx.ConnectError,
+        ConnectionError,
+        TimeoutError,
+    )),
+    before_sleep=before_sleep_log(log, structlog.INFO),
+    reraise=True,
+)
 
 
 class Orchestrator:
@@ -88,15 +112,16 @@ class Orchestrator:
                 error_message=str(exc)[:500],
             )
 
+    @retry_transient
     async def _fetch_identity(self, payload: ScanJobPayload) -> IdentityContext:
         """
         The Python agent does NOT decrypt PII itself.
         It calls the Rust backend's internal identity endpoint,
         which decrypts using the master key and returns minimal fields.
         This keeps the master key out of the Python process entirely.
-        """
-        import httpx
 
+        Retries on transient network errors with exponential backoff.
+        """
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"{self.cfg.backend_api_url}/api/v1/internal/identity",
@@ -228,13 +253,14 @@ class Orchestrator:
                 log.error("removal_loop_error", error=str(exc), exc_info=True)
                 await asyncio.sleep(5)
 
+    @retry_transient
     async def _fetch_identity_for_customer(self, customer_id: str) -> IdentityContext:
         """
         Fetch decrypted identity for a customer by customer_id.
         Used by removal worker to get PII for form submission.
-        """
-        import httpx
 
+        Retries on transient network errors with exponential backoff.
+        """
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
                 f"{self.cfg.backend_api_url}/api/v1/internal/customers/{customer_id}/identity",

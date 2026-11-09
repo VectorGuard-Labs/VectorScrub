@@ -4,6 +4,7 @@
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 use uuid::Uuid;
+use validator::Validate;
 
 use crate::db::AppState;
 use crate::middleware::auth_extractor::AgentAuth;
@@ -11,26 +12,34 @@ use crate::models::exposure::{ExposureSeverity, PiiCategory};
 use crate::models::scan_job::ScanJobStatus;
 use crate::services::{exposure as exposure_svc, scan as scan_svc};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct ScanStatusUpdate {
     pub job_id: Uuid,
     pub status: ScanJobStatus,
+    #[validate(range(min = 0, max = 10000))]
     pub sources_completed: Option<i32>,
+    #[validate(range(min = 0, max = 10000))]
     pub sources_failed: Option<i32>,
+    #[validate(range(min = 0, max = 100000))]
     pub exposures_found: Option<i32>,
+    #[validate(length(max = 1000))]
     pub error_message: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct RecordExposureRequest {
     pub customer_id: Uuid,
     pub scan_job_id: Uuid,
+    #[validate(length(min = 1, max = 200))]
     pub source_name: String,
+    #[validate(url, length(max = 2000))]
     pub source_url: String,
     pub pii_category: PiiCategory,
     pub severity: ExposureSeverity,
     /// Masked summary (e.g. "123 Main St***") — never the full raw PII value
+    #[validate(length(min = 1, max = 500))]
     pub pii_summary: String,
+    #[validate(range(min = 0.0, max = 1.0))]
     pub confidence: f32,
 }
 
@@ -40,6 +49,9 @@ pub async fn update_scan_status(
     State(state): State<AppState>,
     Json(req): Json<ScanStatusUpdate>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    req.validate()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
     scan_svc::update_scan_status(
         &state.pool,
         req.job_id,
@@ -61,9 +73,8 @@ pub async fn record_exposure(
     State(state): State<AppState>,
     Json(req): Json<RecordExposureRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    if req.confidence < 0.0 || req.confidence > 1.0 {
-        return Err((StatusCode::BAD_REQUEST, "Confidence must be between 0.0 and 1.0".into()));
-    }
+    req.validate()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     exposure_svc::record_exposure(
         &state.pool,
@@ -82,9 +93,10 @@ pub async fn record_exposure(
     Ok(StatusCode::CREATED)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct GetIdentityRequest {
     pub customer_id: Uuid,
+    #[validate(length(min = 1, max = 500))]
     pub identity_token: String,
 }
 
@@ -105,6 +117,9 @@ pub async fn get_identity(
     State(state): State<AppState>,
     Json(req): Json<GetIdentityRequest>,
 ) -> Result<Json<IdentityResponse>, (StatusCode, String)> {
+    req.validate()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
     use crate::crypto::MasterKey;
     use crate::services::customer as customer_svc;
 

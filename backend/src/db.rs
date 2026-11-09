@@ -1,3 +1,4 @@
+use metrics_exporter_prometheus::PrometheusHandle;
 use sqlx::PgPool;
 
 use crate::services::config::AppConfig;
@@ -8,4 +9,5 @@ pub struct AppState {
     pub pool: PgPool,
     pub redis: redis::Client,
     pub config: AppConfig,
+    pub metrics: PrometheusHandle,
 }

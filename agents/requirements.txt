@@ -32,3 +32,6 @@ opentelemetry-exporter-otlp==1.33.0
 # Utilities
 python-dotenv==1.2.4
 tenacity==9.2.1
+
+# Key Management
+vectorguard-pyhsm==2.3.7

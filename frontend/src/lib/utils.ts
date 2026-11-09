@@ -29,8 +29,17 @@ export function severityColor(severity: string): string {
   }
 }
 
-export function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-US", {
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+
+  const date = new Date(iso);
+
+  // Check if date is valid
+  if (isNaN(date.getTime())) {
+    return "—";
+  }
+
+  return date.toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",

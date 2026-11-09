@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   Shield,
@@ -17,6 +17,7 @@ import {
   listExposures,
   initiateSccan,
   authorizeRemoval,
+  listScans,
 } from "@/lib/api";
 import {
   privacyScoreLabel,
@@ -36,6 +37,8 @@ export default function DashboardPage() {
   const [scanLoading, setScanLoading] = useState(false);
   const [scanMessage, setScanMessage] = useState("");
   const [error, setError] = useState("");
+  const [isPolling, setIsPolling] = useState(false);
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem("vs_token");
@@ -44,6 +47,13 @@ export default function DashboardPage() {
       return;
     }
     loadData();
+
+    // Cleanup polling interval on unmount
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function loadData() {
@@ -64,13 +74,77 @@ export default function DashboardPage() {
     }
   }
 
+  async function checkScanStatus() {
+    try {
+      const { jobs } = await listScans();
+
+      // Check if there's a running scan
+      const runningScan = jobs.find(
+        (job) => job.status === "queued" || job.status === "running"
+      );
+
+      if (runningScan) {
+        // Scan is still running, keep polling
+        setScanMessage("Scan job queued. Your AI agents are working.");
+        setIsPolling(true);
+      } else {
+        // No running scans, check if we just completed one
+        const recentCompletedScan = jobs.find(
+          (job) => job.status === "completed" || job.status === "failed"
+        );
+
+        if (recentCompletedScan && isPolling) {
+          // Scan just completed, refresh data and stop polling
+          await loadData();
+          stopPolling();
+
+          if (recentCompletedScan.status === "completed") {
+            setScanMessage(`Scan completed! Found ${recentCompletedScan.exposures_found} exposures.`);
+          } else {
+            setScanMessage("Scan failed. Please try again.");
+          }
+        } else if (!isPolling) {
+          // No running scans and we weren't polling, stop
+          stopPolling();
+        }
+      }
+    } catch (err) {
+      console.error("Error checking scan status:", err);
+    }
+  }
+
+  function startPolling() {
+    // Clear any existing interval
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+    }
+
+    setIsPolling(true);
+
+    // Check immediately
+    checkScanStatus();
+
+    // Then check every 3 seconds
+    pollingIntervalRef.current = setInterval(checkScanStatus, 3000);
+  }
+
+  function stopPolling() {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    setIsPolling(false);
+  }
+
   async function handleScan() {
     setScanLoading(true);
     setScanMessage("");
     try {
       const result = await initiateSccan();
       setScanMessage(result.message);
-      setTimeout(loadData, 3000);
+
+      // Start polling for scan status updates
+      startPolling();
     } catch (err: unknown) {
       setScanMessage(err instanceof Error ? err.message : "Scan failed");
     } finally {
@@ -194,8 +268,11 @@ export default function DashboardPage() {
         </div>
 
         {scanMessage && (
-          <div className="bg-teal-950 border border-teal-800 text-teal-300 rounded-lg px-4 py-3 mb-6 text-sm">
-            {scanMessage}
+          <div className="bg-teal-950 border border-teal-800 text-teal-300 rounded-lg px-4 py-3 mb-6 text-sm flex items-center gap-2">
+            {isPolling && (
+              <RefreshCw className="w-4 h-4 animate-spin flex-shrink-0" aria-hidden="true" />
+            )}
+            <span>{scanMessage}</span>
           </div>
         )}
 

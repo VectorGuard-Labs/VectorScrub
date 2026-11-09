@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 use zeroize::Zeroize;
 
 /// Subscription tier for a customer account.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "subscription_tier", rename_all = "lowercase")]
 pub enum SubscriptionTier {
     Free,
@@ -64,11 +65,13 @@ pub struct CleartextIdentity {
 }
 
 /// Request body for account creation.
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateAccountRequest {
     #[validate(email(message = "Must be a valid email address"))]
+    #[schema(example = "user@example.com")]
     pub email: String,
     #[validate(length(min = 12, message = "Password must be at least 12 characters"))]
+    #[schema(example = "SecurePassword123!")]
     pub password: String,
 }
 
@@ -87,7 +90,7 @@ pub struct SubmitIdentityRequest {
 }
 
 /// Public-facing customer profile returned by the API (no PII, no password hash).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CustomerProfile {
     pub id: Uuid,
     pub email: String,

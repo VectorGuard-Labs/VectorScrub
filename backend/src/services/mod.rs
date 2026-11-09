@@ -1,6 +1,10 @@
+pub mod audit;
 pub mod auth;
+pub mod circuit_breaker;
 pub mod config;
 pub mod customer;
+pub mod data_retention;
+pub mod experiments;
 pub mod exposure;
 pub mod family;
 pub mod notification;

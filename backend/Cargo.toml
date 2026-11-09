@@ -15,6 +15,7 @@ axum = { version = "0.7", features = ["macros", "multipart"] }
 axum-extra = { version = "0.9", features = ["cookie", "typed-header"] }
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "request-id", "timeout"] }
+tower_governor = "0.4"
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
 
@@ -53,6 +54,12 @@ validator = { version = "0.18", features = ["derive"] }
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.28"
+opentelemetry = { version = "0.27", features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace", "metrics"] }
+opentelemetry-otlp = { version = "0.27", features = ["trace", "metrics", "grpc-tonic"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 
 # Config
 config = "0.14"
@@ -61,6 +68,10 @@ dotenvy = "0.15"
 # Error handling
 thiserror = "2"
 anyhow = "1"
+
+# API documentation
+utoipa = { version = "4", features = ["axum_extras", "uuid", "chrono", "time"] }
+utoipa-swagger-ui = { version = "6", features = ["axum"] }
 
 # HTTP client (for internal agent communication)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

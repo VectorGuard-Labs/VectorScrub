@@ -5,14 +5,17 @@ use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 mod api;
 mod crypto;
 mod db;
+mod docs;
 mod jobs;
 mod middleware;
 mod models;
+mod observability;
 mod services;
 
 pub use db::AppState;
@@ -21,17 +24,14 @@ pub use db::AppState;
 async fn main() -> anyhow::Result<()> {
     dotenv().ok();
 
-    // Structured logging
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "vectorscrub=debug,tower_http=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer().json())
-        .init();
-
     let config = services::config::AppConfig::from_env()
         .context("Failed to load application configuration")?;
+
+    // Initialize observability (tracing, metrics, and optional OTLP)
+    let metrics_handle = observability::init_observability(
+        "vectorscrub-backend",
+        config.otlp_endpoint.as_deref(),
+    );
 
     // Database pool
     let pool = PgPoolOptions::new()
@@ -56,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
         pool: pool.clone(),
         redis: redis_client.clone(),
         config: config.clone(),
+        metrics: metrics_handle,
     };
 
     // Spawn scheduled rescan dispatcher as a background task
@@ -72,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let app = Router::new()
+        .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", docs::ApiDoc::openapi()))
         .nest("/api/v1", api::router(state.clone()));
     let app = middleware::apply(app, &config);
 
@@ -106,4 +108,5 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     info!("Shutdown signal received — draining connections");
+    observability::shutdown_observability();
 }

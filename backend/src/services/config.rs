@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub db_pool_size: u32,
     pub agent_service_url: String,
     pub environment: Environment,
+    pub allowed_origins: Vec<String>,
+    pub otlp_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +27,13 @@ pub enum Environment {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
+        let allowed_origins = env::var("ALLOWED_ORIGINS")
+            .unwrap_or_else(|_| "http://localhost:3000".into())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         Ok(Self {
             database_url: required("DATABASE_URL")?,
             redis_url: env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
@@ -46,6 +55,8 @@ impl AppConfig {
                 Ok("staging") => Environment::Staging,
                 _ => Environment::Development,
             },
+            allowed_origins,
+            otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
         })
     }
 
