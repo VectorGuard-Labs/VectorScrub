@@ -41,17 +41,17 @@ async fn dispatch_due_rescans(
     master_key_b64: &str,
 ) -> Result<()> {
     // Query customers with monitoring enabled and due for rescan
-    // Personal: monthly (30 days), Premium/Family: weekly (7 days)
+    // Personal: monthly (30 days), Premium: weekly (7 days)
     let customers: Vec<Customer> = sqlx::query_as::<_, Customer>(
         r#"
         SELECT * FROM customers
         WHERE monitoring_enabled = true
         AND is_active = true
-        AND subscription_tier IN ('personal', 'premium', 'family')
+        AND subscription_tier IN ('personal', 'premium')
         AND (
             (subscription_tier = 'personal' AND (last_scan_at IS NULL OR last_scan_at < NOW() - INTERVAL '30 days'))
             OR
-            (subscription_tier IN ('premium', 'family') AND (last_scan_at IS NULL OR last_scan_at < NOW() - INTERVAL '7 days'))
+            (subscription_tier IN ('premium') AND (last_scan_at IS NULL OR last_scan_at < NOW() - INTERVAL '7 days'))
         )
         "#
     )
