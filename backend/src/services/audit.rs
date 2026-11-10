@@ -22,7 +22,6 @@ pub struct AuditEntry {
 pub enum AuditStatus {
     Success,
     Failure,
-    Error,
 }
 
 impl AuditStatus {
@@ -30,7 +29,6 @@ impl AuditStatus {
         match self {
             AuditStatus::Success => "success",
             AuditStatus::Failure => "failure",
-            AuditStatus::Error => "error",
         }
     }
 }
@@ -170,48 +168,135 @@ pub async fn log_audit_entry(pool: &PgPool, entry: &AuditEntry) -> Result<(), sq
     Ok(())
 }
 
-/// Common audit actions
+/// Audit actions that are actually emitted. Add a constant only together with the code
+/// that logs it; an action listed here that nothing writes is a false promise to whoever
+/// reads the audit trail.
 pub mod actions {
     // Authentication
     pub const USER_REGISTER: &str = "user.register";
     pub const USER_LOGIN: &str = "user.login";
-    pub const USER_LOGOUT: &str = "user.logout";
+    /// An email reached the failed-login threshold and was locked out.
+    pub const USER_LOGIN_LOCKED: &str = "user.login_locked";
 
-    // Identity management
+    // Identity
     pub const IDENTITY_SUBMIT: &str = "identity.submit";
-    pub const IDENTITY_UPDATE: &str = "identity.update";
+    /// Decrypted identity was released to the agent layer (success), or a release was
+    /// refused (failure). See services/identity_access.rs.
+    pub const IDENTITY_RELEASE: &str = "identity.release";
 
     // Scans
     pub const SCAN_INITIATE: &str = "scan.initiate";
-    pub const SCAN_COMPLETE: &str = "scan.complete";
+    /// The recovery loop requeued a scan whose worker went silent.
+    pub const SCAN_RECOVERED: &str = "scan.recovered";
+    /// A scan was failed because it kept getting lost.
     pub const SCAN_FAILED: &str = "scan.failed";
 
-    // Exposures
-    pub const EXPOSURE_DISCOVER: &str = "exposure.discover";
-    pub const EXPOSURE_AUTHORIZE_REMOVAL: &str = "exposure.authorize_removal";
-
     // Removals
-    pub const REMOVAL_REQUEST_CREATE: &str = "removal.request_create";
-    pub const REMOVAL_REQUEST_UPDATE: &str = "removal.request_update";
-    pub const REMOVAL_COMPLETE: &str = "removal.complete";
-
-    // Family
-    pub const FAMILY_MEMBER_ADD: &str = "family.member_add";
-    pub const FAMILY_MEMBER_REMOVE: &str = "family.member_remove";
-
-    // Notifications
-    pub const NOTIFICATION_PREFERENCES_UPDATE: &str = "notification.preferences_update";
-    pub const ALERT_READ: &str = "alert.read";
+    pub const EXPOSURE_AUTHORIZE_REMOVAL: &str = "exposure.authorize_removal";
 }
 
-/// Common resource types
+/// Resource types
 pub mod resources {
     pub const CUSTOMER: &str = "customer";
     pub const IDENTITY: &str = "identity";
     pub const SCAN: &str = "scan";
     pub const EXPOSURE: &str = "exposure";
-    pub const REMOVAL_REQUEST: &str = "removal_request";
-    pub const FAMILY_MEMBER: &str = "family_member";
-    pub const NOTIFICATION: &str = "notification";
-    pub const ALERT: &str = "alert";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support as ts;
+
+    async fn log_one(pool: &PgPool, customer: Uuid) -> Uuid {
+        AuditEntry::builder(actions::USER_LOGIN, resources::CUSTOMER)
+            .customer_id(customer)
+            .user_email("jane@example.com")
+            .resource_id(customer)
+            .details(serde_json::json!({ "k": "v" }))
+            .log(pool)
+            .await
+            .unwrap();
+        sqlx::query_scalar("SELECT id FROM audit_log WHERE customer_id = $1 ORDER BY timestamp DESC LIMIT 1")
+            .bind(customer)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn rejected(pool: &PgPool, sql: &str, id: Uuid) -> bool {
+        match sqlx::query(sql).bind(id).execute(pool).await {
+            Err(e) => e.to_string().contains("append-only"),
+            Ok(_) => false,
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn entries_can_be_appended_and_read(pool: PgPool) {
+        let c = ts::customer(&pool, "free", false).await;
+        let id = log_one(&pool, c).await;
+        let (action, status): (String, String) =
+            sqlx::query_as("SELECT action, status FROM audit_log WHERE id = $1").bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!((action.as_str(), status.as_str()), ("user.login", "success"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn records_cannot_be_modified_deleted_or_truncated(pool: PgPool) {
+        let c = ts::customer(&pool, "free", false).await;
+        let id = log_one(&pool, c).await;
+
+        for edit in [
+            "UPDATE audit_log SET action = 'user.nothing' WHERE id = $1",
+            "UPDATE audit_log SET status = 'success', details = '{}'::jsonb WHERE id = $1",
+            "UPDATE audit_log SET resource_id = NULL WHERE id = $1",
+            "UPDATE audit_log SET timestamp = NOW() - interval '1 year' WHERE id = $1",
+            "UPDATE audit_log SET error_message = 'x' WHERE id = $1",
+            "UPDATE audit_log SET ip_address = '1.2.3.4' WHERE id = $1",
+        ] {
+            assert!(rejected(&pool, edit, id).await, "must be rejected: {edit}");
+        }
+        assert!(rejected(&pool, "DELETE FROM audit_log WHERE id = $1", id).await, "DELETE rejected");
+        assert!(
+            sqlx::query("TRUNCATE audit_log").execute(&pool).await.unwrap_err().to_string().contains("append-only"),
+            "TRUNCATE rejected"
+        );
+
+        // the record is exactly as written
+        let (action, details): (String, serde_json::Value) =
+            sqlx::query_as("SELECT action, details FROM audit_log WHERE id = $1").bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(action, "user.login");
+        assert_eq!(details, serde_json::json!({ "k": "v" }));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_only_permitted_edit_is_clearing_identifiers(pool: PgPool) {
+        let c = ts::customer(&pool, "free", false).await;
+        let id = log_one(&pool, c).await;
+
+        // pseudonymization is allowed...
+        sqlx::query("UPDATE audit_log SET customer_id = NULL, user_email = NULL WHERE id = $1")
+            .bind(id).execute(&pool).await.expect("clearing identifiers is allowed");
+        let (cust, email): (Option<Uuid>, Option<String>) =
+            sqlx::query_as("SELECT customer_id, user_email FROM audit_log WHERE id = $1").bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!((cust, email), (None, None));
+
+        // ...but only that: it cannot be combined with changing anything else, nor used to re-attribute
+        assert!(rejected(&pool, "UPDATE audit_log SET customer_id = NULL, action = 'forged' WHERE id = $1", id).await);
+        let other = ts::customer(&pool, "free", false).await;
+        let id2 = log_one(&pool, c).await;
+        let reassign = sqlx::query("UPDATE audit_log SET customer_id = $2 WHERE id = $1").bind(id2).bind(other).execute(&pool).await;
+        assert!(reassign.is_err(), "cannot re-attribute an entry to a different customer");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn erasing_a_customer_pseudonymizes_their_audit_entries_instead_of_blocking(pool: PgPool) {
+        let c = ts::customer(&pool, "free", false).await;
+        let id = log_one(&pool, c).await;
+        sqlx::query("DELETE FROM customers WHERE id = $1").bind(c).execute(&pool).await
+            .expect("ON DELETE SET NULL must still be allowed to pseudonymize");
+        let (cust, action): (Option<Uuid>, String) =
+            sqlx::query_as("SELECT customer_id, action FROM audit_log WHERE id = $1").bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(cust, None);
+        assert_eq!(action, "user.login", "the record itself survives");
+    }
 }

@@ -1,5 +1,26 @@
 # SOC 2 Type II Compliance Guide
 
+> **Read this first: this is a control framework and target design, not an attestation.** VectorScrub has not undergone a SOC 2 audit. The YAML blocks below describe intended controls; many are not implemented. The table here was checked against the code and is the authoritative status. Where the body says otherwise, this table wins.
+
+| Control | Status in code |
+|---------|----------------|
+| PII encrypted at rest with AES-256-GCM, per-customer keys derived from the master key | **Implemented** (key derivation is SHA-256 over master key, label and customer id; no AAD) |
+| Master key in an HSM (PyHSM), automatic 90-day rotation | **Not implemented.** Key is read from an environment variable; no rotation. The PyHSM module was removed. |
+| Passwords hashed with Argon2id; JWT HS256, 24 h expiry | **Implemented.** No refresh tokens, no session inactivity timeout, no MFA. |
+| Login lockout and per-IP rate limits | **Implemented** (in-memory limits are per instance) |
+| CSRF protection and security headers | **Implemented** |
+| Append-only audit trail | **Implemented** via triggers on `audit_log` and rules on `removal_audit_log`; a DB superuser can bypass. No HMAC chaining. |
+| Scoped, audited release of identity to agents | **Implemented** |
+| Removal requires explicit customer authorization; server-enforced state machine | **Implemented** |
+| Scan job recovery and health probes | **Implemented** |
+| Customer PII never sent to LLMs | **Implemented and tested** (redaction, NER, vocabulary filter, fail-closed). Detection accuracy on real pages not measured. |
+| Role-based access control, admin/operator roles | **Not implemented** (only customer JWT and one shared agent key) |
+| mTLS between services, IP allowlisting, Redis/DB TLS | **Not implemented** in the repo; deployment concern |
+| Idempotency keys | **Not implemented** |
+| Automated data retention / right-to-erasure | **Not implemented** (see `DATA_RETENTION.md`) |
+| Circuit breakers | **Partial:** Python agents only, per host, for page fetches |
+| Backups, DR, change management, vendor management, incident response | **Process items outside the code**; not evidenced here |
+
 This document outlines VectorScrub's SOC 2 compliance framework, policies, and procedures.
 
 ## Overview
@@ -84,7 +105,7 @@ Access Control Matrix:
 
 ```yaml
 Encryption at Rest:
-  Customer PII: AES-256-GCM with PyHSM
+  Customer PII: AES-256-GCM, per-customer derived keys (master key from environment)
   Database: PostgreSQL encryption enabled
   Backups: Encrypted with separate key
   File Storage: S3 server-side encryption
@@ -96,8 +117,8 @@ Encryption in Transit:
   Internal Services: mTLS
 
 Key Management:
-  Master Keys: PyHSM with hardware-backed storage
-  Key Rotation: Automatic every 90 days
+  Master Keys: environment variable (target: KMS/HSM; not implemented)
+  Key Rotation: Target 90 days (not implemented)
   Key Access: Logged and monitored
 ```
 
@@ -238,7 +259,7 @@ Application Integrity:
   - Idempotency keys for operations
   - Checksums for file uploads
   - HMAC for audit log chains
-  - Circuit breakers prevent cascading failures
+  - Circuit breakers on agent page fetches (partial; Python only)
 ```
 
 ### 3.3 Processing Accuracy
@@ -414,7 +435,7 @@ Retention Periods:
     Monthly: 7 years
 ```
 
-**Automated Cleanup:** See `DATA_RETENTION.md`
+**Automated cleanup:** not implemented. See `DATA_RETENTION.md` for the current state.
 
 ## 6. Change Management
 

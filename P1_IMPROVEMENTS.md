@@ -1,5 +1,7 @@
 # P1 Improvements - Implementation Complete
 
+> **Historical / planning document - not a statement of current capability.** The scores and "implemented" claims below were written before an audit that found several items documented but not wired into the code (PyHSM key management, a Rust circuit breaker, automated data retention, a broker registry, A/B testing, an input-validation layer); those were removed. For what exists today see README.md (Security Model, Production Deployment, Recent Updates) and `SOC2_COMPLIANCE.md`.
+
 All 7 P1 (Should Fix) improvements have been successfully implemented.
 
 ## Summary

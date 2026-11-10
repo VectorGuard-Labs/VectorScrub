@@ -19,7 +19,7 @@ pub async fn get_preferences(
 ) -> Result<Json<NotificationPreferences>, (StatusCode, String)> {
     let prefs = notification_svc::get_preferences(&state.pool, auth.id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(super::error::internal_error)?;
 
     Ok(Json(prefs))
 }
@@ -46,7 +46,7 @@ pub async fn get_alerts(
 ) -> Result<Json<Vec<Alert>>, (StatusCode, String)> {
     let alerts = notification_svc::get_unread_alerts(&state.pool, auth.id, 50)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(super::error::internal_error)?;
 
     Ok(Json(alerts))
 }

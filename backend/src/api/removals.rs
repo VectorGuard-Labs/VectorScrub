@@ -1,7 +1,7 @@
 use crate::db::AppState;
 use crate::middleware::auth_extractor::{AgentAuth, AuthenticatedCustomer};
 use crate::models::removal_request::{RemovalAuditEntry, RemovalRequest, RemovalStatus};
-use crate::services::removal;
+use crate::services::{audit, removal};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -66,6 +66,14 @@ pub async fn authorize(
             }
         })?;
 
+    audit::AuditEntry::builder(audit::actions::EXPOSURE_AUTHORIZE_REMOVAL, audit::resources::EXPOSURE)
+        .customer_id(auth.id)
+        .resource_id(exposure_id)
+        .details(serde_json::json!({ "removal_request_id": request.id }))
+        .log(&state.pool)
+        .await
+        .ok();
+
     Ok(Json(AuthorizeRemovalResponse {
         request,
         message: "Removal request authorized and queued for processing".to_string(),
@@ -109,19 +117,12 @@ pub struct ListPendingQuery {
 
 #[derive(Serialize)]
 pub struct ListPendingResponse {
-    requests: Vec<RemovalRequestWithExposure>,
-}
-
-#[derive(Serialize)]
-pub struct RemovalRequestWithExposure {
-    #[serde(flatten)]
-    pub request: RemovalRequest,
-    pub source_name: String,
-    pub source_url: String,
+    requests: Vec<RemovalRequest>,
 }
 
 /// GET /api/v1/internal/removal-requests?status=authorized
-/// Lists removal requests by status for agent processing.
+/// Lists removal requests by status for agent processing (oldest first, at most 100).
+/// Each request already carries the source name and URL it was authorized for.
 pub async fn list_pending(
     _auth: AgentAuth,
     Query(params): Query<ListPendingQuery>,
@@ -133,24 +134,7 @@ pub async fn list_pending(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Join with exposures to get source info
-    let mut requests_with_exposure = Vec::new();
-    for request in requests {
-        let exposure = crate::services::exposure::get_exposure(&state.pool, request.exposure_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        requests_with_exposure.push(RemovalRequestWithExposure {
-            request,
-            source_name: exposure.source_name,
-            source_url: exposure.source_url,
-        });
-    }
-
-    Ok(Json(ListPendingResponse {
-        requests: requests_with_exposure,
-    }))
+    Ok(Json(ListPendingResponse { requests }))
 }
 
 #[derive(Deserialize)]
@@ -182,7 +166,14 @@ pub async fn update_status(
         next_check_at,
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| match e.downcast_ref::<removal::RemovalError>() {
+        Some(removal::RemovalError::NotFound) => StatusCode::NOT_FOUND,
+        Some(removal::RemovalError::IllegalTransition { .. }) => StatusCode::CONFLICT,
+        None => {
+            tracing::error!(error = %e, "Failed to update removal status");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -212,7 +203,13 @@ pub async fn record_audit(
         req.details,
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| match e.downcast_ref::<removal::RemovalError>() {
+        Some(removal::RemovalError::NotFound) => StatusCode::NOT_FOUND,
+        _ => {
+            tracing::error!(error = %e, "Failed to record removal audit entry");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
 
     Ok(StatusCode::CREATED)
 }

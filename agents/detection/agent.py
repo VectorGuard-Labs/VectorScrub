@@ -1,14 +1,29 @@
 """
 Detection Agent — Phase 1
-Receives candidate URLs from the Discovery Agent and uses an LLM to
-classify and confirm actual PII exposures.
+Receives candidate pages from the Discovery Agent and uses an LLM to classify
+and confirm actual PII exposures.
 
-Safety principle: The LLM receives only the page text snippet and a
-minimal structured prompt — never the customer's raw PII. Matching is
-done by comparing anonymized tokens, not by sending identity data to
-the model.
+SAFETY RULE (enforced in code, not by convention): no customer PII ever reaches
+the LLM. This class is the ONLY place a model is called, and every payload goes
+through shared.pii_guard first:
+
+  * The customer's identity is never sent, not even masked hints. Matching against
+    the customer's name, address, phone, email, and date of birth happens locally.
+  * The page excerpt is redacted: the customer's values become [CUSTOMER_*]
+    placeholders and other personal data becomes generic placeholders.
+  * The page URL is not sent (profile URLs often contain the person's name).
+  * Third parties' names (relatives, neighbours) are removed by pattern rules, a
+    spaCy NER pass, and finally a deny-by-default vocabulary filter that drops every
+    word that is not structural vocabulary (shared/pii_vocab.py).
+  * Before the call, the excerpt is re-checked twice: no customer value may remain,
+    and nothing outside the vocabulary may remain. Either failure blocks the call
+    with OutboundPiiError and no request is made. If the NER model is required
+    (default) but cannot be loaded, the call is blocked too.
+
+Do not add another LLM call site anywhere in the agents package. If a new task
+needs a model, route it through _run_classifier's guard.
 """
-import re
+import asyncio
 from typing import Optional
 
 import structlog
@@ -25,32 +40,54 @@ from shared.models import (
     IdentityContext,
     PiiCategory,
 )
+from shared.pii_guard import (
+    Evidence,
+    assert_clean,
+    assert_vocabulary_only,
+    build_pii_summary,
+    redact_for_llm,
+)
+from shared.pii_ner import PersonDetector
 
 log = structlog.get_logger(__name__)
 
 DETECTION_SYSTEM_PROMPT = """You are a PII detection specialist for a privacy protection service.
-You are given a snippet of text from a data broker website and a set of anonymized identity tokens.
+You are given a REDACTED excerpt from a data broker web page. Personal details were replaced with
+placeholder tokens before you received it, and you are never shown the customer's real details:
+
+  [CUSTOMER_NAME] [CUSTOMER_ADDRESS] [CUSTOMER_PHONE] [CUSTOMER_EMAIL] [CUSTOMER_DOB]
+      the text at that position matched the customer being protected.
+  [SURNAME] [FIRST_NAME]
+      only the surname / only the first name matched (could be a relative or a namesake).
+  [NAME] [ADDRESS] [PHONE] [EMAIL] [DATE] [AGE] [ZIP] [SSN] [NUMBER]
+      other personal data that did not match the customer.
+
+Everything else on the page has been removed except a small set of structural words (age, born,
+lives, phone, relatives, "no results found", ...). A "…" marks removed text. Do not try to infer
+what was removed.
+
+You are also given a summary of which customer fields were found in the full excerpt.
+
 Your task is to determine:
-1. Whether the text contains personal information matching the identity tokens.
-2. What categories of PII are present.
+1. Whether this page lists the customer (not merely someone who shares a surname).
+2. What categories of PII about the customer are present.
 3. The severity of the exposure.
 
-Identity tokens are anonymized (e.g., first letters only). You must reason about whether the
-text likely refers to the same person WITHOUT being given their full identity.
+Judge by how the tokens relate: [CUSTOMER_NAME] next to [CUSTOMER_ADDRESS] or [CUSTOMER_PHONE]
+in the same record is a strong match; a lone [SURNAME] among many [NAME] tokens is not.
 
 Respond ONLY with valid JSON matching this schema:
 {
   "is_match": true/false,
-  "pii_categories": ["full_name", "home_address", ...],
+  "pii_categories": ["full_name", "home_address", "phone_number", "email_address", "date_of_birth", ...],
   "severity": "low" | "medium" | "high" | "critical",
-  "confidence": 0.0-1.0,
-  "pii_summary": "short masked description e.g. 'J*** D***, 1** M*** St'"
+  "confidence": 0.0-1.0
 }
 
 Severity guidelines:
-- critical: full name + full address + phone or DOB combined
-- high: full name + address OR full name + multiple contact details
-- medium: full name + partial address OR name + email
+- critical: customer name + address + phone or DOB combined
+- high: customer name + address OR name + multiple contact details
+- medium: customer name + partial address OR name + email
 - low: name only or partial identifiers
 """
 
@@ -60,13 +97,33 @@ class LLMClassification(BaseModel):
     pii_categories: list[str]
     severity: str
     confidence: float
-    pii_summary: str
+    # No longer requested from the model: the dashboard summary is built locally
+    # (shared.pii_guard.build_pii_summary) because the model never sees identity.
+    pii_summary: str = ""
+
+
+def _yes_no(flag: bool) -> str:
+    return "yes" if flag else "no"
+
+
+def _evidence_block(ev: Evidence) -> str:
+    return (
+        "Customer fields found in the excerpt (computed locally):\n"
+        f"- full name: {_yes_no(ev.name_full)}\n"
+        f"- surname: {_yes_no(ev.surname)}\n"
+        f"- first name: {_yes_no(ev.first_name)}\n"
+        f"- address: {_yes_no(ev.address)}\n"
+        f"- phone: {_yes_no(ev.phone)}\n"
+        f"- email: {_yes_no(ev.email)}\n"
+        f"- date of birth: {_yes_no(ev.dob)}\n"
+        f"- other people's names on the page: {ev.other_people}"
+    )
 
 
 class DetectionAgent:
     """
     Uses an LLM to classify PII exposures from discovery candidates.
-    Sends ONLY anonymized tokens to the model — never raw customer PII.
+    The LLM sees only redacted page text — never customer PII (see module docstring).
     """
 
     def __init__(self) -> None:
@@ -85,40 +142,81 @@ class DetectionAgent:
                 max_tokens=512,
                 temperature=0,
             )
+        self._ner = PersonDetector(cfg.pii_ner_model)
 
-    def _anonymize_identity(self, identity: IdentityContext) -> dict:
+    def _redact(self, snippet: str, identity: IdentityContext):
         """
-        Convert full PII to anonymized tokens safe to send to the LLM.
-        e.g. "John Smith" → "J*** S***", "john@example.com" → "j***@e***.com"
+        Redaction for one call. Runs in a worker thread (NER is CPU-bound). Raises
+        NerUnavailableError, so the call is never made, if NER is required but missing.
         """
-        def mask_name(name: str) -> str:
-            return " ".join(p[0] + "***" if p else "***" for p in name.split())
+        if self.cfg.pii_ner_required:
+            self._ner.ensure_loaded()
+            detector = self._ner
+        else:
+            detector = self._ner if self._ner.available else None
+        return redact_for_llm(snippet, identity, person_detector=detector)
 
-        def mask_email(email: str) -> str:
-            if "@" in email:
-                local, domain = email.split("@", 1)
-                domain_parts = domain.split(".")
-                return f"{local[0]}***@{domain_parts[0][0]}***.{domain_parts[-1]}"
-            return "***"
+    async def _run_classifier(
+        self,
+        candidate: DiscoveryResult,
+        identity: IdentityContext,
+        max_chars: int = 1500,
+    ) -> tuple[LLMClassification, Evidence]:
+        """
+        Redact, verify, then call the LLM once. This is the only LLM call site.
 
-        def mask_phone(phone: str) -> str:
-            digits = re.sub(r"\D", "", phone)
-            return f"***-***-{digits[-4:]}" if len(digits) >= 4 else "***"
+        Raises OutboundPiiError (before any network request) if the outbound payload
+        still contains a customer value, and raises on any LLM/transport failure so
+        callers can decide whether a failure means "no match" (discovery) or "could
+        not check" (monitoring).
+        """
+        redacted = await asyncio.to_thread(
+            self._redact, candidate.raw_text_snippet[:max_chars], identity
+        )
 
-        def mask_address(addr: str) -> str:
-            parts = addr.split(",")
-            if parts:
-                street_parts = parts[0].split()
-                masked = " ".join(p[0] + "***" if i > 0 else p for i, p in enumerate(street_parts))
-                return masked + ("," + ",".join(parts[1:]) if len(parts) > 1 else "")
-            return "***"
+        # Deliberately no URL: profile URLs commonly embed the person's name.
+        user_message = (
+            f"Data broker source: {candidate.source_name}\n\n"
+            f"{_evidence_block(redacted.evidence)}\n\n"
+            f"Redacted page excerpt:\n{redacted.text}\n\n"
+            "Analyze and respond with JSON only."
+        )
 
-        return {
-            "name_token": mask_name(identity.full_name) if identity.full_name else None,
-            "address_token": mask_address(identity.current_address) if identity.current_address else None,
-            "email_tokens": [mask_email(e) for e in identity.email_addresses],
-            "phone_tokens": [mask_phone(p) for p in identity.phone_numbers],
-        }
+        # Fail closed: nothing leaves the process unless everything derived from
+        # outside data (source name + redacted excerpt) is free of customer values.
+        # The prompt scaffolding and the evidence block are constants/booleans, so they
+        # are excluded: a customer surnamed "Page" must not be blocked by the word
+        # "page" in our own prompt.
+        assert_clean(f"{candidate.source_name}\n{redacted.text}", identity)
+        # ...and nothing outside the structural vocabulary (third-party text) remains.
+        assert_vocabulary_only(redacted.text)
+
+        structured_llm = self._llm.with_structured_output(LLMClassification)
+        classification = await structured_llm.ainvoke([
+            SystemMessage(content=DETECTION_SYSTEM_PROMPT),
+            HumanMessage(content=user_message),
+        ])
+        return classification, redacted.evidence
+
+    async def assess_page(
+        self,
+        candidate: DiscoveryResult,
+        identity: IdentityContext,
+        max_chars: int = 3000,
+    ) -> LLMClassification:
+        """
+        Strict variant of classify() for monitoring. Returns the raw LLM verdict
+        and RAISES if the LLM call fails or is blocked by the PII guard, so an
+        outage is never mistaken for "the record is gone".
+        """
+        classification, _ = await self._run_classifier(candidate, identity, max_chars=max_chars)
+        log.info(
+            "detection_assessed",
+            source=candidate.source_name,
+            is_match=classification.is_match,
+            confidence=classification.confidence,
+        )
+        return classification
 
     async def classify(
         self,
@@ -129,28 +227,16 @@ class DetectionAgent:
         Run LLM classification on a discovery candidate.
         Returns a DetectionResult if confirmed exposure, None otherwise.
         """
-        tokens = self._anonymize_identity(identity)
-        user_message = f"""
-Data broker source: {candidate.source_name}
-URL: {candidate.source_url}
-
-Page snippet:
-{candidate.raw_text_snippet[:1500]}
-
-Anonymized identity tokens to match against:
-{tokens}
-
-Analyze and respond with JSON only.
-"""
         try:
-            structured_llm = self._llm.with_structured_output(LLMClassification)
-            classification = await structured_llm.ainvoke([
-                SystemMessage(content=DETECTION_SYSTEM_PROMPT),
-                HumanMessage(content=user_message),
-            ])
+            classification, evidence = await self._run_classifier(candidate, identity)
             log.info("detection_classified", source=candidate.source_name, is_match=classification.is_match)
         except Exception as exc:
-            log.error("detection_llm_error", source=candidate.source_name, error=str(exc))
+            log.error(
+                "detection_llm_error",
+                source=candidate.source_name,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return None
 
         if not classification.is_match or classification.confidence < 0.5:
@@ -180,7 +266,8 @@ Analyze and respond with JSON only.
             source_url=candidate.source_url,
             pii_category=primary_category,
             severity=severity,
-            pii_summary=classification.pii_summary[:500],
+            # Built locally from match evidence, masked; the model never wrote it.
+            pii_summary=build_pii_summary(identity, evidence),
             confidence=round(classification.confidence, 2),
         )
 

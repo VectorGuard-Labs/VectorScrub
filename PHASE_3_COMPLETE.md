@@ -1,5 +1,8 @@
 # VectorScrub Phase 3 - COMPLETE ✅
 
+> **Historical snapshot - superseded in part.** Family accounts described below were later removed (migration `0005_remove_family_tier.sql`): all plans are per person and the `/family/*` endpoints and family service were later deleted. Monitoring was later completed end to end (migration `0006_monitoring_support.sql`); the monitoring loop described as a scaffold or "fully operational" here is now implemented and verified. See README.md > Recent Updates and Legal and Operational Risk.
+
+
 ## 🎉 All 12 Tasks Complete (100%)
 
 Phase 3 "Keep Me Protected" is fully implemented with scheduled monitoring, reappearance detection, family accounts, privacy score trends, and comprehensive alert systems.
@@ -24,7 +27,7 @@ Phase 3 "Keep Me Protected" is fully implemented with scheduled monitoring, reap
 **File:** `backend/src/jobs/scheduler.rs`
 - Runs every 6 hours
 - Personal tier: 30-day rescans
-- Premium/Family: 7-day rescans
+- Premium: 7-day rescans
 
 ### 3. Privacy Score Trend Tracking ✅
 **API:** `GET /api/v1/privacy-score/history?days=30`
@@ -340,7 +343,7 @@ DROP_ENABLE_SANDBOX=true
 ### Automatic Monitoring
 ✅ Scheduled rescans (tier-based frequency)
 ✅ Reappearance detection
-✅ Automatic re-removal queuing
+✅ Re-removal queuing (superseded: re-removal now always requires the customer to re-authorize)
 
 ### Privacy Insights
 ✅ Score trends over time

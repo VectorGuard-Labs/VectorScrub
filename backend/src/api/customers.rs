@@ -3,7 +3,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use crate::db::AppState;
 use crate::middleware::auth_extractor::AuthenticatedCustomer;
 use crate::models::customer::{CustomerProfile, SubmitIdentityRequest};
-use crate::services::customer as customer_svc;
+use crate::services::{audit, customer as customer_svc};
 use crate::crypto::MasterKey;
 use validator::Validate;
 
@@ -14,7 +14,7 @@ pub async fn get_profile(
 ) -> Result<Json<CustomerProfile>, (StatusCode, String)> {
     let customer = customer_svc::find_by_id(&state.pool, auth.id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(super::error::internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Customer not found".into()))?;
 
     Ok(Json(customer.into()))
@@ -31,11 +31,19 @@ pub async fn submit_identity(
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
 
     let master = MasterKey::from_base64(&state.config.master_key_b64)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(super::error::internal_error)?;
 
     customer_svc::save_identity(&state.pool, &master, &req, auth.id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(super::error::internal_error)?;
+
+    // Record that identity data was stored or replaced (never its contents).
+    audit::AuditEntry::builder(audit::actions::IDENTITY_SUBMIT, audit::resources::IDENTITY)
+        .customer_id(auth.id)
+        .resource_id(auth.id)
+        .log(&state.pool)
+        .await
+        .ok();
 
     Ok((
         StatusCode::OK,

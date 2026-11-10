@@ -1,34 +1,147 @@
 """
-Monitoring Agent — Phase 3
-Periodically re-scans previously removed exposures to detect reappearance.
-Uses the detection agent to verify if PII has reappeared.
+Monitoring Agent — removal verification and reappearance detection.
+
+Two jobs, both driven by the orchestrator's monitoring worker:
+
+* verify_removal:      a removal request was submitted; is the record actually gone?
+* check_reappearance:  a record was verified removed; has it come back?
+
+Both reduce to the same question — "does this broker page still show this
+customer?" — answered by _inspect_page(), which returns PRESENT, ABSENT or
+UNKNOWN. UNKNOWN is a first-class answer: the customer is told a record is gone
+only on positive evidence, never because a check failed or was blocked.
+
+Positive evidence for ABSENT is one of:
+  * the page is gone (HTTP 404/410),
+  * the customer's surname does not appear anywhere on the page (checked locally,
+    no LLM call), or
+  * the LLM, shown the page text and *anonymized* identity tokens, says no match.
+
+Everything else — fetch errors, 403/429/5xx, CAPTCHA or bot-wall pages, pages too
+thin to judge (typically JS-rendered), LLM failures — is UNKNOWN and is retried
+soon by the backend rather than being reported as a result.
+
+Privacy: raw PII is never logged and never sent to the LLM. Only page text and
+anonymized tokens (see DetectionAgent._anonymize_identity) reach the model.
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import asyncio
+from dataclasses import dataclass
+from enum import Enum
+from urllib.parse import urlparse
+
 import httpx
 import structlog
-from bs4 import BeautifulSoup
 
 from detection.agent import DetectionAgent
 from shared.backend_client import BackendClient
+from shared.circuit_breaker import CircuitBreakerConfig, CircuitOpenError, get_circuit_breaker
+from shared.models import DiscoveryResult
+from shared.page_text import (
+    MIN_PAGE_TEXT_CHARS,
+    extract_text,
+    looks_blocked,
+    surname_of,
+    window_around_surname,
+)
 
 if TYPE_CHECKING:
     from shared.models import IdentityContext
 
 log = structlog.get_logger(__name__)
 
+# Confidence needed to call a page PRESENT at all (same bar discovery used to
+# confirm the exposure in the first place).
+PRESENT_MIN_CONFIDENCE = 0.5
+# Higher bar to alert a customer that a *removed* record has reappeared, to keep
+# false alarms down.
+REAPPEARANCE_MIN_CONFIDENCE = 0.7
+
+# How much page text (centred on the customer's surname) is shown to the LLM.
+# Kept deliberately small: this is third-party page content that can include the
+# customer's own details and relatives' names. Discovery sends 1,500 characters;
+# 3,000 leaves room to centre on the right record on a long results page.
+LLM_WINDOW_CHARS = 3000
+
+# A source that keeps failing is left alone for a while instead of being hammered.
+FETCH_BREAKER = CircuitBreakerConfig(
+    failure_threshold=5, timeout_seconds=300, success_threshold=2, request_timeout_seconds=30
+)
+
+
+class SourceUnhealthy(Exception):
+    """The source answered 429 or 5xx: counts against its circuit breaker."""
+
+
+class MonitoringOutcome(str, Enum):
+    """Result of a reappearance check. Values match the backend API."""
+    CLEAR = "clear"
+    REAPPEARED = "reappeared"
+    INCONCLUSIVE = "inconclusive"
+
+
+class VerificationOutcome(str, Enum):
+    """Result of a removal verification. Values match the backend API."""
+    REMOVED = "removed"
+    STILL_PRESENT = "still_present"
+    INCONCLUSIVE = "inconclusive"
+
+
+class PageState(str, Enum):
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class _Fetch:
+    kind: str  # "ok" | "gone" | "error"
+    html: str = ""
+
 
 class MonitoringAgent:
-    """
-    Checks whether previously removed records have reappeared on data broker sites.
-    Uses the detection agent to properly classify potential reappearances.
-    """
+    """Re-checks broker pages to verify removals and detect reappearance."""
 
     def __init__(self) -> None:
         self.backend = BackendClient()
         self.detection_agent = DetectionAgent()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def verify_removal(
+        self,
+        removal_request_id: str,
+        customer_id: str,
+        source_name: str,
+        source_url: str,
+        identity: IdentityContext,
+    ) -> VerificationOutcome:
+        """Check a submitted removal and report the result to the backend."""
+        state, confidence = await self._inspect_page(source_name, source_url, identity)
+
+        if state is PageState.ABSENT:
+            outcome = VerificationOutcome.REMOVED
+        elif state is PageState.PRESENT:
+            outcome = VerificationOutcome.STILL_PRESENT
+        else:
+            outcome = VerificationOutcome.INCONCLUSIVE
+
+        log.info(
+            "removal_verification_checked",
+            removal_request_id=removal_request_id,
+            source=source_name,
+            outcome=outcome.value,
+            confidence=confidence,
+        )
+        await self.backend.report_verification_result(
+            removal_request_id, customer_id, outcome.value
+        )
+        return outcome
 
     async def check_reappearance(
         self,
@@ -37,139 +150,122 @@ class MonitoringAgent:
         source_name: str,
         source_url: str,
         identity: IdentityContext,
-    ) -> bool:
+    ) -> MonitoringOutcome:
         """
-        Check if a previously removed exposure has reappeared.
-        Returns True if reappearance is detected.
+        Check whether a removed record is back and report the result to the
+        backend, which reactivates the exposure and alerts the customer. This never
+        submits a new removal: that always needs fresh customer authorization.
         """
+        state, confidence = await self._inspect_page(source_name, source_url, identity)
+
+        if state is PageState.PRESENT and confidence >= REAPPEARANCE_MIN_CONFIDENCE:
+            outcome = MonitoringOutcome.REAPPEARED
+        elif state is PageState.UNKNOWN:
+            outcome = MonitoringOutcome.INCONCLUSIVE
+        else:
+            # ABSENT, or only weakly matching: don't raise a false alarm.
+            outcome = MonitoringOutcome.CLEAR
+
         log.info(
-            "checking_reappearance",
+            "reappearance_checked",
             exposure_id=exposure_id,
             source=source_name,
-            url=source_url,
+            outcome=outcome.value,
+            confidence=confidence,
         )
+        await self.backend.report_monitoring_result(exposure_id, customer_id, outcome.value)
+        return outcome
 
-        # Fetch the URL to check current content
-        content = await self._fetch_url(source_url)
-        if not content:
-            log.debug("no_content_fetched", url=source_url)
-            return False
+    # ------------------------------------------------------------------
+    # Page inspection
+    # ------------------------------------------------------------------
 
-        # Extract text from HTML
-        text = self._extract_text(content)
-        if not text or len(text) < 100:
-            log.debug("insufficient_text", url=source_url, length=len(text) if text else 0)
-            return False
+    async def _inspect_page(
+        self, source_name: str, source_url: str, identity: IdentityContext
+    ) -> tuple[PageState, float]:
+        """Return (state, confidence) for "does this page still show the customer?"."""
+        fetched = await self._fetch_url(source_url)
 
-        # Use detection agent to classify if PII is present
+        if fetched.kind == "gone":
+            return PageState.ABSENT, 1.0
+        if fetched.kind == "error":
+            return PageState.UNKNOWN, 0.0
+
+        text = extract_text(fetched.html)
+        if len(text) < MIN_PAGE_TEXT_CHARS:
+            log.debug("page_too_thin", source=source_name, length=len(text))
+            return PageState.UNKNOWN, 0.0
+        if looks_blocked(text):
+            log.info("page_looks_blocked", source=source_name)
+            return PageState.UNKNOWN, 0.0
+
+        surname = surname_of(identity.full_name)
+        if not surname:
+            log.warning("no_surname_for_check", source=source_name)
+            return PageState.UNKNOWN, 0.0
+
+        window = window_around_surname(text, surname, LLM_WINDOW_CHARS)
+        if window is None:
+            return PageState.ABSENT, 1.0
+
+        candidate = DiscoveryResult(
+            source_name=source_name,
+            source_url=source_url,
+            raw_text_snippet=window,
+            confidence=1.0,
+        )
         try:
-            result = await self.detection_agent.classify(
-                source_name=source_name,
-                source_url=source_url,
-                page_text=text,
-                identity=identity,
+            verdict = await self.detection_agent.assess_page(
+                candidate, identity, max_chars=LLM_WINDOW_CHARS
             )
         except Exception as exc:
-            log.error("detection_failed", url=source_url, error=str(exc))
-            return False
+            # An LLM outage must never read as "the record is gone".
+            log.error("assessment_failed", source=source_name, error=str(exc))
+            return PageState.UNKNOWN, 0.0
 
-        # If detection agent found PII with reasonable confidence, it has reappeared
-        if result and result.confidence >= 0.7:
-            log.warning(
-                "reappearance_detected",
-                exposure_id=exposure_id,
-                customer_id=customer_id,
-                source=source_name,
-                url=source_url,
-                confidence=result.confidence,
-                category=result.pii_category,
-            )
+        confidence = round(float(verdict.confidence), 2)
+        if verdict.is_match and confidence >= PRESENT_MIN_CONFIDENCE:
+            return PageState.PRESENT, confidence
+        return PageState.ABSENT, confidence
 
-            # Mark exposure as reappeared and create alert
-            await self._handle_reappearance(
-                exposure_id=exposure_id,
-                customer_id=customer_id,
-                source_name=source_name,
-                source_url=source_url,
-                result=result,
-            )
-
-            return True
-
-        log.debug("no_reappearance", url=source_url, confidence=result.confidence if result else 0)
-        return False
-
-    async def _fetch_url(self, url: str) -> str | None:
-        """Fetch URL content with retries and proper headers."""
+    async def _fetch_url(self, url: str) -> _Fetch:
+        """
+        GET the page. 404/410 means the page is gone (a good outcome after a removal);
+        any other non-200 or a transport error is inconclusive. Calls to one host go through
+        a circuit breaker: after repeated failures or 429/5xx answers the host is left alone
+        for a few minutes, and those checks come back inconclusive instead of piling on.
+        """
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         }
+        host = urlparse(url).hostname or "unknown"
+        breaker = get_circuit_breaker(f"monitor:{host}", FETCH_BREAKER)
 
-        try:
+        async def get() -> httpx.Response:
             async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
                 resp = await client.get(url, headers=headers)
-                if resp.status_code == 200:
-                    return resp.text
-                log.warning("fetch_failed", url=url, status_code=resp.status_code)
-                return None
-        except Exception as exc:
-            log.warning("fetch_exception", url=url, error=str(exc))
-            return None
+            if resp.status_code == 429 or resp.status_code >= 500:
+                raise SourceUnhealthy(resp.status_code)
+            return resp
 
-    def _extract_text(self, html: str) -> str:
-        """Extract clean text from HTML."""
         try:
-            soup = BeautifulSoup(html, "html.parser")
-            # Remove script and style elements
-            for element in soup(["script", "style", "noscript"]):
-                element.decompose()
-            text = soup.get_text(separator=" ", strip=True)
-            return " ".join(text.split())  # Normalize whitespace
-        except Exception as exc:
-            log.warning("text_extraction_failed", error=str(exc))
-            return ""
+            resp = await breaker.execute_async(get)
+        except CircuitOpenError:
+            log.info("fetch_skipped_circuit_open", host=host)
+            return _Fetch("error")
+        except SourceUnhealthy as exc:
+            log.warning("fetch_failed", host=host, status_code=exc.args[0])
+            return _Fetch("error")
+        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            # Type only: transport error text can embed the URL, and URLs can embed names.
+            log.warning("fetch_exception", host=host, error_type=type(exc).__name__)
+            return _Fetch("error")
 
-    async def _handle_reappearance(
-        self,
-        exposure_id: str,
-        customer_id: str,
-        source_name: str,
-        source_url: str,
-        result,
-    ) -> None:
-        """
-        Handle a detected reappearance:
-        1. Mark original exposure as reappeared
-        2. Create alert
-        3. Create new removal request (if auto-removal is enabled)
-        """
-        # Mark exposure as reappeared
-        try:
-            # Update exposure status (assuming we add a reappeared status or reactivate)
-            # For now, we'll just create a new exposure since reappearance means new data found
-            log.info(
-                "handling_reappearance",
-                exposure_id=exposure_id,
-                customer_id=customer_id,
-            )
-
-            # Create alert for the customer
-            alert_data = {
-                "customer_id": customer_id,
-                "alert_type": "reappearance",
-                "title": f"Information reappeared on {source_name}",
-                "message": f"Previously removed information has reappeared at {source_name}. A new removal request has been prepared.",
-            }
-
-            # Send alert via backend (we'll need to add this endpoint)
-            # For now, just log it
-            log.warning("reappearance_alert", **alert_data)
-
-        except Exception as exc:
-            log.error(
-                "reappearance_handling_failed",
-                exposure_id=exposure_id,
-                error=str(exc),
-            )
+        if resp.status_code == 200:
+            return _Fetch("ok", resp.text)
+        if resp.status_code in (404, 410):
+            return _Fetch("gone")
+        log.warning("fetch_failed", host=host, status_code=resp.status_code)
+        return _Fetch("error")

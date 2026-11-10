@@ -12,6 +12,8 @@ import type {
   ScanJob,
 } from "@/types";
 
+import { csrfFetch } from "@/lib/csrf";
+
 const BASE = "/api/v1";
 
 function getToken(): string | null {
@@ -61,7 +63,7 @@ export async function login(
 
 // Profile
 export async function getProfile(): Promise<CustomerProfile> {
-  const res = await fetch(`${BASE}/me`, { headers: authHeaders() });
+  const res = await csrfFetch(`${BASE}/me`, { headers: authHeaders() });
   return handleResponse<CustomerProfile>(res);
 }
 
@@ -76,7 +78,7 @@ export interface IdentityPayload {
 }
 
 export async function submitIdentity(payload: IdentityPayload): Promise<void> {
-  const res = await fetch(`${BASE}/me/identity`, {
+  const res = await csrfFetch(`${BASE}/me/identity`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify(payload),
@@ -90,7 +92,7 @@ export async function initiateSccan(): Promise<{
   status: string;
   message: string;
 }> {
-  const res = await fetch(`${BASE}/scans`, {
+  const res = await csrfFetch(`${BASE}/scans`, {
     method: "POST",
     headers: authHeaders(),
   });
@@ -98,12 +100,12 @@ export async function initiateSccan(): Promise<{
 }
 
 export async function listScans(): Promise<{ jobs: ScanJob[] }> {
-  const res = await fetch(`${BASE}/scans`, { headers: authHeaders() });
+  const res = await csrfFetch(`${BASE}/scans`, { headers: authHeaders() });
   return handleResponse(res);
 }
 
 export async function getScan(jobId: string): Promise<{ job: ScanJob }> {
-  const res = await fetch(`${BASE}/scans/${jobId}`, {
+  const res = await csrfFetch(`${BASE}/scans/${jobId}`, {
     headers: authHeaders(),
   });
   return handleResponse(res);
@@ -111,14 +113,14 @@ export async function getScan(jobId: string): Promise<{ job: ScanJob }> {
 
 // Exposures
 export async function listExposures(): Promise<{ exposures: Exposure[] }> {
-  const res = await fetch(`${BASE}/exposures`, { headers: authHeaders() });
+  const res = await csrfFetch(`${BASE}/exposures`, { headers: authHeaders() });
   return handleResponse(res);
 }
 
 export async function getExposureSummary(): Promise<{
   summary: ExposureSummary;
 }> {
-  const res = await fetch(`${BASE}/exposures/summary`, {
+  const res = await csrfFetch(`${BASE}/exposures/summary`, {
     headers: authHeaders(),
   });
   return handleResponse(res);
@@ -128,7 +130,7 @@ export async function getExposureSummary(): Promise<{
 export async function listRemovalRequests(): Promise<{
   requests: RemovalRequest[];
 }> {
-  const res = await fetch(`${BASE}/removal-requests`, {
+  const res = await csrfFetch(`${BASE}/removal-requests`, {
     headers: authHeaders(),
   });
   return handleResponse(res);
@@ -138,7 +140,7 @@ export async function authorizeRemoval(exposureId: string): Promise<{
   request: RemovalRequest;
   message: string;
 }> {
-  const res = await fetch(`${BASE}/removal-requests/${exposureId}/authorize`, {
+  const res = await csrfFetch(`${BASE}/removal-requests/${exposureId}/authorize`, {
     method: "POST",
     headers: authHeaders(),
   });
@@ -149,7 +151,7 @@ export async function getRemovalRequest(requestId: string): Promise<{
   request: RemovalRequest;
   audit_log: RemovalAuditEntry[];
 }> {
-  const res = await fetch(`${BASE}/removal-requests/${requestId}`, {
+  const res = await csrfFetch(`${BASE}/removal-requests/${requestId}`, {
     headers: authHeaders(),
   });
   return handleResponse(res);
@@ -176,59 +178,7 @@ export interface PrivacyScoreTrend {
 }
 
 export async function getPrivacyScoreHistory(days: number = 30): Promise<PrivacyScoreTrend> {
-  const res = await fetch(`${BASE}/privacy-score/history?days=${days}`, {
-    headers: authHeaders(),
-  });
-  return handleResponse(res);
-}
-
-// Family Management
-export interface FamilyMember {
-  id: string;
-  member_email: string;
-  member_name: string | null;
-  privacy_score: number | null;
-  role: string;
-  invited_at: string | null;
-  accepted_at: string | null;
-}
-
-export interface FamilyStats {
-  total_members: number;
-  average_privacy_score: number;
-  total_exposures: number;
-  members: FamilyMember[];
-}
-
-export async function addFamilyMember(memberEmail: string): Promise<{ id: string; message: string }> {
-  const res = await fetch(`${BASE}/family/members`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({ member_email: memberEmail }),
-  });
-  return handleResponse(res);
-}
-
-export async function removeFamilyMember(memberId: string): Promise<void> {
-  const res = await fetch(`${BASE}/family/members/${memberId}`, {
-    method: "DELETE",
-    headers: authHeaders(),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(text || `HTTP ${res.status}`);
-  }
-}
-
-export async function listFamilyMembers(): Promise<FamilyMember[]> {
-  const res = await fetch(`${BASE}/family/members`, {
-    headers: authHeaders(),
-  });
-  return handleResponse(res);
-}
-
-export async function getFamilyStats(): Promise<FamilyStats> {
-  const res = await fetch(`${BASE}/family/stats`, {
+  const res = await csrfFetch(`${BASE}/privacy-score/history?days=${days}`, {
     headers: authHeaders(),
   });
   return handleResponse(res);

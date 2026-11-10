@@ -1,11 +1,21 @@
 FROM python:3.13-slim-bookworm
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium chromium-driver \
-    && rm -rf /var/lib/apt/lists/*
+
+# Playwright downloads its own Chromium. Put it somewhere every user can read: the default
+# (~/.cache) belongs to root, and the worker does not run as root.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 COPY requirements.txt .
+# Includes spaCy and the hash-pinned en_core_web_sm model used by the PII guard. pip refuses
+# the install if the model file does not match its pinned SHA-256.
 RUN pip install --no-cache-dir -r requirements.txt
-RUN playwright install chromium --with-deps 2>/dev/null || true
+
+# No `|| true`: if the browser or its system libraries cannot be installed, the build must fail
+# rather than produce an image that can silently never submit a removal.
+RUN playwright install --with-deps chromium && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . .
-USER nobody
+RUN useradd --create-home --uid 10001 agent
+USER agent
 ENTRYPOINT ["python", "-m", "orchestrator.orchestrator"]

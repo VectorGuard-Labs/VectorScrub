@@ -1,5 +1,6 @@
-/// Background job module.
-/// The Rust backend enqueues jobs into Redis; the Python agent layer
-/// consumes them. This module may be expanded with Rust-native workers
-/// for lightweight tasks (e.g., scheduled rescans, privacy score updates).
+//! Background jobs run inside the backend process.
+//!
+//! The Rust backend enqueues scan jobs into Redis and the Python agent layer consumes
+//! them; these tasks keep that handoff reliable and schedule recurring work.
+pub mod recovery;
 pub mod scheduler;

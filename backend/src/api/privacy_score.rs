@@ -18,7 +18,7 @@ pub async fn get_history(
 ) -> Result<Json<PrivacyScoreTrend>, (StatusCode, String)> {
     let trend = score_svc::get_trend(&state.pool, auth.id, params.days)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(super::error::internal_error)?;
 
     Ok(Json(trend))
 }

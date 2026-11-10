@@ -58,12 +58,8 @@ fn normalize_path(path: &str) -> String {
     let normalized: Vec<String> = parts
         .iter()
         .map(|part| {
-            // Replace UUIDs with :id
-            if part.len() == 36 && part.contains('-') {
-                ":id".to_string()
-            }
-            // Replace numeric IDs with :id
-            else if part.parse::<u64>().is_ok() {
+            // Replace UUIDs and numeric IDs with :id so metric labels stay low-cardinality
+            if (part.len() == 36 && part.contains('-')) || part.parse::<u64>().is_ok() {
                 ":id".to_string()
             } else {
                 (*part).to_string()

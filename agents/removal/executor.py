@@ -10,6 +10,7 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
+from urllib.parse import urlparse
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 import httpx
 import structlog
@@ -51,7 +52,8 @@ class RemovalExecutor:
             "submit_removal",
             removal_request_id=removal_request_id,
             procedure_type=procedure.procedure_type,
-            source_url=source_url,
+            # Host only: listing URLs commonly embed the person's name.
+            source_host=urlparse(source_url).hostname,
         )
 
         try:
@@ -88,6 +90,14 @@ class RemovalExecutor:
         Submits removal request via web form using Playwright.
 
         Generic implementation for MVP - in production, use site-specific handlers.
+
+        Reliability contract: this returns "submitted" ONLY when there is positive
+        evidence the broker accepted the request (a confirmation reference, or
+        success wording on the resulting page). Anything else — a form that has
+        changed shape, no field or submit control matched, a CAPTCHA, an ambiguous
+        result page — returns "failed" with a reason, so the customer is told the
+        truth and can retry, instead of being told a request went through when it
+        may not have.
         """
         log.info("submit_web_form", opt_out_url=procedure.opt_out_url)
 
@@ -101,12 +111,30 @@ class RemovalExecutor:
                 await page.goto(procedure.opt_out_url, timeout=30000)
                 await page.wait_for_load_state("networkidle", timeout=30000)
 
+                # Do not attempt to defeat bot protection. A CAPTCHA means the
+                # broker wants a human; report it and stop.
+                if await self._has_captcha(page):
+                    log.warning("web_form_captcha", opt_out_url=procedure.opt_out_url)
+                    return self._failed(
+                        "CAPTCHA challenge on the opt-out page; this source needs "
+                        "to be completed manually"
+                    )
+
                 # Fill form fields using generic selectors
                 # In production: use procedure.form_fields for site-specific selectors
-                await self._fill_generic_form(page, identity, source_url)
+                fields_filled = await self._fill_generic_form(page, identity, source_url)
+                if fields_filled == 0:
+                    return self._failed(
+                        "No recognizable form fields on the opt-out page (the page "
+                        "layout may have changed)"
+                    )
 
                 # Submit form
-                await self._submit_form(page)
+                if not await self._submit_form(page):
+                    return self._failed(
+                        "No submit control found on the opt-out page (the page "
+                        "layout may have changed)"
+                    )
 
                 # Wait for confirmation page
                 await page.wait_for_load_state("networkidle", timeout=20000)
@@ -116,8 +144,18 @@ class RemovalExecutor:
                 screenshot_bytes = await page.screenshot(full_page=True)
                 evidence_hash = self.generate_evidence_hash(screenshot_bytes)
 
-                # Extract confirmation reference
+                # Extract confirmation reference and look for success wording
                 confirmation_ref = await self.extract_confirmation_reference(page)
+                looks_successful = await self._page_indicates_success(page)
+
+                if not confirmation_ref and not looks_successful:
+                    log.warning("web_form_unconfirmed", evidence_hash=evidence_hash)
+                    result = self._failed(
+                        "Form was submitted but no confirmation was detected (the "
+                        "request may not have been accepted)"
+                    )
+                    result["evidence_hash"] = evidence_hash
+                    return result
 
                 log.info(
                     "web_form_submitted",
@@ -134,20 +172,77 @@ class RemovalExecutor:
 
             except PlaywrightTimeout as exc:
                 log.warning("web_form_timeout", error=str(exc))
-                return {
-                    "status": "failed",
-                    "confirmation_ref": None,
-                    "evidence_hash": None,
-                    "error": f"Timeout: {exc}",
-                }
+                return self._failed(f"Timeout: {exc}")
             finally:
                 await browser.close()
 
+    @staticmethod
+    def _failed(reason: str) -> dict:
+        """Standard failed-submission result."""
+        return {
+            "status": "failed",
+            "confirmation_ref": None,
+            "evidence_hash": None,
+            "error": reason,
+        }
+
+    async def _has_captcha(self, page: Page) -> bool:
+        """True if the page presents a CAPTCHA / human-verification widget."""
+        selectors = [
+            'iframe[src*="recaptcha"]',
+            'iframe[src*="hcaptcha"]',
+            'iframe[src*="challenges.cloudflare.com"]',
+            ".g-recaptcha",
+            ".h-captcha",
+            ".cf-turnstile",
+            "[data-sitekey]",
+        ]
+        for selector in selectors:
+            if await page.locator(selector).count() > 0:
+                return True
+        return False
+
+    async def _page_indicates_success(self, page: Page) -> bool:
+        """
+        True if the page after submission reads like an acceptance and not like an
+        error. Deliberately conservative: ambiguous pages are treated as failures.
+        """
+        try:
+            body = (await page.inner_text("body")).lower()
+        except Exception:
+            return False
+
+        failure_phrases = (
+            "please try again",
+            "something went wrong",
+            "an error occurred",
+            "invalid",
+            "could not be",
+            "unable to",
+            "failed",
+        )
+        if any(phrase in body for phrase in failure_phrases):
+            return False
+
+        success_phrases = (
+            "thank you",
+            "has been submitted",
+            "have been submitted",
+            "request has been",
+            "we have received",
+            "we've received",
+            "check your email",
+            "verification email",
+            "confirmation email",
+            "successfully",
+        )
+        return any(phrase in body for phrase in success_phrases)
+
     async def _fill_generic_form(
         self, page: Page, identity: IdentityContext, source_url: str
-    ) -> None:
+    ) -> int:
         """
-        Fills form fields using generic selectors.
+        Fills form fields using generic selectors and returns how many were filled.
 
         MVP implementation - matches common patterns like:
         - input[name*="name"]
@@ -156,7 +251,10 @@ class RemovalExecutor:
 
         In production: use site-specific selectors stored in procedure.form_fields.
         """
-        full_name = f"{identity.first_name} {identity.last_name}"
+        full_name = (
+            identity.full_name or f"{identity.first_name} {identity.last_name}"
+        ).strip()
+        filled = 0
 
         # Try to fill name field
         name_selectors = [
@@ -164,11 +262,13 @@ class RemovalExecutor:
             'input[id*="name" i]',
             'input[placeholder*="name" i]',
         ]
-        for selector in name_selectors:
-            if await page.locator(selector).count() > 0:
-                await page.locator(selector).first.fill(full_name)
-                log.debug("filled_name_field", selector=selector)
-                break
+        if full_name:
+            for selector in name_selectors:
+                if await page.locator(selector).count() > 0:
+                    await page.locator(selector).first.fill(full_name)
+                    log.debug("filled_name_field", selector=selector)
+                    filled += 1
+                    break
 
         # Try to fill URL/listing field
         url_selectors = [
@@ -178,9 +278,12 @@ class RemovalExecutor:
             'textarea[name*="url" i]',
         ]
         for selector in url_selectors:
+            if not source_url:
+                break
             if await page.locator(selector).count() > 0:
                 await page.locator(selector).first.fill(source_url)
                 log.debug("filled_url_field", selector=selector)
+                filled += 1
                 break
 
         # Try to fill email field if present
@@ -194,10 +297,13 @@ class RemovalExecutor:
                 if await page.locator(selector).count() > 0:
                     await page.locator(selector).first.fill(identity.email)
                     log.debug("filled_email_field", selector=selector)
+                    filled += 1
                     break
 
-    async def _submit_form(self, page: Page) -> None:
-        """Submits the form using common submit patterns."""
+        return filled
+
+    async def _submit_form(self, page: Page) -> bool:
+        """Submits the form using common submit patterns. Returns False if none matched."""
         submit_selectors = [
             'button[type="submit"]',
             'input[type="submit"]',
@@ -210,11 +316,15 @@ class RemovalExecutor:
             if await page.locator(selector).count() > 0:
                 await page.locator(selector).first.click()
                 log.debug("clicked_submit", selector=selector)
-                return
+                return True
 
         # Fallback: press Enter on first input
-        await page.locator("input").first.press("Enter")
-        log.debug("fallback_submit", method="enter_key")
+        if await page.locator("input").count() > 0:
+            await page.locator("input").first.press("Enter")
+            log.debug("fallback_submit", method="enter_key")
+            return True
+
+        return False
 
     async def extract_confirmation_reference(self, page: Page) -> Optional[str]:
         """

@@ -9,6 +9,10 @@ use crate::models::customer::{
 };
 use crate::services::auth::hash_password;
 
+/// Returned by `create_account` when the email is already registered. The API maps this
+/// (and only this) to 409; any other failure is an internal error.
+pub const EMAIL_TAKEN: &str = "An account with this email address already exists";
+
 /// Create a new customer account. Returns the created customer.
 pub async fn create_account(
     pool: &PgPool,
@@ -21,7 +25,7 @@ pub async fn create_account(
             .await?;
 
     if existing.is_some() {
-        return Err(anyhow!("An account with this email address already exists"));
+        return Err(anyhow!(EMAIL_TAKEN));
     }
 
     let password_hash = hash_password(&req.password)?;
@@ -41,7 +45,13 @@ pub async fn create_account(
     .bind(&password_hash)
     .bind(now)
     .fetch_one(pool)
-    .await?;
+    .await
+    .map_err(|e| match &e {
+        // Two simultaneous registrations can both pass the check above; the unique
+        // constraint is the real guard, and losing that race is a conflict, not a crash.
+        sqlx::Error::Database(db) if db.is_unique_violation() => anyhow!(EMAIL_TAKEN),
+        _ => anyhow::Error::from(e),
+    })?;
 
     Ok(customer)
 }
@@ -125,10 +135,17 @@ pub async fn save_identity(
     Ok(profile)
 }
 
-/// Load and decrypt an identity profile for internal use (e.g., before dispatching a scan job).
+/// Whether the customer has submitted an identity profile.
+pub async fn has_identity(pool: &PgPool, customer_id: Uuid) -> Result<bool> {
+    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM identity_profiles WHERE customer_id = $1)")
+        .bind(customer_id)
+        .fetch_one(pool)
+        .await?)
+}
+
+/// Load and decrypt an identity profile. Only services/identity_access.rs should call
+/// this on behalf of the agent layer: it enforces scoping and writes the audit record.
 /// The returned CleartextIdentity is zeroized on drop.
-/// Phase 1 — called by the agent identity endpoint (wired in Phase 1 completion).
-#[allow(dead_code)]
 pub async fn load_cleartext_identity(
     pool: &PgPool,
     master: &MasterKey,
@@ -160,19 +177,4 @@ pub async fn load_cleartext_identity(
             .map(|b| decrypt_str(&key, b))
             .transpose()?,
     })
-}
-
-/// Update a customer's privacy score based on current exposure data.
-/// Called after each completed scan job.
-#[allow(dead_code)]
-pub async fn update_privacy_score(pool: &PgPool, customer_id: Uuid, score: f32) -> Result<()> {
-    sqlx::query(
-        "UPDATE customers SET privacy_score = $1, updated_at = $2 WHERE id = $3",
-    )
-    .bind(score)
-    .bind(OffsetDateTime::now_utc())
-    .bind(customer_id)
-    .execute(pool)
-    .await?;
-    Ok(())
 }

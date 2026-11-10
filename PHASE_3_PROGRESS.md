@@ -1,5 +1,8 @@
 # VectorScrub Phase 3 Development Progress
 
+> **Historical snapshot - superseded in part.** Family accounts described below were later removed (migration `0005_remove_family_tier.sql`): all plans are per person and the `/family/*` endpoints and family service were later deleted. Monitoring was later completed end to end (migration `0006_monitoring_support.sql`); the monitoring loop described as a scaffold or "fully operational" here is now implemented and verified. See README.md > Recent Updates and Legal and Operational Risk.
+
+
 ## Overview
 Phase 3 "Keep Me Protected" adds scheduled monitoring, reappearance detection, family accounts, privacy score trends, and notification systems.
 
@@ -32,7 +35,7 @@ Phase 3 "Keep Me Protected" adds scheduled monitoring, reappearance detection, f
 **Features:**
 - Automatic rescans based on subscription tier
   - Personal: Monthly (30 days)
-  - Premium/Family: Weekly (7 days)
+  - Premium: Weekly (7 days)
 - Respects `monitoring_enabled` flag
 - Queries customers due for rescan every 6 hours
 - Generates secure identity tokens for each scan

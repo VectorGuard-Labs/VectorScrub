@@ -1,5 +1,8 @@
 # VectorScrub Phase 3 Backend - COMPLETE ✅
 
+> **Historical snapshot - superseded in part.** Family accounts described below were later removed (migration `0005_remove_family_tier.sql`): all plans are per person and the `/family/*` endpoints and family service were later deleted. Monitoring was later completed end to end (migration `0006_monitoring_support.sql`); the monitoring loop described as a scaffold or "fully operational" here is now implemented and verified. See README.md > Recent Updates and Legal and Operational Risk.
+
+
 ## Status: All 9 Backend Tasks Complete
 
 ---
@@ -19,7 +22,7 @@ All Phase 3 tables created:
 
 - Runs every 6 hours checking for customers due for rescan
 - Personal tier: 30-day interval
-- Premium/Family tier: 7-day interval
+- Premium tier: 7-day interval
 - Spawned as background task in `main.rs`
 
 ### 3. Privacy Score Trend Tracking (Task #6) ✅

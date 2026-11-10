@@ -45,7 +45,9 @@ Verify all required variables are set:
 
 - [ ] `OTLP_ENDPOINT` - OpenTelemetry for distributed tracing
 - [ ] `DROP_API_KEY` - California DROP integration
-- [ ] `HSM_MASTER_PASSWORD` - PyHSM for hardware key management
+- [ ] `MASTER_ENCRYPTION_KEY` injected from a secrets manager (there is no HSM/KMS integration in the code)
+- [ ] `JWT_SECRET` and `AGENT_API_KEY` each at least 32 characters (startup rejects shorter)
+- [ ] `TRUST_PROXY_HEADERS=true` only if the proxy overwrites `X-Forwarded-For`/`X-Real-IP`; `/metrics` restricted at the proxy
 
 ## Deployment
 
@@ -139,7 +141,7 @@ Verify all required variables are set:
 - [ ] Cookie consent banner (if serving EU users)
 - [ ] GDPR compliance verified (if serving EU users)
 - [ ] CCPA compliance verified (if serving CA users)
-- [ ] Data retention policies documented
+- [ ] Data retention / account-erasure policy decided and implemented (none runs today; see `DATA_RETENTION.md`)
 - [ ] Right to deletion mechanism tested
 - [ ] Data export mechanism tested
 - [ ] Breach notification procedures documented

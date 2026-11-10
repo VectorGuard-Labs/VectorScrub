@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { User, MapPin, Phone, Mail, Calendar, Plus, X } from "lucide-react";
+import { csrfFetch } from "@/lib/csrf";
 
 export default function ProfilePage() {
   const router = useRouter();
@@ -79,7 +80,7 @@ export default function ProfilePage() {
         throw new Error("Not authenticated. Please log in again.");
       }
 
-      const response = await fetch("/api/v1/me/identity", {
+      const response = await csrfFetch("/api/v1/me/identity", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

@@ -29,7 +29,8 @@ export type RemovalStatus =
   | "verified_removed"
   | "rejected"
   | "unverifiable"
-  | "reappeared";
+  | "reappeared"
+  | "failed";
 
 export interface CustomerProfile {
   id: string;

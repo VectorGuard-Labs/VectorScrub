@@ -7,6 +7,7 @@ use crate::models::exposure::{Exposure, ExposureSeverity, ExposureSummary, PiiCa
 use crate::services::{notification as notification_svc, privacy_score as score_svc};
 
 /// Insert a new exposure discovered by the detection agent.
+#[allow(clippy::too_many_arguments)] // one argument per column of the row being written
 pub async fn record_exposure(
     pool: &PgPool,
     customer_id: Uuid,

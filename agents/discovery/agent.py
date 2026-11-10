@@ -1,26 +1,43 @@
 """
 Discovery Agent — Phase 1
 Searches people-search engines and public directories for a customer's
-personal information. Returns candidate URLs for the Detection Agent to verify.
+personal information. Returns candidate pages, with the relevant page text,
+for the Detection Agent to verify.
 
 Architecture note: This agent receives ONLY the minimum PII needed to
 search each source. It never logs raw PII values.
 """
 import asyncio
-from typing import AsyncGenerator
+from urllib.parse import urlparse
 
 import httpx
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from shared.circuit_breaker import CircuitBreakerConfig, CircuitOpenError, get_circuit_breaker
 from shared.config import get_config
 from shared.models import DiscoveryResult, IdentityContext
+from shared.page_text import MIN_PAGE_TEXT_CHARS, extract_text, looks_blocked, surname_of, window_around_surname
+
+# Characters of page text handed to the detection agent per candidate. The detection agent
+# redacts it (shared/pii_guard.py) and then sends at most its own cap to the model.
+CANDIDATE_TEXT_CHARS = 3000
+
+# A source that keeps failing or rate-limiting us is left alone for a few minutes
+# instead of being hammered by every customer's scan.
+SOURCE_BREAKER = CircuitBreakerConfig(
+    failure_threshold=5, timeout_seconds=300, success_threshold=2, request_timeout_seconds=60
+)
+
+
+class SourceUnhealthy(Exception):
+    """The source answered 429 or 5xx: counts against its circuit breaker."""
 
 log = structlog.get_logger(__name__)
 
 # Supported data broker sources
 # FREE tier: 4 brokers (acquisition tier)
-# PERSONAL/PREMIUM/FAMILY: All 15 brokers
+# PERSONAL/PREMIUM: All 15 brokers
 DISCOVERY_SOURCES = [
     # FREE tier brokers (4)
     {
@@ -158,22 +175,44 @@ class DiscoveryAgent:
                 "+https://vectorscrub.com/bot)"
             ),
         }
+        host = urlparse(url).hostname or source_name
+        breaker = get_circuit_breaker(f"discovery:{host}", SOURCE_BREAKER)
+
+        async def get() -> httpx.Response:
+            resp = await client.get(
+                url, headers=headers, follow_redirects=True, timeout=self.cfg.request_timeout_seconds
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                raise SourceUnhealthy(resp.status_code)
+            return resp
+
         try:
-            resp = await client.get(url, headers=headers, follow_redirects=True, timeout=self.cfg.request_timeout_seconds)
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            log.warning("discovery_fetch_failed", source=source_name, error=str(exc))
+            resp = await breaker.execute_async(get)
+        except CircuitOpenError:
+            log.info("discovery_skipped_circuit_open", source=source_name)
+            return []
+        except SourceUnhealthy as exc:
+            log.warning("discovery_source_unhealthy", source=source_name, status=exc.args[0])
+            return []
+        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            # Type only: transport error text can embed the URL, and the URL embeds the name.
+            log.warning("discovery_fetch_failed", source=source_name, error_type=type(exc).__name__)
             return []
 
         if resp.status_code != 200:
             log.debug("discovery_non_200", source=source_name, status=resp.status_code)
             return []
 
-        text = resp.text.lower()
+        # Visible text, not raw HTML, so markup and scripts do not count as matches.
+        page_text = extract_text(resp.text)
+        if len(page_text) < MIN_PAGE_TEXT_CHARS or looks_blocked(page_text):
+            log.debug("discovery_unusable_page", source=source_name, length=len(page_text))
+            return []
+        text = page_text.lower()
         results = []
 
-        # Lightweight keyword matching — name parts and email domain
+        # Lightweight keyword matching: name parts and address parts
         name_parts = [p.lower() for p in identity.full_name.split() if len(p) > 2]
-        email_domains = [e.split("@")[-1].lower() for e in identity.email_addresses]
 
         matches = sum(1 for part in name_parts if part in text)
         confidence = min(matches / max(len(name_parts), 1), 1.0)
@@ -181,17 +220,21 @@ class DiscoveryAgent:
         # Boost confidence if city/state from address appears
         if identity.current_address:
             addr_parts = identity.current_address.split(",")
-            if any(p.strip().lower() in text for p in addr_parts):
+            if any(p.strip().lower() in text for p in addr_parts if p.strip()):
                 confidence = min(confidence + 0.3, 1.0)
 
         if confidence >= 0.4:
-            # Mask the name in the summary to avoid logging raw PII
-            name_initials = " ".join(p[0] + "***" for p in identity.full_name.split())
+            # Hand the detection agent the part of the page that is about this customer.
+            # (Before this, the snippet was a placeholder string, so the detection model was
+            # never shown any page content.) Detection redacts it before any model sees it.
+            snippet = window_around_surname(page_text, surname_of(identity.full_name), CANDIDATE_TEXT_CHARS)
+            if snippet is None:
+                snippet = page_text[:CANDIDATE_TEXT_CHARS]
             results.append(
                 DiscoveryResult(
                     source_name=source_name,
                     source_url=url,
-                    raw_text_snippet=f"[candidate match for {name_initials}]",
+                    raw_text_snippet=snippet,
                     confidence=round(confidence, 2),
                 )
             )

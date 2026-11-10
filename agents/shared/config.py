@@ -26,9 +26,26 @@ class AgentConfig(BaseSettings):
     scan_queue_key: str = "vectorscrub:scan_jobs"
 
     # Agent behaviour
+    scan_heartbeat_seconds: int = 30  # how often a worker tells the backend it is still alive
     max_concurrent_sources: int = 5
     request_timeout_seconds: int = 30
     max_retries: int = 3
+
+    # Monitoring worker (removal verification + reappearance checks)
+    monitoring_batch_size: int = 25            # targets fetched from the backend per cycle
+    monitoring_idle_seconds: int = 3600        # sleep when nothing is due
+    monitoring_request_delay_seconds: float = 2.0  # politeness delay between source fetches
+
+    # Removal worker
+    removal_request_delay_seconds: float = 5.0  # spacing between submissions to data sources
+
+    # PII guard: person-name detection (spaCy) used before any text reaches an LLM
+    pii_ner_model: str = "en_core_web_sm"
+    # True (default): if the NER model cannot be loaded, LLM calls are blocked (fail
+    # closed). False: continue on the vocabulary filter alone, which still removes
+    # every non-vocabulary word but gives the model less structure ("…" instead of
+    # "[NAME]"). Use False only for local development without the model installed.
+    pii_ner_required: bool = True
 
     # PII safety: never log or transmit raw PII beyond what's minimally needed
     pii_log_masking: bool = True

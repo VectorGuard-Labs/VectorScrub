@@ -27,12 +27,15 @@ Built by **VectorGuard Labs** — the same team behind PyHSM, VectorLedger, and 
 15. [Database Schema](#database-schema)
 16. [MVP Roadmap](#mvp-roadmap)
 17. [California DROP Integration](#california-drop-integration)
-18. [Production Deployment](#production-deployment)
-19. [Competitive Landscape](#competitive-landscape)
-20. [VectorGuard Labs Product Family](#vectorguard-labs-product-family)
-21. [Recent Updates](#recent-updates)
-22. [Contributing](#contributing)
-23. [License](#license)
+18. [Legal and Operational Risk](#legal-and-operational-risk)
+19. [Scan Job Recovery](#scan-job-recovery)
+20. [Testing](#testing)
+21. [Production Deployment](#production-deployment)
+22. [Competitive Landscape](#competitive-landscape)
+23. [VectorGuard Labs Product Family](#vectorguard-labs-product-family)
+24. [Recent Updates](#recent-updates)
+25. [Contributing](#contributing)
+26. [License](#license)
 
 ---
 
@@ -79,16 +82,35 @@ Specialized discovery agents search supported people-search engines, data broker
 ### 2. PII Detection and Classification
 A detection agent analyzes each discovery candidate using a large language model. It classifies what type of personal information is exposed (name, address, phone, email, date of birth, family associations, employment history, etc.) and assigns a severity level (low, medium, high, or critical) based on the combination of fields present.
 
-**Critical security note:** Raw customer PII is never sent to an external LLM. The detection agent anonymizes identity fields into masked tokens (e.g., `J*** S***` for a name, `1** M*** St***` for an address) before passing anything to the model. Matching is done by reasoning about patterns, not by exposing real values.
+**Critical security note — no customer PII ever reaches an LLM, and this is enforced in code.** Every model call goes through one gateway (`DetectionAgent._run_classifier`) that applies `agents/shared/pii_guard.py` first:
+
+- The customer's identity is **never sent, not even masked hints**. Matching against their name (in any ordering or case, with or without accents), addresses, phones, emails, and date of birth happens locally.
+- The broker-page excerpt is **redacted** before the model sees it. The customer's values become typed placeholders (`[CUSTOMER_NAME]`, `[CUSTOMER_ADDRESS]`, `[CUSTOMER_PHONE]`, `[CUSTOMER_EMAIL]`, `[CUSTOMER_DOB]`). Other personal data on the page, such as other people's emails, phones, street addresses, ZIP codes, dates, ages, and SSNs, becomes generic placeholders (`[EMAIL]`, `[PHONE]`, ...). Person names that are not the customer's (relatives, neighbours, namesakes) become `[NAME]` via a local spaCy NER pass. The model judges the match from how the placeholders relate, plus yes/no flags computed locally.
+- **Deny by default.** After redaction, every remaining word that is not on a short list of structural words (`age`, `born`, `lives`, `phone`, `relatives`, `no results found`, ... in `agents/shared/pii_vocab.py`) is dropped, in any script and any casing; a run of dropped words becomes one `…`. This, not NER, is what keeps third-party names out: pattern rules and NER are probabilistic, the vocabulary filter is not. A bonus: free text on a hostile page (such as "ignore previous instructions") is dropped too.
+- The page **URL is not sent** (profile URLs commonly contain the person's name).
+- **Fail closed:** immediately before the call, the excerpt is re-checked twice: no customer value may remain, and nothing outside the allowed vocabulary may remain. Either failure blocks the call with `OutboundPiiError` and no request is made. If the NER model is required (the default) but cannot be loaded, the call is blocked too. In monitoring, a blocked call counts as *inconclusive*, never "removed".
+- The masked summary shown on the dashboard (e.g. `J*** S***, 1** M*** St`) is built locally from the match evidence; the model never writes it.
+
+**What is guaranteed, and how it was measured.** Customer values cannot reach the model: they are removed by pattern rules and the fail-closed check blocks the call if one survives. Third-party names cannot reach the model unless they are spelled exactly like one of the 436 allowed structural words, and that list is kept free of names: it is intersected with the name data of every locale the Faker library ships (about 49,000 distinct name words) and any collision is removed. On 2,500 generated pages with names from 21 locales (including CJK and Arabic scripts) in mixed casings and "Last, First" order, **no name survived the full pipeline**, whereas patterns plus NER *without* the vocabulary filter let a name through on 60% of those pages. For US-style names the same comparison was: normal capitalization 1.0% (patterns) → 0.0% (with filter); lowercase 100% (patterns) → 20.1% (patterns + NER) → 0.0% (with filter).
+
+**What this costs.** The model sees much less text, so detection runs on structure ("`[CUSTOMER_NAME]` near `[CUSTOMER_ADDRESS]`, relatives `[NAME]`, `[NAME]`") rather than prose. That is enough for the match decision in the scenarios tested, but accuracy against real broker pages and a real model has not been measured: compare detection results before and after on a sample of real scans before relying on it. Redaction adds about 50 ms per 3,000-character page (three NER passes over the original, title-cased, and lowercased text) and runs off the event loop.
+
+**Operating it.** NER is a runtime dependency: `spacy` and the `en_core_web_sm` model are pinned in `agents/requirements.txt` (the model wheel is hash-pinned) and install with the rest. Settings: `PII_NER_REQUIRED` (default `true`; if the model cannot load, LLM calls are blocked) and `PII_NER_MODEL` (default `en_core_web_sm`). Setting `PII_NER_REQUIRED=false` is for local development only; it keeps the vocabulary filter, so nothing unsafe is sent, but the model then sees `…` where it would have seen `[NAME]`.
+
+Remaining limits: a person whose name is spelled exactly like an allowed structural word would pass through that word alone; and the vocabulary list is curated for English-language pages, so non-English structural words are dropped (safe, but the model loses that signal).
 
 ### 3. Automated Removal Request Submission
 For each confirmed exposure, VectorScrub identifies the correct opt-out procedure for that specific data source — web form, email submission, or the California DROP API. After explicit customer authorization, VectorScrub automatically submits removal requests using Playwright browser automation for web forms, capturing screenshots as evidence and extracting confirmation references.
 
 ### 4. Removal Tracking and Verification
-Every removal request is tracked through its full lifecycle: authorized → submitted → acknowledged → verified removed. VectorScrub distinguishes between these states clearly so customers always know the true status of their records — not just that a request was sent, but whether removal was actually confirmed. All actions are logged to an immutable, append-only audit trail enforced at the database level.
+Every removal request is tracked through its full lifecycle: authorized → submitted → (acknowledged) → verified removed. VectorScrub distinguishes between these states clearly so customers always know the true status of their records — not just that a request was sent, but whether removal was actually confirmed. All actions are logged to an immutable, append-only audit trail enforced at the database level.
+
+"Verified removed" is earned, not assumed. Once a request's check date arrives, the monitoring agent re-fetches the source page and reports one of three results: the record is **gone** (HTTP 404/410, or the customer no longer appears on the page), **still there**, or **inconclusive** (blocked, CAPTCHA, fetch error, unreadable page, or an LLM failure). Only "gone" marks the request verified. "Still there" is re-checked weekly; "inconclusive" is retried the next day. A request that never verifies within 45 days of submission ends as `rejected` (the source did not honor it) or `unverifiable` (we could not tell), and the customer is alerted. A request whose automated submission could not be completed ends as `failed` and can be re-authorized.
 
 ### 5. Continuous Monitoring
-After removals, VectorScrub continues to monitor sources on a scheduled basis. If a removed record reappears (which happens frequently as data brokers re-acquire information), an alert is sent and a new removal request is prepared automatically.
+After a removal is verified, VectorScrub re-checks the source on the customer's plan schedule — **Premium weekly, Personal monthly** (Free accounts are not monitored). If the record has come back (which happens frequently as data brokers re-acquire information), the exposure is reactivated, the privacy score is recalculated, the removal request is marked `reappeared`, and the customer is alerted.
+
+**Reappearance never triggers an automatic re-submission.** Every removal needs explicit customer authorization, so the alert asks the customer to review and re-authorize from the dashboard. Reappearance alerts use a stricter confidence bar (0.7) than discovery (0.5) to keep false alarms down.
 
 ### 6. Privacy Score and Exposure Report
 Customers see a live **Privacy Score** (0–100) that reflects their current exposure level. The score decreases based on the severity and volume of active exposures, and increases as records are removed. A full exposure history shows every finding, removal, and reappearance over time.
@@ -104,10 +126,10 @@ Most people discover they have dozens of active exposures on their first scan. V
 VectorScrub prepares and submits opt-out requests to data brokers using intelligent browser automation. Every submission is captured with screenshot evidence (SHA-256 hashed for tamper-resistance), confirmation references are extracted, and all actions are logged to an immutable audit trail. Customers see a clear before-and-after record, not just a promise that "we tried."
 
 ### Stop it from coming back
-Data brokers regularly re-acquire and republish information even after opt-outs. Continuous monitoring and automatic re-removal means customers don't have to manage this cycle themselves.
+Data brokers regularly re-acquire and republish information even after opt-outs. Continuous monitoring catches a returning record and alerts you, so you don't have to keep re-checking the sites yourself. You stay in control: re-removal happens only after you re-authorize it.
 
-### Protect your whole family
-The Family plan extends protection to up to five people, with a shared dashboard and individual privacy scores for each member.
+### Plans are per person
+Every plan covers one person. There is no shared or family plan: each family member who wants protection has their own account, their own encrypted profile, and their own Privacy Score.
 
 ### Know your data is protected — for real
 VectorScrub encrypts all customer identity data with AES-256-GCM using a unique cryptographic key derived for each customer. The key material never leaves the Rust backend process. Customer PII is never used to train AI models. The audit log is tamper-evident and append-only.
@@ -144,7 +166,7 @@ Customer Identity Profile (encrypted)
   ┌─────────────────────┐
   │   Detection Agent   │  LLM classifies each candidate:
   │                     │  PII category, severity, confidence
-  │                     │  (uses anonymized tokens — not raw PII)
+  │                     │  (LLM sees only redacted text — no customer PII)
   └────────┬────────────┘
            │  confirmed exposures
            ▼
@@ -158,7 +180,7 @@ Customer Identity Profile (encrypted)
   │  Removal Executor   │  Submits via Playwright (web forms),
   │                     │  email, or DROP API; captures evidence
   └────────┬────────────┘
-           │  (Phase 3)
+           │  verification + monitoring (migration 0006)
            ▼
   ┌─────────────────────┐
   │  Monitoring Agent   │  Re-checks removed records on schedule,
@@ -218,26 +240,27 @@ Security is the core architectural constraint, not an afterthought. Every design
 
 | Concern | How VectorScrub handles it |
 |---|---|
-| PII at rest | AES-256-GCM encryption with a per-customer key derived from the master key via HMAC-SHA256. Each customer's ciphertext can only be decrypted with their derived key. |
-| Master key | Loaded once into the Rust process from an environment variable (or PyHSM in production). Never written to disk, never accessible to the Python agent layer. Production deployments use PyHSM for hardware-backed key management. |
-| PII and LLMs | Raw customer values are never sent to any external LLM API. The detection agent receives only anonymized tokens (first letter + asterisks) for pattern matching. |
+| PII at rest | AES-256-GCM encryption with a per-customer key derived from the master key as SHA-256(master ‖ label ‖ customer id). (Earlier docs said HMAC-SHA256; it is a keyed hash, not an HMAC or HKDF. Changing it would make stored data undecryptable without a migration.) One customer's ciphertext cannot be decrypted with another's key. Known limit: no AEAD associated data, so a blob moved between two fields of the same customer would still decrypt. |
+| Master key | Loaded once into the Rust process from the `MASTER_ENCRYPTION_KEY` environment variable and validated at startup (the process refuses to start if it is not 32 base64 bytes). Never written to disk, never accessible to the Python agent layer. **There is no HSM or KMS integration**: a PyHSM module and its documentation existed but were never wired in (and put a key-store password in the agent process, against this rule), so they were removed. For production, inject the key from a secrets manager or KMS. |
+| PII and LLMs | No customer PII and no third-party names are ever sent to an LLM, enforced in code. All model calls go through one gateway that redacts the customer's values (patterns), detects other people's names (local spaCy NER), drops every word outside a short structural vocabulary, sends no identity (not even masked hints) and no URLs, and re-checks the final excerpt, blocking the call if anything unsafe remains (`agents/shared/pii_guard.py`, `pii_ner.py`, `pii_vocab.py`). See [How the AI Works](#how-the-ai-works). |
 | Removal authorization | No removal request is ever submitted to a data source without an explicit customer authorization recorded in the database with timestamp. The agent prepares; the customer approves; the executor submits. |
-| Audit trail | Every action taken on a removal request is recorded in an append-only `removal_audit_log` table. PostgreSQL rules enforce `NO UPDATE` and `NO DELETE` at the database level, making the log immutable and tamper-evident. Migration 0004 adds comprehensive audit logging across all sensitive operations. |
+| Audit trail | Two append-only logs. `removal_audit_log` records every action on a removal request (PostgreSQL rules turn UPDATE/DELETE into no-ops). `audit_log` records registration, login (success, failure, lockout, with client IP), identity submission, **every release of decrypted identity to the agents (and every refusal)**, scan start/recovery/failure, and removal authorization. `audit_log` is enforced append-only by database triggers (migration 0007): edits, deletes and TRUNCATE fail loudly; the only permitted change is clearing `customer_id`/`user_email` (pseudonymization). This protects against the application and ordinary SQL, not against a database superuser or table owner, who could drop the trigger; real tamper evidence against them needs an external write-once sink or a hash chain, which does not exist. |
 | Evidence collection | Screenshot evidence captured during web form submission is SHA-256 hashed. The hash is stored in the database; screenshots can be stored in encrypted S3 for retrieval. Hashes prove authenticity without storing large binary data. |
 | Model training | Customer PII is never used to fine-tune or train any AI model — not VectorScrub's, not a provider's. |
-| Agent authentication | Rust internal endpoints accept only the `X-Agent-Key` header, not customer JWTs. The agent key is never exposed to the frontend. |
+| Agent authentication and scoping | Internal endpoints accept only the `X-Agent-Key` header (compared in constant time, length-hiding), not customer JWTs; the key must be 32+ characters or the backend will not start. The key is **not a skeleton key**: decrypted identity is released only against a concrete, currently-actionable work item, and the customer is derived from that item, never supplied by the caller. A scan needs the job-scoped token minted for exactly that job (AES-GCM under the customer's key, 24 h TTL) and the job must be queued or running; a removal request must be `authorized` or due for verification; an exposure must be due for a reappearance check for an eligible customer. Every release and every refusal is audited, and a release fails if its audit write fails. There is no "identity by customer id" endpoint. Remaining limit: the key is still one shared secret, and a release contains every identity field because redaction and form filling need them. |
 | Tenant isolation | Per-customer encryption keys mean a compromise of one customer's encrypted data does not affect others. |
 | Password storage | Argon2id with random per-user salt. No plaintext or reversibly encoded passwords stored anywhere. |
 | **Production Security** | **Additional hardening for production deployments** |
-| CSRF protection | Double-submit cookie pattern on all state-changing requests. Token endpoint at `/api/v1/csrf-token`. |
+| CSRF protection | Double-submit cookie on all state-changing requests (POST/PUT/DELETE; login/register and agent endpoints are exempt). The server issues a URL-safe token at `/api/v1/csrf-token`, sets it as the `csrf_token` cookie (`Secure` in production, `SameSite=Strict`), and requires the same value in `X-CSRF-Token`, compared in constant time. The frontend sends it automatically through `csrfFetch` (`frontend/src/lib/csrf.ts`). |
 | Security headers | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy configured via dedicated middleware. |
-| Rate limiting | Request timeout protection (30s) with configurable IP-based rate limiting. Prevents abuse and DoS attacks. |
-| Circuit breakers | Automatic failure detection for external services (data brokers, SMTP, DROP API). Prevents cascading failures and resource exhaustion. |
-| Input validation | Multi-layer validation at agent and API boundaries. Sanitizes all user input before processing. |
+| Rate limiting and lockout | Per-client-IP token buckets (tower_governor): a strict one on login and register (default 5/minute, burst 5) and a general one on the customer API (20/s, burst 60); 429 responses carry `Retry-After`. Internal agent routes and health probes are exempt. Limits are in-memory per backend instance. Client IP is the TCP peer unless `TRUST_PROXY_HEADERS=true` (only behind a proxy that overwrites `X-Forwarded-For`). Separately, 5 failed logins for an email lock it for 15 minutes, doubling every 5 further failures up to an hour; keyed on a hash of the email in Postgres so a non-existent email locks exactly like a real one, and unknown emails still pay for one Argon2 verification so response time does not reveal which emails are registered. Trade-off: someone who knows a victim's email can lock them out for up to an hour; the per-IP limit bounds how fast one source can do it. Request timeout is 30 s. |
+| Circuit breakers | Per-host breakers (`agents/shared/circuit_breaker.py`) around the discovery and monitoring page fetches: after 5 failures or 429/5xx answers a host is left alone for 5 minutes, and those checks come back inconclusive instead of piling on. **Not covered**: the opt-out form submission, SMTP, and the DROP API. |
+| Input validation | Request bodies are validated with `validator` (Rust) and `pydantic` (Python); callback ranges and lengths are bounded; agent writes are checked for ownership (an exposure can only be recorded against a running job of that customer; an audit entry only against the request's real owner). Errors that are not the caller's fault return a generic 500 and are logged server-side. A separate Python "PII validation framework" existed but was never connected and was removed. |
 | Request tracing | Unique request IDs tracked across all services for security auditing and debugging. |
 | Metrics and observability | Prometheus metrics exported for monitoring request latency, error rates, database pool stats, and custom business metrics. |
-| Data retention | Automated cleanup of old scans, exposures, and audit logs according to configurable retention policies. Complies with GDPR and CCPA data minimization requirements. |
-| SOC 2 compliance | Comprehensive control framework covering Security, Availability, Processing Integrity, Confidentiality, and Privacy trust criteria. |
+| Data retention | **Not implemented, apart from two housekeeping jobs**: expired login-throttle rows and privacy-score snapshots older than a year are pruned. There is no automated customer, exposure, scan or audit deletion and no right-to-erasure workflow. A module that claimed to do this existed but was never run and would have failed (foreign keys into the immutable removal audit log); it was removed. See `DATA_RETENTION.md` for the open design question. Do not describe this product as GDPR/CCPA-compliant on retention until that exists. |
+| SOC 2 | `SOC2_COMPLIANCE.md` is a target-state policy framework, **not** an audit or attestation, and it now opens with a status table verified against the code. |
+| Scan reliability | A scan job survives a crashed worker: workers claim a job atomically, send heartbeats, and fence every update with an attempt number; a backend recovery loop requeues silent jobs, re-dispatches jobs whose queue entry was lost, and fails jobs that keep dying (alerting the customer). See [Scan job recovery](#scan-job-recovery). |
 
 ---
 
@@ -246,11 +269,12 @@ Security is the core architectural constraint, not an afterthought. Every design
 | Plan     | Price/month | Key Features |
 |----------|-------------|--------------|
 | **Free**     | $0     | Initial exposure scan, privacy score, exposure report |
-| **Personal** | $8.99  | Automated removal requests, continuous monitoring, monthly rescan, alerts |
-| **Premium**  | $14.99 | Everything in Personal + expanded source coverage, priority removal, weekly rescan, evidence collection |
-| **Family**   | $24.99 | Everything in Premium + up to 4 family members, shared dashboard |
+| **Personal** | $8.99  | Automated removal requests, continuous monitoring (monthly re-check), monthly rescan, alerts |
+| **Premium**  | $14.99 | Everything in Personal + expanded source coverage, priority removal, weekly rescan and weekly reappearance re-check, evidence collection |
 
-Free accounts are limited to one scan per 24 hours. Paid accounts can initiate multiple scans per day and have access to a wider range of data sources depending on tier.
+All plans are per person. A Family tier ($24.99, up to 4 members) existed in earlier versions and was removed; migration `0005_remove_family_tier.sql` moved any existing Family customers to Premium.
+
+Free accounts are limited to one scan per 24 hours and are never rescanned or monitored automatically. Paid accounts can initiate multiple scans per day and have access to a wider range of data sources depending on tier.
 
 ---
 
@@ -264,11 +288,17 @@ VectorScrub/
 │   ├── migrations/
 │   │   ├── 0001_initial_schema.sql   # Full PostgreSQL schema
 │   │   ├── 0002_removal_requests_index.sql  # Performance index for removal polling
-│   │   ├── 0003_phase3_features.sql  # Monitoring, family, alerts
-│   │   └── 0004_audit_log.sql        # Comprehensive audit logging
+│   │   ├── 0003_phase3_features.sql  # Monitoring, family (now unused), alerts
+│   │   ├── 0004_audit_log.sql        # Comprehensive audit logging
+│   │   ├── 0005_remove_family_tier.sql  # Drops the 'family' tier; plans are per person
+│   │   ├── 0006_monitoring_support.sql  # 'failed' removal status, monitoring on by default, verification index
+│   │   ├── 0007_security_hardening.sql  # login_throttle table, audit_log immutability triggers
+│   │   └── 0008_scan_job_recovery.sql   # scan_jobs attempts / heartbeat_at / dispatched_at
+│   ├── .sqlx/                        # Offline query metadata (commit this; see "Regenerating .sqlx")
 │   └── src/
 │       ├── main.rs                   # Entry point, server setup
 │       ├── db.rs                     # Shared AppState (pool, redis, config)
+│       ├── test_support.rs           # Test-only helpers (throwaway DB, fixtures)
 │       ├── docs.rs                   # OpenAPI documentation
 │       ├── observability.rs          # Prometheus metrics and tracing
 │       ├── api/
@@ -278,7 +308,10 @@ VectorScrub/
 │       │   ├── scans.rs              # POST /scans, GET /scans, GET /scans/:id
 │       │   ├── exposures.rs          # GET /exposures, GET /exposures/summary
 │       │   ├── removals.rs           # GET /removal-requests, POST /removal-requests/:id/authorize
-│       │   ├── agent_callbacks.rs    # Internal: PUT /internal/scan/status, POST /internal/exposures
+│       │   ├── agent_callbacks.rs    # Internal (X-Agent-Key): claim, scan status, exposures, scoped identity release
+│       │   ├── health.rs             # GET /health/live, /health/ready
+│       │   ├── client_ip.rs          # Client IP for rate limiting / lockout (proxy headers opt-in)
+│       │   ├── error.rs              # JSON error responses (internal details never returned)
 │       │   ├── csrf.rs               # GET /csrf-token for CSRF protection
 │       │   └── metrics.rs            # GET /metrics for Prometheus scraping
 │       ├── crypto/
@@ -296,7 +329,6 @@ VectorScrub/
 │       │   ├── scan_job.rs           # ScanJob, ScanJobPayload
 │       │   ├── removal_request.rs    # RemovalRequest, RemovalAuditEntry
 │       │   ├── privacy_score.rs      # Privacy score history and trends
-│       │   ├── family.rs             # Family member relationships
 │       │   ├── notification.rs       # Notification preferences
 │       │   └── alert.rs              # Customer alerts
 │       ├── services/
@@ -307,44 +339,39 @@ VectorScrub/
 │       │   ├── removal.rs            # Removal request lifecycle, audit log
 │       │   ├── scan.rs               # Scan job lifecycle, Redis dispatch
 │       │   ├── audit.rs              # Comprehensive audit logging service
-│       │   ├── circuit_breaker.rs    # Circuit breaker for external services
-│       │   ├── data_retention.rs     # Automated data cleanup and retention
-│       │   ├── experiments.rs        # A/B testing and feature flags
+│       │   ├── identity_access.rs    # Scan tokens + scoped, audited identity release to agents
+│       │   ├── login_throttle.rs     # Per-email login lockout
 │       │   ├── privacy_score.rs      # Privacy score history tracking
-│       │   ├── family.rs             # Family plan management
+│       │   ├── monitoring.rs         # Removal verification + reappearance monitoring state
 │       │   └── notification.rs       # Alert and notification service
 │       └── jobs/
-│           └── scheduler.rs          # Scheduled rescan dispatcher (Phase 3)
+│           ├── scheduler.rs          # Scheduled rescan dispatcher
+│           └── recovery.rs           # Requeue/fail/redispatch stuck scans; housekeeping
 │
 ├── agents/                           # Python AI agent layer
-│   ├── requirements.txt              # All Python dependencies
+│   ├── requirements.txt              # Runtime dependencies (hash-pinned spaCy model)
+│   ├── requirements-dev.txt          # pytest etc.
+│   ├── tests/                        # pytest suite (PII guard, orchestrator, monitoring, executor, ...)
 │   ├── shared/
 │   │   ├── config.py                 # pydantic-settings config
 │   │   ├── models.py                 # Shared Pydantic data models
-│   │   └── backend_client.py         # HTTP client → Rust internal API
+│   │   ├── backend_client.py         # HTTP client → Rust internal API
+│   │   ├── pii_guard.py              # Redaction + vocabulary filter + fail-closed checks before any LLM call
+│   │   ├── pii_ner.py                # Local spaCy NER: finds third-party person names
+│   │   ├── pii_vocab.py              # The only words allowed to reach the LLM (kept free of known names)
+│   │   ├── page_text.py              # Page text extraction / block-page detection for discovery
+│   │   └── circuit_breaker.py        # Per-host circuit breaker used by discovery and monitoring
 │   ├── discovery/
 │   │   └── agent.py                  # Scans 8+ data broker sources per tier
 │   ├── detection/
-│   │   └── agent.py                  # LLM-based PII classification (anonymized tokens)
+│   │   └── agent.py                  # LLM-based PII classification; the only LLM call site
 │   ├── removal/
 │   │   ├── agent.py                  # Opt-out procedure registry + request preparation
 │   │   └── executor.py               # Playwright automation, email/DROP submission
 │   ├── monitoring/
 │   │   └── agent.py                  # Reappearance detection for removed records
 │   └── orchestrator/
-│       ├── orchestrator.py           # Redis worker, coordinates full pipeline (3 workers)
-│       ├── circuit_breaker.py        # Failure protection for external dependencies
-│       ├── hsm_service.py            # PyHSM integration for production key management
-│       ├── validation.py             # Multi-layer input validation and sanitization
-│       └── data_brokers/             # Modular data broker integration system
-│           ├── __init__.py           # Package initialization
-│           ├── base.py               # Base broker interface and common logic
-│           ├── registry.py           # Broker registry and factory
-│           ├── aggregator.py         # Result deduplication and confidence scoring
-│           ├── spokeo.py             # Spokeo-specific implementation
-│           ├── whitepages.py         # WhitePages-specific implementation
-│           ├── truthfinder.py        # TruthFinder-specific implementation
-│           └── beenverified.py       # BeenVerified-specific implementation
+│       └── orchestrator.py           # Redis worker: claim, heartbeat, pipeline, monitoring loop
 │
 ├── frontend/                         # Next.js 15 customer dashboard
 │   ├── package.json
@@ -365,6 +392,7 @@ VectorScrub/
 │       │   │   └── removals/page.tsx # Removal request tracking
 │       ├── lib/
 │       │   ├── api.ts                # Typed API client (all endpoints)
+│       │   ├── csrf.ts               # csrfFetch: attaches X-CSRF-Token to POST/PUT/DELETE
 │       │   └── utils.ts              # Privacy score labels, severity colors, formatters
 │       └── types/
 │           └── index.ts              # TypeScript interfaces for all API types
@@ -376,20 +404,19 @@ VectorScrub/
 │   │   ├── Dockerfile.agents         # Python + Playwright
 │   │   └── Dockerfile.frontend       # Next.js standalone build
 │   └── scripts/
-│       └── gen_keys.sh               # Generates JWT secret, master key, DB/Redis passwords
+│       ├── gen_keys.sh               # Generates JWT secret, master key, agent key, DB/Redis passwords
+│       └── sqlx_prepare.sh           # Regenerates / checks backend/.sqlx
 │
+├── .github/workflows/ci.yml          # CI: backend, agents, frontend, image builds
 ├── .env.example                      # All required environment variables with descriptions
 ├── .gitignore                        # Excludes .env, target/, node_modules/, __pycache__/
 ├── .kiro/steering/vectorscrub.md     # Project conventions for Kiro AI sessions
 ├── README.md                         # This file
-├── AB_TESTING.md                     # A/B testing framework and experiment design
-├── CIRCUIT_BREAKERS.md               # Failure protection and resilience patterns
-├── DATA_BROKERS.md                   # Data source integration architecture
-├── DATA_RETENTION.md                 # Data lifecycle and retention policies
+├── CIRCUIT_BREAKERS.md               # Per-host circuit breaker (Python agents)
+├── DATA_RETENTION.md                 # Retention: what runs today, and what is still open
 ├── OBSERVABILITY.md                  # Metrics, logging, and monitoring guide
 ├── P1_IMPROVEMENTS.md                # Priority 1 feature enhancements
 ├── P2_IMPROVEMENTS.md                # Priority 2 feature enhancements
-├── PYHSM_INTEGRATION.md              # Hardware security module setup
 ├── SECURITY_FIXES.md                 # P0 security improvements implemented
 └── SOC2_COMPLIANCE.md                # SOC 2 Type II compliance framework
 ```
@@ -547,13 +574,21 @@ All variables are defined in `.env.example`. Copy it to `.env` before starting a
 | `POSTGRES_PASSWORD` | Yes | Password for the PostgreSQL user (used by Docker Compose) |
 | `REDIS_URL` | Yes | Redis connection string. Example: `redis://localhost:6379` |
 | `REDIS_PASSWORD` | Yes | Password for Redis (used by Docker Compose) |
-| `JWT_SECRET` | Yes | Random string used to sign JWTs. Generate with `openssl rand -base64 48` |
-| `MASTER_ENCRYPTION_KEY` | Yes* | Base64-encoded 32-byte AES master key. Generate with `openssl rand -base64 32`. *Not required if using PyHSM. |
+| `JWT_SECRET` | Yes | Random string used to sign JWTs, at least 32 characters (the backend refuses to start otherwise). Generate with `openssl rand -base64 48` |
+| `MASTER_ENCRYPTION_KEY` | Yes | Base64-encoded 32-byte AES master key, validated at startup. Generate with `openssl rand -base64 32`. Read from the environment only; there is no HSM/KMS integration. Held by the Rust backend only. |
 | `PORT` | No | Port for the Rust API (default: `8080`) |
 | `ENVIRONMENT` | No | `development`, `staging`, or `production` (default: `development`) |
 | `DB_POOL_SIZE` | No | PostgreSQL connection pool size (default: `10`) |
 | `ALLOWED_ORIGINS` | No | Comma-separated list of allowed CORS origins (default: `http://localhost:3000`) |
-| `AGENT_API_KEY` | Yes | Shared secret for Python agent → Rust internal API authentication |
+| `AGENT_API_KEY` | Yes | Shared secret for Python agent → Rust internal API authentication, at least 32 characters. Needed by both the backend and the agents. |
+| `TRUST_PROXY_HEADERS` | No | `true` only behind a proxy that overwrites `X-Forwarded-For` / `X-Real-IP`; used to identify clients for rate limiting (default: `false`, uses the socket address) |
+| `RATE_LIMIT_GENERAL_PER_SECOND` / `RATE_LIMIT_GENERAL_BURST` | No | Per-IP limit for customer routes (defaults: `20`, `60`) |
+| `RATE_LIMIT_AUTH_PER_MINUTE` / `RATE_LIMIT_AUTH_BURST` | No | Per-IP limit for login and register (defaults: `5`, `5`) |
+| `SCAN_RECOVERY_INTERVAL_SECS` | No | How often the recovery loop runs (default: `60`) |
+| `SCAN_STALE_AFTER_SECS` | No | A running scan with no heartbeat for this long is requeued (default: `600`) |
+| `SCAN_REDISPATCH_AFTER_SECS` | No | A queued scan nobody claimed for this long is pushed to Redis again (default: `600`) |
+| `SCAN_MAX_ATTEMPTS` | No | Attempts before a scan is marked `failed` and the customer is alerted (default: `3`) |
+| `TEST_REDIS_URL` | Tests only | Redis URL for the Rust API tests (default `redis://127.0.0.1:6379/14`). A Redis server must be reachable; the tests only delete the scan queue key in that database, but use a scratch database anyway. |
 | `BACKEND_API_URL` | No | URL the Python agents use to reach the Rust API (default: `http://localhost:8080`) |
 | `OPENAI_API_KEY` | Recommended | OpenAI API key for the detection agent. One of OpenAI or Anthropic required. |
 | `ANTHROPIC_API_KEY` | Optional | Anthropic API key as an alternative to OpenAI |
@@ -562,9 +597,13 @@ All variables are defined in `.env.example`. Copy it to `.env` before starting a
 | `NEXT_PUBLIC_API_URL` | No | URL the Next.js frontend uses for API calls (default: `http://localhost:8080`) |
 | **Observability** | | **Metrics and Tracing** |
 | `OTLP_ENDPOINT` | Optional | OpenTelemetry OTLP endpoint for distributed tracing (e.g., `http://localhost:4317`). Leave empty to disable. Metrics are always available at `GET /api/v1/metrics`. |
-| **PyHSM Integration** | | **Production Key Management** |
-| `HSM_MASTER_PASSWORD` | Optional | Master password for PyHSM. If set, PyHSM is used instead of `MASTER_ENCRYPTION_KEY` for hardware-backed key storage and automatic rotation. |
-| `HSM_STORAGE_PATH` | Optional | Path to PyHSM encrypted keystore file (default: `./keystore.enc`) |
+| **Agent Pacing** | | **Monitoring and removal workers (Python agents)** |
+| `MONITORING_BATCH_SIZE` | No | Verification / reappearance targets fetched per cycle (default: `25`; the backend caps requests at 100) |
+| `MONITORING_IDLE_SECONDS` | No | How long the monitoring worker sleeps when nothing is due (default: `3600`) |
+| `MONITORING_REQUEST_DELAY_SECONDS` | No | Pause between page fetches while monitoring (default: `2.0`) |
+| `REMOVAL_REQUEST_DELAY_SECONDS` | No | Pause between opt-out submissions to third-party sites (default: `5.0`) |
+| `PII_NER_REQUIRED` | No | `true` (default): if the spaCy NER model cannot be loaded, LLM calls are blocked (fail closed). `false`: local development only; continues on the vocabulary filter alone. |
+| `PII_NER_MODEL` | No | spaCy model used to detect third-party person names (default: `en_core_web_sm`, installed from `requirements.txt`) |
 | **Phase 3 Variables** | | **Email and DROP Integration** |
 | `SMTP_HOST` | Optional | SMTP server host for email opt-out requests (default: `smtp.gmail.com`) |
 | `SMTP_PORT` | Optional | SMTP server port (default: `587`) |
@@ -681,7 +720,9 @@ All endpoints are prefixed with `/api/v1`. Customer endpoints require a `Bearer`
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/auth/register` | Create a new account. Body: `{ email, password }`. Returns `{ token, customer }`. |
-| `POST` | `/auth/login` | Sign in. Body: `{ email, password }`. Returns `{ token, customer }`. |
+| `POST` | `/auth/login` | Sign in. Body: `{ email, password }`. Returns `{ token, customer }`. After 5 consecutive failures for an email the endpoint returns `429` with a `Retry-After` header (15 min, doubling every further 5 failures, capped at 60 min). Unknown emails lock out identically, so the endpoint does not reveal which accounts exist. |
+
+Login and register are limited to 5 requests/minute per IP, and all customer routes to 20/second (burst 60). Exceeding a limit returns `429` with `Retry-After`. Internal agent routes and health checks are not rate limited.
 
 ### Customer Profile
 
@@ -694,7 +735,7 @@ All endpoints are prefixed with `/api/v1`. Customer endpoints require a `Bearer`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| `POST` | `/scans` | JWT | Queue a new scan job. Returns `{ job_id, status, message }`. |
+| `POST` | `/scans` | JWT | Queue a new scan job. Returns `202` with `{ job_id, status, message }`. `422` if no identity profile has been submitted, `429` if the plan's scan limit is reached. If Redis is unreachable the job is still created and the recovery loop dispatches it. |
 | `GET` | `/scans` | JWT | List the 20 most recent scan jobs for the authenticated customer. |
 | `GET` | `/scans/:job_id` | JWT | Get the status and progress of a specific scan job. |
 
@@ -710,7 +751,7 @@ All endpoints are prefixed with `/api/v1`. Customer endpoints require a `Bearer`
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | `GET` | `/removal-requests` | JWT | List all removal requests for the authenticated customer. |
-| `POST` | `/removal-requests/:exposure_id/authorize` | JWT | Authorize a removal request for a specific exposure. Creates audit trail entry. |
+| `POST` | `/removal-requests/:exposure_id/authorize` | JWT | Authorize a removal request for a specific exposure you own. Creates audit trail entry. Rejected only while another request for it is in flight. |
 | `GET` | `/removal-requests/:id` | JWT | Get a specific removal request with full audit log. |
 
 ### Privacy Score History (Phase 3)
@@ -718,15 +759,6 @@ All endpoints are prefixed with `/api/v1`. Customer endpoints require a `Bearer`
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | `GET` | `/privacy-score/history?days=30` | JWT | Retrieve privacy score trend with historical snapshots and delta calculations. |
-
-### Family Management (Phase 3)
-
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `POST` | `/family/members` | JWT | Add a family member by email. Requires Family plan. Body: `{ member_email }`. |
-| `GET` | `/family/members` | JWT | List all family members with privacy scores and roles. |
-| `DELETE` | `/family/members/:member_id` | JWT | Remove a family member from the family plan. |
-| `GET` | `/family/stats` | JWT | Get aggregate family statistics (average score, total exposures, member count). |
 
 ### Notifications and Alerts (Phase 3)
 
@@ -739,13 +771,25 @@ All endpoints are prefixed with `/api/v1`. Customer endpoints require a `Bearer`
 
 ### Internal Agent Endpoints
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `PUT` | `/internal/scan/status` | Agent key | Update scan job progress (called by the orchestrator). |
-| `POST` | `/internal/exposures` | Agent key | Record a confirmed exposure found by the detection agent. |
-| `GET` | `/internal/removal-requests` | Agent key | Poll for authorized removal requests ready for execution. |
-| `PUT` | `/internal/removal-requests/:id/status` | Agent key | Update removal request status after submission. |
-| `POST` | `/internal/removal-requests/:id/audit` | Agent key | Record an audit log entry for a removal request. |
+All require `X-Agent-Key` (compared in constant time). Agents never receive a customer's identity in bulk: identity is released one request at a time, only for a work item that is actually actionable, and every release is written to `audit_log` (the release fails if the audit write fails).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/internal/scan/:job_id/claim` | Claim a queued scan. Returns `{ attempt }`, or `409` if the job is not claimable (already claimed, finished, or unknown). The 24-hour scan token travels in the Redis queue payload, not in this response. |
+| `PUT` | `/internal/scan/status` | Update scan progress / heartbeat. Body includes `attempt`; a stale attempt (a worker whose job was requeued) gets `409`. |
+| `POST` | `/internal/identity` | Body: `{ customer_id, job_id, identity_token }`. Releases the identity for a running scan whose token matches. |
+| `POST` | `/internal/exposures` | Record a confirmed exposure found by the detection agent. |
+| `GET` | `/internal/removal-requests` | Poll for authorized removal requests ready for execution. |
+| `POST` | `/internal/removal-requests/:id/identity` | Release identity for one authorized, not-yet-submitted removal request. The customer is derived from the request. |
+| `PUT` | `/internal/removal-requests/:id/status` | Update status. Only legal transitions are accepted (`409` otherwise, `404` if unknown). |
+| `POST` | `/internal/removal-requests/:id/audit` | Append an audit entry, attributed to the request's real owner. |
+| `GET` | `/internal/removal-requests/due-for-verification?limit=N` | Submitted/acknowledged requests whose check time has passed (default 25, max 100). |
+| `POST` | `/internal/removal-requests/:id/verification-result` | Body: `{ customer_id, outcome }`, `outcome` = `removed` \| `still_present` \| `inconclusive`. `404` if unknown, `409` if no longer submitted/acknowledged. |
+| `GET` | `/internal/exposures/due-for-monitoring?limit=N` | Removed exposures due for a reappearance check: Premium after 7 days, Personal after 30, never Free or monitoring-disabled customers. |
+| `POST` | `/internal/exposures/:id/identity` | Release identity for one exposure that is due for a monitoring check. |
+| `POST` | `/internal/exposures/:id/monitoring-result` | Body: `{ customer_id, outcome }`, `outcome` = `clear` \| `reappeared` \| `inconclusive`. `404` if unknown, `409` if the exposure is already active. |
+
+There is no endpoint that returns a customer's identity by customer id; the earlier `GET /internal/customers/:id/identity` was removed because a leaked agent key could read every customer with it.
 
 ### Security and Observability
 
@@ -760,22 +804,28 @@ All endpoints are prefixed with `/api/v1`. Customer endpoints require a `Bearer`
 
 ## Database Schema
 
-The PostgreSQL schema is defined across four migrations and applied automatically on backend startup:
+The PostgreSQL schema is defined across eight migrations and applied automatically on backend startup. Applied migrations are never edited (sqlx verifies their checksums); changes go in a new migration.
 - `0001_initial_schema.sql` - Core schema (Phase 1 & 2)
 - `0002_removal_requests_index.sql` - Performance optimization (Phase 2)
-- `0003_phase3_features.sql` - Monitoring, family, and alerts (Phase 3)
+- `0003_phase3_features.sql` - Monitoring, alerts, score history (and the now-unused `family_members` table)
 - `0004_audit_log.sql` - Comprehensive audit logging for production (Production hardening)
+- `0005_remove_family_tier.sql` - Removes the `family` subscription tier (plans are per person)
+- `0006_monitoring_support.sql` - Adds the `failed` removal status, turns `monitoring_enabled` on by default, indexes verification lookups
+- `0007_security_hardening.sql` - `login_throttle` table; triggers that make `audit_log` append-only (the only permitted change is clearing `customer_id` / `user_email`)
+- `0008_scan_job_recovery.sql` - `scan_jobs.attempts`, `heartbeat_at`, `dispatched_at`
 
 | Table | Purpose |
 |-------|---------|
 | `customers` | Account records: email, hashed password, subscription tier, privacy score, monitoring_enabled |
 | `identity_profiles` | Per-customer encrypted PII: all fields stored as AES-256-GCM ciphertext blobs |
-| `scan_jobs` | Scan lifecycle: queued, running, completed, failed; sources and exposures counted |
+| `scan_jobs` | Scan lifecycle: queued, running, completed, failed; sources and exposures counted; `attempts`, `heartbeat_at`, `dispatched_at` drive [recovery](#scan-job-recovery) |
+| `login_throttle` | Failed-login counters keyed by SHA-256 of the lower-cased email (no plaintext emails, unknown emails included) |
+| `audit_log` | Append-only audit trail for security-relevant events, including each identity release. Triggers reject UPDATE/DELETE (a database superuser can still disable them). |
 | `exposures` | Every discovered PII exposure: source, category, severity, masked summary, active/removed state, last_monitored_at |
-| `removal_requests` | Opt-out requests: status lifecycle from authorized through verified removed |
+| `removal_requests` | Opt-out requests: status lifecycle `authorized → submitted → acknowledged → verified_removed`, plus terminal `rejected`, `unverifiable`, `failed`, and `reappeared` |
 | `removal_audit_log` | Append-only tamper-evident log of every action on every removal request |
 | `alerts` | Customer notifications: new exposures, removal failures, reappearances |
-| `family_members` | **(Phase 3)** Family associations: owner/member relationships, max 5 per family plan |
+| `family_members` | **(Unused)** Created by migration 0003; family plans were removed and the table is no longer written |
 | `privacy_score_history` | **(Phase 3)** Historical privacy score snapshots with exposure breakdowns for trend analysis |
 | `notification_preferences` | **(Phase 3)** Per-customer alert preferences: email/SMS toggles, phone number, alert types |
 
@@ -795,7 +845,7 @@ A customer with no active exposures scores 100. Each critical exposure (e.g., fu
 - Customer account creation and authentication
 - Encrypted identity profile submission
 - AI-powered discovery across 8+ data broker sources (tier-gated)
-- LLM-based PII detection with anonymized token matching
+- LLM-based PII detection on redacted page text (no customer PII sent to the model)
 - Exposure dashboard with privacy score
 - Scan job lifecycle management
 
@@ -815,17 +865,21 @@ A customer with no active exposures scores 100. Each critical exposure (e.g., fu
 
 ### Phase 3 — Keep Me Protected ✅ Complete
 
-- ✅ Scheduled rescans (weekly for Premium/Family, monthly for Personal)
-- ✅ Reappearance detection and automatic re-removal
-- ✅ Family accounts (up to 4 members under one subscription)
+- ✅ Scheduled rescans (weekly for Premium, monthly for Personal)
+- ✅ Removal verification: submitted requests are re-checked and only marked `verified_removed` on positive evidence
+- ✅ Reappearance detection: Premium weekly, Personal monthly; alerts the customer and reactivates the exposure
+- ✅ Re-removal after a reappearance, with fresh customer authorization (never automatic)
+- ✅ Honest failure reporting for automated submissions (`failed` status, CAPTCHA stop, confirmation required)
 - ✅ Privacy score trend charts with historical analysis
 - ✅ Email and SMS alert system with customizable preferences
 - ✅ Exposure history timeline with event tracking
 - ✅ Complete email-based opt-out integration
 - ✅ California DROP API integration (600+ brokers)
 - ✅ Privacy score history API with trend analysis
-- ✅ Family management dashboard with aggregate statistics
 - ✅ Notification preferences and alert management
+- ➖ Family accounts: built, then removed. All plans are per person.
+
+Known limits of the monitoring implementation are listed under [Legal and Operational Risk](#legal-and-operational-risk).
 
 ---
 
@@ -842,157 +896,149 @@ DROP is free to use directly, which creates an important product consideration: 
 - Multi-state coverage (not just California)
 - Sources that are exempt from DROP or require individual opt-outs
 - A unified privacy dashboard with a clear score and history
-- Family protection across multiple members
+- Per-person accounts, so each family member gets their own profile, score, and removal history
+
+---
+
+## Legal and Operational Risk
+
+This section describes what the automated opt-out and monitoring code does and does not do today, and what still needs a decision from the business or from counsel. It is an engineering document, not legal advice.
+
+### Operational: what the code now guarantees
+
+- **No false "submitted".** A web-form submission is reported as `submitted` only if the resulting page shows a confirmation reference or acceptance wording and no error wording. If no form field matched, no submit control was found, or the result is ambiguous, the request ends as `failed` with a reason, and the customer is alerted and can re-authorize. A failure is terminal for that attempt: it is not retried automatically.
+- **No false "removed".** A request becomes `verified_removed` only on positive evidence (page gone, customer's surname absent from the page, or a clear LLM non-match). Fetch errors, HTTP 403/429/5xx, CAPTCHA or bot-wall pages, pages too thin to judge, and LLM failures are all *inconclusive*, retried the next day, and never reported as removal.
+- **No CAPTCHA circumvention.** If an opt-out page presents a CAPTCHA the request fails with an explicit reason. The agent does not attempt to solve or evade it.
+- **Pacing.** The removal worker waits 5 seconds between submissions and the monitoring worker 2 seconds between page fetches (`REMOVAL_REQUEST_DELAY_SECONDS`, `MONITORING_REQUEST_DELAY_SECONDS`). A request is never submitted twice by the same worker process.
+- **Always customer-authorized.** Removals, including re-removals after a reappearance, are submitted only after the customer authorizes them in the dashboard.
+
+### Operational: known limits
+
+- **Form drift is expected.** Submission uses generic field selectors, not per-site handlers (`OPT_OUT_REGISTRY` stores only a URL and procedure type). Brokers change their forms; those requests will fail until a site-specific handler exists. Failure is now visible rather than silent, but it is still a failure.
+- **Email-verification links are not clicked.** Several brokers (per the registry notes, for example Spokeo, Radaris, and TruePeopleSearch) email the customer a link that must be clicked to complete the opt-out. VectorScrub does not do this, so such requests will show as `submitted` and then fail verification after 45 days. Until this is handled in the product, customers need to be told to watch for and click those emails.
+- **ID-verification sources.** Registry entries with `requires_id_verification=True` (for example TruthFinder, MyLife, and the California DROP entry) are flagged but not enforced; the agent cannot supply identity documents, so those requests are expected to fail verification.
+- **CAPTCHA sources have no manual path yet.** The request fails; there is no hand-off workflow for a human to complete it.
+- **Verification is a heuristic.** It relies on a plain HTTP fetch, a local surname check, and an LLM verdict on a short excerpt. JavaScript-rendered pages are inconclusive. A broker that serves bots a page without the record while showing it to people could cause a false "removed"; reappearance monitoring is the backstop.
+- **California DROP is unverified against the real API.** The request payload in `executor.py` is documented in the code as "based on typical government API patterns" and must be checked against the published DROP specification before it is used outside the sandbox (`DROP_ENABLE_SANDBOX` defaults to `true`).
+- **Duplicate-submission guard is per process.** It is held in memory, so a worker restart between a successful submission and its status update could resubmit.
+- **Third-party details on pages.** The LLM receives redacted page excerpts (1,500 characters in discovery, 3,000 in monitoring), reduced to placeholders plus a short structural vocabulary, so neither the customer's nor other people's names reach it; see the guarantee, measurements, and remaining limits under [How the AI Works](#how-the-ai-works). Not yet measured: detection accuracy on real broker pages with a real model now that it sees structure instead of prose.
+
+### Legal: open items for counsel and the product owner
+
+- **Terms of service.** Broker sites may prohibit automated access in their terms. Opt-out forms exist for consumers, but driving them with a bot on a customer's behalf, and fetching pages weekly or monthly to monitor them, may breach those terms or draw other claims. This needs a source-by-source review and a decision on which sources to automate versus guide the customer through manually.
+- **Identification of the crawler.** Neither the monitoring fetcher (which sends a desktop-browser `User-Agent`) nor the Playwright sessions (headless Chrome) identify VectorScrub. Whether to identify the service honestly (and accept more blocking), and whether to honor `robots.txt`, is a policy decision that has not been made.
+- **Authorized-agent status.** Privacy laws such as CCPA let a consumer use an authorized agent, and brokers may demand proof of that authorization. The current opt-out email is written in the customer's first person and sent from VectorScrub's SMTP account with the customer as Reply-To. The in-app authorization is recorded with a timestamp (`customer_authorized_at`), but there is no standalone written agent-authorization document or agent-style wording. Counsel should say what is required.
+- **Sending identity to brokers.** Opting out necessarily transmits the customer's identity (name, address, email) to each broker. The customer-facing authorization should say so plainly.
+- **Jurisdiction and DROP eligibility.** DROP is for eligible California residents; the code does not check residency.
+
+### Before relying on this in production
+
+1. Get counsel's review of the ToS, authorized-agent, and crawler-identification items above.
+2. Decide the user-facing copy for email-verification links and CAPTCHA/ID-verification sources.
+3. Build site-specific handlers (or manual guidance) for the highest-volume brokers.
+4. Validate the DROP payload against the official specification in sandbox.
+5. Watch the `failed`, `rejected`, and `unverifiable` rates per source; a spike usually means a broker changed its form.
+
+---
+
+## Scan Job Recovery
+
+A scan can be lost in three ways: the worker dies mid-run, the Redis entry is lost, or Redis is down when the scan is requested. The backend's recovery loop (`jobs/recovery.rs`, every `SCAN_RECOVERY_INTERVAL_SECS`) handles each, using only Postgres as the source of truth:
+
+- **Claim and heartbeat.** A worker pops a job from Redis and calls `POST /internal/scan/:job_id/claim`. Only one claim can succeed per attempt; a duplicate queue entry gets `409` and is skipped. While working, the worker heartbeats through `PUT /internal/scan/status`.
+- **Stale running jobs.** No heartbeat for `SCAN_STALE_AFTER_SECS` → the job is requeued with a fresh scan token and re-pushed to Redis. After `SCAN_MAX_ATTEMPTS` attempts it is marked `failed` and the customer gets an alert (and an audit entry).
+- **Attempt fencing.** Every status update carries its attempt number. A worker that was presumed dead but is still running ("zombie") gets `409` and stops, so it cannot overwrite the newer attempt.
+- **Lost queue entries.** A job still `queued` after `SCAN_REDISPATCH_AFTER_SECS` is pushed to Redis again.
+- **Redis down at request time.** `POST /scans` still creates the job; recovery dispatches it later.
+- **Housekeeping.** The same loop purges expired `login_throttle` rows and prunes `privacy_score_history` older than one year.
+
+Multiple backend instances are safe: recovery claims rows with `FOR UPDATE SKIP LOCKED`.
+
+Verified with real processes (backend, Redis, Postgres, worker): a normal scan; `kill -9` of a worker mid-scan (requeued in a few seconds and finished on attempt 2, with the old attempt's late update rejected); a deleted Redis entry (redispatched); a duplicate entry (skipped); and exhaustion of attempts (job failed, alert and audit entry written). These were run on a development machine, not in production.
+
+---
+
+## Testing
+
+```bash
+# Rust: unit + integration tests. Each database test gets its own freshly-migrated throwaway
+# database (sqlx::test), so DATABASE_URL must point at a Postgres server where the user may
+# create databases (never production).
+cd backend
+export DATABASE_URL=postgres://user:pass@localhost:5432/vectorscrub_test
+export TEST_REDIS_URL=redis://127.0.0.1:6379/14   # optional (this is the default); a Redis server must be running
+cargo test
+cargo clippy --all-targets -- -D warnings
+
+# Python agents
+cd agents
+pip install -r requirements.txt -r requirements-dev.txt
+python -m playwright install chromium            # needed by the executor browser tests
+python -m pytest -q
+
+# Frontend
+cd frontend && npm ci && npx tsc --noEmit && npm run build
+```
+
+What the suites cover: AES-GCM and key derivation, the removal state machine and its concurrency behaviour, scoped identity release and its audit trail, login lockout and rate limits, scan recovery, the PII guard (redaction, NER, vocabulary, fail-closed behaviour), the detection gateway, the orchestrator, the monitoring agent, and the opt-out executor against a real headless Chromium.
+
+CI (`.github/workflows/ci.yml`) runs the backend (build offline, tests, clippy, `.sqlx` freshness check), agents, frontend, and Docker image builds. **The workflow file has not yet been run on GitHub**; its steps were run locally.
+
+### Regenerating `.sqlx`
+
+The backend builds without a database because query metadata is checked in under `backend/.sqlx/` (`SQLX_OFFLINE=true`, used by the Dockerfile and CI). After adding or changing a `sqlx::query!` macro (currently only `services/audit.rs`):
+
+```bash
+createdb vectorscrub_prepare
+DATABASE_URL=postgres://user:pass@localhost:5432/vectorscrub_prepare infra/scripts/sqlx_prepare.sh
+# CI uses --check, which exits non-zero when .sqlx is stale
+git add backend/.sqlx backend/Cargo.lock
+```
+
+`backend/Cargo.lock` is tracked (the image build uses `--locked`); commit it with `.sqlx/`.
 
 ---
 
 ## Production Deployment
 
-VectorScrub is production-ready with enterprise-grade security, observability, and compliance features.
+This section lists what exists in the code today. Items that are *not* implemented are called out explicitly; see also `SOC2_COMPLIANCE.md` and `PRODUCTION_CHECKLIST.md`.
 
 ### Security Hardening
 
-**CSRF Protection**
-- Double-submit cookie pattern on all state-changing requests (POST, PUT, DELETE)
-- Token endpoint: `GET /api/v1/csrf-token`
-- Automatic validation via dedicated middleware
-- Exempts safe methods (GET, HEAD, OPTIONS) and internal agent endpoints
+**Secrets.** The backend refuses to start unless `JWT_SECRET` and `AGENT_API_KEY` are at least 32 characters and `MASTER_ENCRYPTION_KEY` decodes to exactly 32 bytes. `infra/scripts/gen_keys.sh` generates all of them. The master key is read from the environment only; in production inject it from a secret manager. There is no HSM/KMS integration and no automatic key rotation.
 
-**Security Headers**
-- Content Security Policy (CSP) with strict source restrictions
-- HTTP Strict Transport Security (HSTS) with 1-year max-age
-- X-Frame-Options: DENY (prevents clickjacking)
-- X-Content-Type-Options: nosniff
-- Referrer-Policy: strict-origin-when-cross-origin
-- Permissions-Policy with disabled dangerous features
+**Rate limiting and lockout.** Per-IP limits (see [Authentication](#authentication)) and per-email login lockout. Both are held per backend instance (limits in memory, lockout in Postgres). Behind a proxy set `TRUST_PROXY_HEADERS=true` *only if* the proxy overwrites `X-Forwarded-For`/`X-Real-IP`; otherwise every client appears as the proxy. Lockout can be used to lock a known email out for up to an hour; that trade-off was accepted over leaving the endpoint open to guessing.
 
-**Rate Limiting**
-- 30-second request timeout prevents long-running attacks
-- Configurable IP-based rate limiting (via `rate_limiter.rs`)
-- Protects against DoS and abuse
+**CSRF.** Double-submit cookie on POST/PUT/DELETE (`GET /api/v1/csrf-token`); internal agent endpoints are exempt. The frontend sends the token through `csrfFetch`. It works same-origin through the Next.js rewrites with `SameSite=Strict`. A cross-origin deployment would also need `X-CSRF-Token` added to the CORS allowed headers.
 
-**Input Validation**
-- Multi-layer validation at agent and API boundaries
-- Sanitizes all user input before processing
-- Prevents injection attacks and malformed requests
+**Security headers.** CSP, HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`.
+
+**Agent key.** Compared in constant time. It is still one shared secret, and an identity release contains all identity fields for the one customer/work item it was requested for. The key cannot enumerate customers or read identity in bulk.
+
+**Audit trail.** `audit_log` is protected by triggers (migration 0007) and `removal_audit_log` by rules; neither stops a database superuser.
 
 ### Observability
 
-**Prometheus Metrics**
-Export endpoint: `GET /api/v1/metrics`
-
-Tracked metrics:
-- Request count (by method, path, status)
-- Request latency (histogram with p50, p90, p99)
-- Active requests (gauge)
-- Database connection pool stats (active, idle, max)
-- Custom business metrics (scans, exposures, removals)
-
-**Structured Logging**
-- JSON-formatted logs with trace context
-- Correlation IDs for end-to-end request tracking
-- Log levels: ERROR, WARN, INFO, DEBUG
-- Sensitive PII automatically redacted
-
-**Distributed Tracing**
-- OpenTelemetry OTLP export support
-- Configure via `OTLP_ENDPOINT` environment variable
-- Compatible with Jaeger, Honeycomb, Datadog, and other OTLP backends
-
-**Health Checks**
-- Liveness probe: Always returns 200 (process is running)
-- Readiness probe: Checks database and Redis connectivity
+- `GET /api/v1/metrics` exposes Prometheus metrics and is **unauthenticated**; restrict it at the proxy or network layer.
+- Structured logging via `tracing` (Rust) and `structlog` (Python). The code is written not to log PII, URLs, or exception text from fetched pages (error type and host only); there is no automatic redaction layer, so new log lines need the same care.
+- OpenTelemetry export when `OTLP_ENDPOINT` is set.
+- `GET /health/live` always returns 200; `GET /health/ready` checks Postgres and Redis. Docker Compose uses them for healthchecks.
 
 ### Circuit Breakers
 
-VectorScrub implements circuit breakers for all external dependencies to prevent cascading failures:
-
-**Protected Services:**
-- Data broker APIs (Spokeo, WhitePages, TruthFinder, BeenVerified)
-- SMTP servers (for email-based opt-outs)
-- California DROP API
-- External LLM providers (OpenAI, Anthropic)
-
-**Failure Thresholds:**
-- Trips open after 5 consecutive failures
-- Half-open state after 60-second cooldown
-- Automatic recovery when service returns
-
-**Benefits:**
-- Prevents resource exhaustion
-- Fast-fail behavior reduces latency
-- Automatic recovery without restarts
+The Python agents wrap page fetches in discovery and monitoring in a per-host circuit breaker (`agents/shared/circuit_breaker.py`). It is not applied to SMTP, DROP, or LLM calls, and the Rust backend has none. See `CIRCUIT_BREAKERS.md`.
 
 ### Data Retention
 
-Automated cleanup policies ensure compliance with data minimization requirements:
+There is no automated retention or erasure job. The earlier `data_retention.rs` was removed because it was never wired in, and as written would have failed against the immutable `removal_audit_log` foreign key. Today only `login_throttle` rows and `privacy_score_history` older than one year are pruned. How to honor account deletion while keeping an immutable audit trail is an open design decision; see `DATA_RETENTION.md`.
 
-| Data Type | Retention Period | Justification |
-|-----------|------------------|---------------|
-| Scan jobs | 90 days | Operational history for debugging |
-| Exposures (removed) | 1 year | Privacy score history and trends |
-| Exposures (active) | Indefinite | Required for monitoring |
-| Audit logs | 7 years | SOC 2 and legal compliance |
-| Customer accounts | Until deletion | Required for service |
+### Docker Compose
 
-Configure retention policies in `backend/src/services/data_retention.rs`.
+`infra/docker/docker-compose.yml` requires the secrets (`POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET`, `MASTER_ENCRYPTION_KEY`, `AGENT_API_KEY`) and fails with a clear message if one is missing. Postgres and Redis are bound to `127.0.0.1`. The backend image builds offline from `backend/.sqlx`.
 
-### PyHSM Integration
+### Compliance
 
-For production deployments, use PyHSM for hardware-backed key management:
-
-**Setup:**
-```bash
-# Install PyHSM
-pip install pyhsm
-
-# Set environment variables
-export HSM_MASTER_PASSWORD=your-strong-password
-export HSM_STORAGE_PATH=./keystore.enc
-# Do NOT set MASTER_ENCRYPTION_KEY when using PyHSM
-```
-
-**Benefits:**
-- Hardware-backed encryption keys
-- Automatic key rotation
-- Tamper-evident key storage
-- FIPS 140-2 compliance (when using certified HSM)
-
-See `PYHSM_INTEGRATION.md` for detailed setup instructions.
-
-### SOC 2 Compliance
-
-VectorScrub implements all five Trust Service Criteria:
-
-1. **Security** - Multi-layer access controls, encryption at rest and in transit
-2. **Availability** - Circuit breakers, health checks, auto-scaling support
-3. **Processing Integrity** - Audit logs, input validation, idempotent operations
-4. **Confidentiality** - Per-customer encryption, role-based access control
-5. **Privacy** - Data retention policies, consent management, right to deletion
-
-See `SOC2_COMPLIANCE.md` for the complete control framework and evidence collection procedures.
-
-### A/B Testing and Experimentation
-
-Built-in experimentation framework for data-driven product decisions:
-
-**Features:**
-- Runtime feature flags (no deployments required)
-- Consistent user bucketing across sessions
-- Variant assignment with traffic allocation
-- Metrics tracking per experiment
-- Statistical significance testing
-
-**Example Usage:**
-```rust
-let variant = experiments::assign_variant(&customer_id, "new_privacy_score_formula");
-match variant {
-    Variant::Control => /* existing formula */,
-    Variant::Treatment => /* new formula */,
-}
-```
-
-See `AB_TESTING.md` for experiment design guidelines and analysis procedures.
+`SOC2_COMPLIANCE.md` is a control framework and plan, not an attestation. It opens with a table of which controls are implemented in code and which are not.
 
 ---
 
@@ -1003,7 +1049,7 @@ See `AB_TESTING.md` for experiment design guidelines and analysis procedures.
 | Incogni | $7.99 | 420+ | Basic automation | Standard |
 | Optery | $3.99–$24.99 | 635+ | Screenshots, some AI | Standard |
 | DeleteMe | ~$9.00 | 750+ | Managed human-assisted | Standard |
-| **VectorScrub** | **$8.99–$24.99** | **Growing** | **Multi-agent AI pipeline** | **AES-256-GCM, zero raw PII to LLMs, append-only audit log** |
+| **VectorScrub** | **$8.99–$14.99** | **Growing** | **Multi-agent AI pipeline** | **AES-256-GCM, zero raw PII to LLMs, append-only audit log** |
 
 VectorScrub's differentiation is not the number of sites covered — it is the quality of the AI reasoning, the transparency of the removal evidence, and the security posture around customer data.
 
@@ -1029,7 +1075,7 @@ Together, these products form a coherent story: protecting identity, information
 VectorScrub is currently in active private development under VectorGuard Labs. If you are contributing:
 
 1. Read `.kiro/steering/vectorscrub.md` before making any changes — it contains the critical security rules that govern this codebase.
-2. Never log, print, or transmit raw PII values. Use masked/anonymized representations in logs and LLM prompts.
+2. Never log, print, or transmit raw PII values. Never send customer PII to an LLM: all model calls go through `DetectionAgent._run_classifier`, which applies `shared/pii_guard.py` (redaction plus a fail-closed check). Do not add another LLM call site.
 3. Never commit `.env` or any file containing real secrets.
 4. The audit log is append-only by design. Do not add update or delete operations to `removal_audit_log`.
 5. All PII-touching code belongs in the Rust backend. The Python agent layer should never hold or process raw customer identity data directly.
@@ -1046,16 +1092,19 @@ This software is proprietary and confidential. Unauthorized copying, distributio
 
 ## What's New in Phase 3
 
-**Phase 3 is now complete.** VectorScrub now provides continuous protection with scheduled monitoring, family accounts, and comprehensive alert systems.
+**Phase 3 is now complete.** VectorScrub now provides continuous protection with scheduled monitoring, removal verification, and comprehensive alert systems. (Family accounts were built during Phase 3 and later removed; all plans are per person.)
 
 ### Backend Features Added:
 
-**Scheduled Monitoring and Reappearance Detection:**
-- Automatic rescans on a tier-based schedule (Personal: 30 days, Premium/Family: 7 days)
+**Scheduled Monitoring, Verification, and Reappearance Detection:**
+- Automatic rescans on a tier-based schedule (Personal: 30 days, Premium: 7 days)
 - Background scheduler runs every 6 hours checking for customers due for rescan
-- Monitoring agent re-checks removed records and detects reappearances
-- Automatic alert creation when removed information comes back online
-- Confidence threshold of 0.7 for reappearance classification
+- Monitoring worker verifies submitted removals and re-checks removed records (Premium weekly, Personal monthly)
+- The backend decides what is due (`/internal/.../due-for-*` endpoints); the agent fetches pages and reports `removed` / `still_present` / `clear` / `reappeared` / `inconclusive`
+- Inconclusive checks (blocked, CAPTCHA, fetch error, LLM failure) never count as "removed"; they are retried the next day
+- Reappearance reactivates the exposure, recalculates the privacy score, and alerts the customer
+- Confidence threshold of 0.7 for reappearance alerts
+- Monitoring is enabled by default for paid tiers (`customers.monitoring_enabled`, migration 0006)
 
 **Email-Based Opt-Out (Complete):**
 - Full SMTP integration with TLS support
@@ -1070,13 +1119,6 @@ This software is proprietary and confidential. Unauthorized copying, distributio
 - Sandbox mode for testing and development
 - Request tracking and confirmation reference extraction
 - Automatic fallback for non-California residents
-
-**Family Account Support:**
-- Up to 4 family members per Family plan subscription
-- Owner/member role system with granular permissions
-- Individual privacy scores for each family member
-- Aggregate statistics across all members
-- Email-based member invitations with pending status tracking
 
 **Privacy Score History and Trends:**
 - Automatic snapshot recording after each scan completion
@@ -1109,18 +1151,10 @@ This software is proprietary and confidential. Unauthorized copying, distributio
 - CSV export functionality for external analysis
 - Visual event markers with color-coded borders
 
-**Family Dashboard:**
-- Family statistics overview (total members, average score, total exposures)
-- Add/remove family member functionality
-- Member list with individual privacy scores
-- Role indicators (crown icon for owner)
-- Pending invitation status tracking
-- Conditional navigation (only visible for Family tier subscribers)
-
 ### Technical Enhancements:
 
 **Database Schema (Migration 0003):**
-- `family_members` table with owner/member relationships
+- `family_members` table (no longer used; see above)
 - `privacy_score_history` table for trend analysis
 - `notification_preferences` table for alert customization
 - Performance indexes on monitoring queries
@@ -1133,91 +1167,61 @@ This software is proprietary and confidential. Unauthorized copying, distributio
 - All three run concurrently in parallel
 - Independent polling intervals for optimal performance
 
-**13 New API Endpoints:**
+**New API Endpoints:**
 - `GET /api/v1/privacy-score/history?days=30`
-- `POST /api/v1/family/members`
-- `GET /api/v1/family/members`
-- `DELETE /api/v1/family/members/:id`
-- `GET /api/v1/family/stats`
 - `GET /api/v1/notifications/preferences`
 - `PUT /api/v1/notifications/preferences`
 - `GET /api/v1/notifications/alerts`
 - `POST /api/v1/notifications/alerts/:id/read`
 
+(Four `/family/*` endpoints were also added in Phase 3; they were later removed along with the family service. The monitoring endpoints are documented under Internal Agent Endpoints.)
+
 ### Security Maintained:
 - All customer PII remains encrypted with AES-256-GCM
 - Master key never exposed to Python agent layer
-- No raw PII sent to external LLM APIs
+- Customer PII never reaches LLM APIs: page text is redacted and the final payload is verified before every call (see [How the AI Works](#how-the-ai-works))
 - SMTP credentials protected in environment variables
-- Append-only audit trail for all removal actions
-- Family member limit enforced at database and service layers
+- Append-only audit trail for all removal actions, including verification and reappearance events
 
 ---
 
 ## Recent Updates
 
-### Production and Security Hardening (Latest)
+### Monitoring Completed End to End and Docs Reconciled
 
-**VectorScrub has been hardened for production deployment** with enterprise-grade security, observability, and compliance features.
+- **Removal verification and reappearance monitoring now work end to end.** New backend endpoints (`due-for-verification`, `verification-result`, `due-for-monitoring`, `monitoring-result`) and a real monitoring worker replace the previous sleep-and-TODO scaffold. Premium accounts are re-checked weekly and Personal monthly; Free is never monitored.
+- **Bugs fixed on the way:** the monitoring agent called the detection agent with the wrong signature (so it could never detect anything); `monitoring_enabled` defaulted to `false` and was never set, so scheduled rescans and monitoring never ran; verified removals failed with a SQL error (nonexistent `exposures.updated_at`); and a reappeared record could never be re-authorized because any prior removal request blocked a new one.
+- **Honest failure handling:** a new `failed` removal status (migration 0006) ends the earlier endless-retry behavior; web-form submissions need positive confirmation to count as `submitted`; CAPTCHAs fail explicitly instead of being attempted.
+- **Pricing reconciled:** the Family tier is gone everywhere in the docs (migration 0005 already removed it from the database). All plans are per person.
+- **No customer PII to LLMs, enforced in code:** every model call now goes through a redaction-and-verify gateway (`agents/shared/pii_guard.py`). The model no longer receives any identity (not even masked hints) or page URLs, and a call is blocked if any customer value is still in the payload.
+- **Third-party names closed too:** a local spaCy NER pass (`pii_ner.py`) marks other people's names, and a deny-by-default vocabulary filter (`pii_vocab.py`) drops every word that is not structural, so a name the patterns and NER both miss still cannot leave. Measured on 2,500 multi-locale pages: patterns plus NER alone leaked a name on 60%; the full pipeline on 0. Requires `spacy` and `en_core_web_sm` (pinned in `requirements.txt`).
+- **CSRF fixed:** the middleware cut the cookie value at the `=` in base64 padding, so cookie and header could never match, and the frontend never sent the header, so every authenticated POST/PUT/DELETE from the browser was rejected with 403. Tokens are now URL-safe, parsing is correct, comparison is constant-time, `Secure` is set only in production, and the frontend sends the header through `csrfFetch`.
+- **Risk documented:** see [Legal and Operational Risk](#legal-and-operational-risk).
 
-**Security Enhancements:**
-- **CSRF Protection**: Double-submit cookie pattern protecting all state-changing requests
-- **Security Headers**: Comprehensive HTTP security headers (CSP, HSTS, X-Frame-Options, etc.)
-- **Rate Limiting**: Request timeout protection with configurable IP-based limiting
-- **Audit Logging**: Immutable append-only audit trail for all sensitive operations
-- **Circuit Breakers**: Automatic failure protection for external service dependencies
-- **Input Validation**: Multi-layer validation at agent and API boundaries
+### Hardening Pass: Scoped Identity, Limits, Recovery, Tests (Latest)
 
-**Observability and Metrics:**
-- **Prometheus Metrics**: Request latency, throughput, error rates, database pool stats
-- **Structured Logging**: JSON-formatted logs with correlation IDs and trace context
-- **Health Checks**: Dedicated endpoints for liveness and readiness probes
-- **Request Tracing**: End-to-end request ID tracking across all services
+- **No more "skeleton key".** The agent key used to read any customer's identity by id. That route is gone. Identity is now released one work item at a time (a running scan with its token, an authorized removal request, or an exposure due for monitoring), the customer is derived from the item, and every release is audited (fail-closed). The agent key is compared in constant time and startup rejects weak secrets.
+- **Rate limiting and login lockout** added (per-IP limits, per-email lockout with `Retry-After`, no account enumeration).
+- **Scan recovery:** scans lost to worker crashes, lost Redis entries, or Redis outages are requeued, redispatched, or failed with an alert (see [Scan Job Recovery](#scan-job-recovery)).
+- **Removal state machine** enforced server-side in a locked transaction; audit entries are bound to the request's real owner; `audit_log` is append-only via triggers.
+- **Docs now describe what exists.** Removed unused or broken code: Rust `data_retention`, `circuit_breaker`, `experiments`, and the disabled family routes/services; Python `data_brokers/`, `hsm_service.py`, and `validation.py` (the HSM service would have put a key-store password in the agent process). The Python circuit breaker was kept and wired into discovery and monitoring. Matching docs (`AB_TESTING.md`, `DATA_BROKERS.md`, `PYHSM_INTEGRATION.md`) were deleted and others corrected.
+- **Bugs found while testing:** Docker Compose never passed `AGENT_API_KEY` to the backend, so the stack could not boot; discovery sent the LLM a placeholder instead of real page text, so detection could not work as intended; the removal-authorize endpoint did not check that the exposure belonged to the caller.
+- **Tests and CI:** Rust tests (crypto, state machine, identity release, lockout, limits, recovery), Python tests (PII guard, orchestrator, monitoring, executor in Chromium), checked-in `.sqlx`, `.github/workflows/ci.yml` (not yet run on GitHub), clippy clean.
 
-**Production Infrastructure:**
-- **PyHSM Integration**: Hardware security module support for production key management
-- **Circuit Breakers**: Automated failure detection and recovery for data broker APIs
-- **Data Retention**: Automated cleanup of old scans, exposures, and audit logs per policy
-- **SOC 2 Compliance**: Complete control framework documentation and evidence collection
+### Production and Security Hardening (earlier pass, corrected)
 
-**Data Broker Coverage:**
-- **Modular Broker System**: Extensible registry-based architecture for data source integrations
-- **4 Production Brokers**: Spokeo, WhitePages, TruthFinder, BeenVerified with dedicated implementations
-- **Aggregator Pattern**: Intelligent result deduplication and confidence scoring
-- **Failure Isolation**: Per-broker circuit breakers prevent cascading failures
-
-**A/B Testing and Experimentation:**
-- **Feature Flags**: Runtime-controlled feature rollouts without deployments
-- **Variant Assignment**: Consistent user bucketing with metrics tracking
-- **Experiment Analysis**: Statistical significance testing for product decisions
-
-**New Documentation:**
-- `AB_TESTING.md` - A/B testing framework and experiment design
-- `CIRCUIT_BREAKERS.md` - Failure protection and resilience patterns
-- `DATA_BROKERS.md` - Data source integration architecture
-- `DATA_RETENTION.md` - Data lifecycle and retention policies
-- `OBSERVABILITY.md` - Metrics, logging, and monitoring guide
-- `PYHSM_INTEGRATION.md` - Hardware security module setup
-- `SECURITY_FIXES.md` - P0 security improvements implemented
-- `SOC2_COMPLIANCE.md` - Complete SOC 2 Type II compliance framework
-- `P1_IMPROVEMENTS.md` - Priority 1 feature enhancements
-- `P2_IMPROVEMENTS.md` - Priority 2 feature enhancements
-
-**Files Added/Modified:**
-- Backend: 20+ new modules including circuit breakers, audit service, metrics, CSRF middleware
-- Agents: Circuit breaker integration, broker registry, PyHSM key management, validation layer
-- Frontend: Error boundary component, enhanced error handling
-- Database: Migration 0004 for comprehensive audit logging
-- Dependencies: Prometheus client, additional security crates, PyHSM libraries
+An earlier version of this entry listed capabilities that were documented but never wired in (PyHSM key management, a Rust circuit breaker, automated data retention, a broker registry, A/B testing, an input-validation layer). They have been removed from the code and docs; see the hardening entry above and [Production Deployment](#production-deployment) for what exists. What that pass did deliver: CSRF protection, security headers, the audit log (migration 0004), Prometheus metrics, health checks, OTLP tracing, and the supporting docs (`CIRCUIT_BREAKERS.md`, `DATA_RETENTION.md`, `OBSERVABILITY.md`, `SECURITY_FIXES.md`, `SOC2_COMPLIANCE.md`, `P1_IMPROVEMENTS.md`, `P2_IMPROVEMENTS.md`, the last four annotated as historical or planning documents).
 
 ### Phase 3 Complete — Keep Me Protected
+
+*Historical entry: the family-related items below (endpoints, `family.rs` files, family dashboard, member limits) were later removed; see Subscription Plans.*
 
 **VectorScrub Phase 3 is now production-ready.** All 12 planned tasks completed and deployed.
 
 **What Changed:**
 - **Continuous monitoring**: Scheduled rescans every 7-30 days based on subscription tier
 - **Reappearance detection**: Automatic alerts when removed records come back online
-- **Family protection**: Up to 4 family members under one Family plan subscription
+- **Per-person plans**: Family plans were removed; each person has their own account
 - **Privacy insights**: Historical trend charts showing score changes over time
 - **Multi-channel removal**: Email opt-out and California DROP API integration now complete
 - **Alert system**: Customizable email/SMS notifications for key events

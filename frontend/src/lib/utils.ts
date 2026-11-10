@@ -74,6 +74,7 @@ export function removalStatusLabel(status: RemovalStatus): string {
     rejected: "Rejected",
     unverifiable: "Unverifiable",
     reappeared: "Reappeared",
+    failed: "Failed - Retry Available",
   };
   return labels[status];
 }
@@ -90,6 +91,7 @@ export function removalStatusColor(status: RemovalStatus): string {
     case "rejected":
     case "unverifiable":
     case "reappeared":
+    case "failed":
       return "text-red-400 border-red-800 bg-red-950";
   }
 }

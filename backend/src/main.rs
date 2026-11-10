@@ -17,6 +17,8 @@ mod middleware;
 mod models;
 mod observability;
 mod services;
+#[cfg(test)]
+mod test_support;
 
 pub use db::AppState;
 
@@ -72,6 +74,27 @@ async fn main() -> anyhow::Result<()> {
         .await;
     });
 
+    // Repair scan jobs lost to a crashed worker or a failed enqueue (see jobs/recovery.rs)
+    let recovery_pool = pool.clone();
+    let recovery_redis = redis_client.clone();
+    let recovery_master_key_b64 = config.master_key_b64.clone();
+    let recovery_cfg = services::scan::RecoveryConfig {
+        stale_after_secs: config.scan_stale_after_secs,
+        redispatch_after_secs: config.scan_redispatch_after_secs,
+        max_attempts: config.scan_max_attempts,
+    };
+    let recovery_interval = std::time::Duration::from_secs(config.scan_recovery_interval_secs.max(1));
+    tokio::spawn(async move {
+        jobs::recovery::run_scan_recovery(
+            recovery_pool,
+            recovery_redis,
+            recovery_master_key_b64,
+            recovery_cfg,
+            recovery_interval,
+        )
+        .await;
+    });
+
     let app = Router::new()
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", docs::ApiDoc::openapi()))
         .nest("/api/v1", api::router(state.clone()));
@@ -82,9 +105,14 @@ async fn main() -> anyhow::Result<()> {
 
     info!("VectorScrub API listening on {}", addr);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `ConnectInfo` makes the client's socket address available to the rate limiter and the
+    // audit log.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     Ok(())
 }

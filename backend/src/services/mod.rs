@@ -1,12 +1,11 @@
 pub mod audit;
 pub mod auth;
-pub mod circuit_breaker;
 pub mod config;
 pub mod customer;
-pub mod data_retention;
-pub mod experiments;
 pub mod exposure;
-pub mod family;
+pub mod identity_access;
+pub mod login_throttle;
+pub mod monitoring;
 pub mod notification;
 pub mod privacy_score;
 pub mod removal;

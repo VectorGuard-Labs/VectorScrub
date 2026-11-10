@@ -21,6 +21,37 @@ pub enum RemovalStatus {
     Unverifiable,
     /// Previously removed record has reappeared
     Reappeared,
+    /// Automated submission could not be completed (form changed, CAPTCHA,
+    /// no confirmation observed, transport error). The customer may re-authorize.
+    Failed,
+}
+
+impl RemovalStatus {
+    /// Legal moves of the removal lifecycle:
+    ///
+    /// ```text
+    ///   authorized -> submitted | failed
+    ///   submitted  -> submitted (refresh check date) | acknowledged | verified_removed
+    ///                 | rejected | unverifiable
+    ///   acknowledged -> acknowledged | verified_removed | rejected | unverifiable
+    ///   verified_removed -> reappeared
+    ///   rejected, unverifiable, failed, reappeared -> (terminal: the customer
+    ///                 authorizes a new request)
+    /// ```
+    ///
+    /// Everything else is refused. In particular nothing can jump to `verified_removed`
+    /// without first being `submitted`, so a removal cannot be "confirmed" that was never
+    /// sent.
+    pub fn can_transition_to(&self, next: &RemovalStatus) -> bool {
+        use RemovalStatus::*;
+        matches!(
+            (self, next),
+            (Authorized, Submitted | Failed)
+                | (Submitted, Submitted | Acknowledged | VerifiedRemoved | Rejected | Unverifiable)
+                | (Acknowledged, Acknowledged | VerifiedRemoved | Rejected | Unverifiable)
+                | (VerifiedRemoved, Reappeared)
+        )
+    }
 }
 
 /// A single data removal request targeting one exposure on one source.
@@ -57,4 +88,47 @@ pub struct RemovalAuditEntry {
     pub actor: String,
     pub details: serde_json::Value,
     pub recorded_at: OffsetDateTime,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemovalStatus::{self, *};
+
+    const ALL: [RemovalStatus; 8] = [
+        Authorized, Submitted, Acknowledged, VerifiedRemoved, Rejected, Unverifiable, Reappeared, Failed,
+    ];
+
+    #[test]
+    fn the_legal_transitions_are_exactly_these() {
+        let legal = [
+            (Authorized, Submitted), (Authorized, Failed),
+            (Submitted, Submitted), (Submitted, Acknowledged), (Submitted, VerifiedRemoved),
+            (Submitted, Rejected), (Submitted, Unverifiable),
+            (Acknowledged, Acknowledged), (Acknowledged, VerifiedRemoved),
+            (Acknowledged, Rejected), (Acknowledged, Unverifiable),
+            (VerifiedRemoved, Reappeared),
+        ];
+        for from in &ALL {
+            for to in &ALL {
+                let expected = legal.iter().any(|(f, t)| f == from && t == to);
+                assert_eq!(from.can_transition_to(to), expected, "{from:?} -> {to:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_states_go_nowhere() {
+        for terminal in [Rejected, Unverifiable, Failed, Reappeared] {
+            for to in &ALL {
+                assert!(!terminal.can_transition_to(to), "{terminal:?} -> {to:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_verified_removed_without_being_submitted_first() {
+        assert!(!Authorized.can_transition_to(&VerifiedRemoved));
+        assert!(!Failed.can_transition_to(&VerifiedRemoved));
+        assert!(Submitted.can_transition_to(&VerifiedRemoved));
+    }
 }

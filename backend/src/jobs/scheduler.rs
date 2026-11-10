@@ -1,21 +1,17 @@
 use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use serde_json::json;
 use sqlx::PgPool;
-use time::OffsetDateTime;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::crypto::{derive_customer_key, encrypt_str, MasterKey};
+use crate::crypto::MasterKey;
 use crate::models::customer::Customer;
 use crate::services::scan as scan_svc;
 
 /// Scheduled rescan dispatcher — continuously checks for customers due for rescans.
-/// Rescan frequency by tier:
+/// Rescan frequency by tier (requires `monitoring_enabled`):
 /// - Personal: monthly
 /// - Premium: weekly
-/// - Family: weekly
 /// - Free: no automatic rescans
 pub async fn run_scheduled_rescans(
     pool: PgPool,
@@ -47,6 +43,7 @@ async fn dispatch_due_rescans(
         SELECT * FROM customers
         WHERE monitoring_enabled = true
         AND is_active = true
+        AND EXISTS (SELECT 1 FROM identity_profiles ip WHERE ip.customer_id = customers.id)
         AND subscription_tier IN ('personal', 'premium')
         AND (
             (subscription_tier = 'personal' AND (last_scan_at IS NULL OR last_scan_at < NOW() - INTERVAL '30 days'))
@@ -88,38 +85,18 @@ async fn dispatch_due_rescans(
     Ok(())
 }
 
-/// Initiate a scan for a single customer as part of scheduled monitoring.
+/// Initiate a scan for a single customer as part of scheduled monitoring. Goes through the
+/// same path as a customer-initiated scan, so the job gets its own scoped identity token
+/// and is covered by recovery.
 async fn initiate_scheduled_scan(
     pool: &PgPool,
     redis: &redis::Client,
     master_key_b64: &str,
     customer: &Customer,
 ) -> Result<Uuid> {
-    // Load master key
-    let master_key = MasterKey::from_base64(master_key_b64)?;
+    let master = MasterKey::from_base64(master_key_b64)?;
+    let job = scan_svc::initiate_scan(pool, redis, &master, customer.id, &customer.subscription_tier).await?;
 
-    // Generate identity token
-    let token_payload = json!({
-        "customer_id": customer.id,
-        "issued_at": OffsetDateTime::now_utc().unix_timestamp()
-    })
-    .to_string();
-
-    let key = derive_customer_key(&master_key, customer.id);
-    let encrypted = encrypt_str(&key, &token_payload)?;
-    let identity_token = BASE64.encode(&encrypted);
-
-    // Initiate scan (bypasses rate limiting for scheduled scans)
-    let job = scan_svc::initiate_scan(
-        pool,
-        redis,
-        customer.id,
-        &customer.subscription_tier,
-        identity_token,
-    )
-    .await?;
-
-    // Update last_scan_at
     sqlx::query("UPDATE customers SET last_scan_at = NOW() WHERE id = $1")
         .bind(customer.id)
         .execute(pool)

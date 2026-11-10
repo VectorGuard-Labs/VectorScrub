@@ -154,7 +154,7 @@ pub async fn alert_removal_failed(
 ) -> Result<()> {
     let title = format!("Removal request failed: {}", source_name);
     let message = format!(
-        "Your removal request to {} could not be completed. Error: {}. Our team will investigate.",
+        "Your removal request to {} could not be completed ({}). No further action was taken on your behalf. You can re-authorize removal from your dashboard.",
         source_name, error
     );
 
@@ -169,7 +169,7 @@ pub async fn alert_reappearance(
 ) -> Result<()> {
     let title = format!("Information reappeared: {}", source_name);
     let message = format!(
-        "Previously removed information has reappeared on {}. A new removal request has been prepared for your review.",
+        "Previously removed information has reappeared on {}. Nothing is re-submitted without your approval: review it on your dashboard and re-authorize removal.",
         source_name
     );
 

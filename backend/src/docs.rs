@@ -37,7 +37,6 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile, Subscriptio
         (name = "scans", description = "Privacy scan operations"),
         (name = "exposures", description = "Data exposure management"),
         (name = "removals", description = "Removal request operations"),
-        (name = "family", description = "Family plan management"),
     ),
     servers(
         (url = "http://localhost:8080", description = "Local development"),

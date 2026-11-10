@@ -1,0 +1,159 @@
+name: CI
+
+# Everything here can be run locally; the exact commands are in each step. Nothing needs
+# secrets: the tests use throwaway databases and fake keys.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  backend:
+    name: Backend (Rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vectorscrub
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: vectorscrub
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U vectorscrub" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      # Used at RUNTIME by #[sqlx::test] (it creates a fresh database per test) and by the
+      # Redis-backed API tests. Compilation does not use it: see SQLX_OFFLINE below.
+      DATABASE_URL: postgres://vectorscrub:ci@localhost:5432/vectorscrub
+      TEST_REDIS_URL: redis://localhost:6379/14
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep in step with the Rust version in infra/docker/Dockerfile.backend.
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      # Proves the backend compiles with no database at all, from the checked-in .sqlx/ data.
+      - name: Build without a database
+        run: DATABASE_URL=postgres://nobody@127.0.0.1:1/none cargo build --locked
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests (crypto, identity scoping, removal lifecycle, monitoring, recovery, lockout, rate limits, CSRF, audit immutability, HTTP API)
+        run: cargo test --locked
+
+      # Fails if someone changed a sqlx::query! without regenerating backend/.sqlx.
+      - name: .sqlx offline data is up to date
+        working-directory: .
+        env:
+          SQLX_OFFLINE: "false"
+          DATABASE_URL: postgres://vectorscrub:ci@localhost:5432/prepare
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          export PGPASSWORD=ci
+          psql -h localhost -U vectorscrub -d vectorscrub -q -c "CREATE DATABASE prepare;"
+          for f in backend/migrations/*.sql; do
+            psql -h localhost -U vectorscrub -d prepare -v ON_ERROR_STOP=1 -q -1 -f "$f"
+          done
+          infra/scripts/sqlx_prepare.sh --check
+
+  agents:
+    name: Agents (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: agents
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            agents/requirements.txt
+            agents/requirements-dev.txt
+
+      # Installs spaCy and the hash-pinned en_core_web_sm model along with everything else, so
+      # the NER-dependent PII tests run instead of being skipped.
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Install the browser the executor tests drive
+        run: playwright install --with-deps chromium
+
+      - name: Tests (PII guard, vocabulary hygiene, detection gateway, monitoring, orchestrator, discovery, executor)
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend (Next.js)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Type-check
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+
+  images:
+    name: Docker images and compose file
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker compose file is valid (and refuses to start without its secrets)
+        working-directory: infra/docker
+        run: |
+          if docker compose config >/dev/null 2>&1; then
+            echo "compose accepted an empty environment: required secrets are not enforced"; exit 1
+          fi
+          POSTGRES_PASSWORD=p REDIS_PASSWORD=r JWT_SECRET=$(printf 'j%.0s' {1..40}) \
+          MASTER_ENCRYPTION_KEY=x AGENT_API_KEY=$(printf 'k%.0s' {1..40}) docker compose config >/dev/null
+
+      # No database exists in this build: the image compiles from backend/.sqlx.
+      - name: Backend image builds with no database
+        run: docker build -f infra/docker/Dockerfile.backend -t vectorscrub-backend backend
+
+      - name: Agents image builds (browser, spaCy model, hash-pinned)
+        run: docker build -f infra/docker/Dockerfile.agents -t vectorscrub-agents agents

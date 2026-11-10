@@ -162,29 +162,35 @@ class CircuitBreaker(Generic[T]):
 
         except Exception as e:
             self._record_failure()
-            self.log.error("circuit_breaker_execution_failed", error=str(e))
+            self.log.error("circuit_breaker_execution_failed", error_type=type(e).__name__)
             raise
 
-    async def execute_async(self, coro) -> T:
+    async def execute_async(self, work) -> T:
         """
-        Execute an async function with circuit breaker protection.
+        Execute an async operation with circuit breaker protection.
 
         Args:
-            coro: Coroutine to execute
+            work: a zero-argument callable returning a coroutine (preferred: nothing is
+                created, and nothing leaks, if the circuit rejects the call), or a
+                coroutine object (it is closed if the circuit rejects it, so Python does
+                not warn "coroutine was never awaited").
 
         Returns:
-            Coroutine result
+            The operation's result
 
         Raises:
             CircuitOpenError: If circuit is open
             asyncio.TimeoutError: If execution times out
-            Exception: If coroutine raises an exception
+            Exception: If the operation raises an exception
         """
         if not self._can_execute():
             self.log.warning("circuit_breaker_rejected_async_request")
+            if asyncio.iscoroutine(work):
+                work.close()
             raise CircuitOpenError(f"Circuit breaker '{self.name}' is open")
 
         try:
+            coro = work() if callable(work) else work
             # Execute with timeout
             result = await asyncio.wait_for(
                 coro, timeout=self.config.request_timeout_seconds
@@ -203,7 +209,7 @@ class CircuitBreaker(Generic[T]):
 
         except Exception as e:
             self._record_failure()
-            self.log.error("circuit_breaker_async_execution_failed", error=str(e))
+            self.log.error("circuit_breaker_async_execution_failed", error_type=type(e).__name__)
             raise
 
     def get_state(self) -> CircuitState:

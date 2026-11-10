@@ -64,10 +64,12 @@ impl FromRequestParts<AppState> for AgentAuth {
         let key = parts
             .headers
             .get("X-Agent-Key")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+            .map(|v| v.as_bytes())
+            .unwrap_or(b"");
 
-        if key != state.config.agent_api_key {
+        // Constant-time (and length-hiding) comparison: `!=` on strings short-circuits at
+        // the first differing byte, which leaks how much of a guess was correct.
+        if !crate::crypto::secrets_equal(key, state.config.agent_api_key.as_bytes()) {
             return Err((StatusCode::UNAUTHORIZED, "Invalid agent key".into()));
         }
         Ok(AgentAuth)

@@ -1,37 +1,35 @@
 # VectorScrub AI Agent Layer
 # Python 3.11+
+#
+# Every package here is imported by the agents or is a direct dependency of one that is.
+# Packages that were declared but never used (langchain meta-package, langgraph, rq, aiohttp,
+# lxml, opentelemetry-*, python-dotenv, vectorguard-pyhsm) were removed: unused dependencies
+# are supply-chain risk with no benefit. Re-add one only together with the code that uses it.
 
-# LLM / AI orchestration
-langchain==1.4.9
+# LLM calls. All of them go through detection/agent.py behind shared/pii_guard.py.
 langchain-openai==1.7.4
 langchain-anthropic==1.7.10
-langgraph==1.2.20
 openai==3.46.0
 anthropic==2.6.0
 
-# Web scraping & browser automation
+# Web fetching and browser automation
 playwright==1.64.1
 beautifulsoup4==4.12.3
-lxml==5.3.0
 httpx==0.28.1
-aiohttp==3.11.11
 
 # Job queue
 redis==5.2.1
-rq==3.0.0
+
+# Named-entity recognition for the PII guard (shared/pii_ner.py). Runs locally on CPU;
+# no text leaves the process. The model wheel is hash-pinned because it is fetched from a
+# GitHub release URL rather than PyPI; pip rejects the install if the file differs.
+spacy==3.8.18
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
 
 # Data handling
 pydantic==2.11.4
 pydantic-settings==2.8.1
 
-# Observability
+# Logging and retries
 structlog==26.1.0
-opentelemetry-sdk==1.33.0
-opentelemetry-exporter-otlp==1.33.0
-
-# Utilities
-python-dotenv==1.2.4
 tenacity==9.2.1
-
-# Key Management
-vectorguard-pyhsm==2.3.7

@@ -5,7 +5,8 @@
 
 # Rust
 /backend/target/
-backend/Cargo.lock
+# backend/Cargo.lock and backend/.sqlx/ are deliberately NOT ignored: the lockfile makes builds
+# reproducible, and .sqlx/ lets the backend compile without a database (SQLX_OFFLINE=true).
 
 # Python
 __pycache__/
@@ -16,6 +17,7 @@ agents/venv/
 agents/*.egg-info/
 agents/dist/
 agents/.pytest_cache/
+.pytest_cache/
 
 # Node / Next.js
 frontend/node_modules/
