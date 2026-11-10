@@ -1,3 +1,3 @@
-from detection.agent import DetectionAgent
+from detection.agent import DetectionAgent, DetectionReport
 
-__all__ = ["DetectionAgent"]
+__all__ = ["DetectionAgent", "DetectionReport"]

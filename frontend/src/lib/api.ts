@@ -16,22 +16,57 @@ import { csrfFetch } from "@/lib/csrf";
 
 const BASE = "/api/v1";
 
-function getToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem("vs_token");
+/**
+ * The session is an HttpOnly cookie set by the server at login. This code never sees it, and
+ * nothing is stored in localStorage: a script injected into the page cannot read the session,
+ * only (at worst) act within it while the page is open. Same-origin fetches send the cookie
+ * automatically; state-changing requests also carry the CSRF header (see csrf.ts).
+ */
+function jsonHeaders(): Record<string, string> {
+  return { "Content-Type": "application/json" };
 }
 
-function authHeaders(): Record<string, string> {
-  const token = getToken();
-  return token
-    ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-    : { "Content-Type": "application/json" };
+/** An error response from the API, with the HTTP status so callers can tell 401 from the rest. */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
 }
 
-async function handleResponse<T>(res: Response): Promise<T> {
+/**
+ * The human-readable message of an error response. The API answers every error with
+ * `{"message": "..."}`; anything else (a proxy's HTML page, an empty body) falls back to the
+ * raw text or the HTTP status, so the user never sees raw JSON.
+ */
+export async function errorMessage(res: Response): Promise<string> {
+  const text = (await res.text().catch(() => "")).trim();
+  try {
+    const body: unknown = JSON.parse(text);
+    if (body && typeof body === "object" && typeof (body as { message?: unknown }).message === "string") {
+      return (body as { message: string }).message;
+    }
+  } catch {
+    // not JSON
+  }
+  return text || res.statusText || `HTTP ${res.status}`;
+}
+
+async function handleResponse<T>(
+  res: Response,
+  { authenticated = true }: { authenticated?: boolean } = {}
+): Promise<T> {
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(text || `HTTP ${res.status}`);
+    // The session is missing or has expired: send the user to sign in again instead of
+    // leaving every page to show its own "failed to load". (Login and register are not
+    // "authenticated" calls; a 401 there just means wrong credentials.)
+    if (authenticated && res.status === 401 && typeof window !== "undefined") {
+      window.location.assign("/login");
+    }
+    throw new ApiError(res.status, await errorMessage(res));
   }
   return res.json() as Promise<T>;
 }
@@ -43,10 +78,11 @@ export async function register(
 ): Promise<AuthResponse> {
   const res = await fetch(`${BASE}/auth/register`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: jsonHeaders(),
+    credentials: "same-origin",
     body: JSON.stringify({ email, password }),
   });
-  return handleResponse<AuthResponse>(res);
+  return handleResponse<AuthResponse>(res, { authenticated: false });
 }
 
 export async function login(
@@ -55,15 +91,28 @@ export async function login(
 ): Promise<AuthResponse> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: jsonHeaders(),
+    credentials: "same-origin",
     body: JSON.stringify({ email, password }),
   });
-  return handleResponse<AuthResponse>(res);
+  return handleResponse<AuthResponse>(res, { authenticated: false });
+}
+
+/** Ends the session: the server expires the cookie. Never throws; signing out always "works". */
+export async function logout(): Promise<void> {
+  try {
+    await fetch(`${BASE}/auth/logout`, {
+      method: "POST",
+      credentials: "same-origin",
+    });
+  } catch {
+    // Offline or the server is down: nothing more can be done from here.
+  }
 }
 
 // Profile
 export async function getProfile(): Promise<CustomerProfile> {
-  const res = await csrfFetch(`${BASE}/me`, { headers: authHeaders() });
+  const res = await csrfFetch(`${BASE}/me`, { headers: jsonHeaders() });
   return handleResponse<CustomerProfile>(res);
 }
 
@@ -80,7 +129,7 @@ export interface IdentityPayload {
 export async function submitIdentity(payload: IdentityPayload): Promise<void> {
   const res = await csrfFetch(`${BASE}/me/identity`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: jsonHeaders(),
     body: JSON.stringify(payload),
   });
   await handleResponse<unknown>(res);
@@ -94,26 +143,26 @@ export async function initiateSccan(): Promise<{
 }> {
   const res = await csrfFetch(`${BASE}/scans`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: jsonHeaders(),
   });
   return handleResponse(res);
 }
 
 export async function listScans(): Promise<{ jobs: ScanJob[] }> {
-  const res = await csrfFetch(`${BASE}/scans`, { headers: authHeaders() });
+  const res = await csrfFetch(`${BASE}/scans`, { headers: jsonHeaders() });
   return handleResponse(res);
 }
 
 export async function getScan(jobId: string): Promise<{ job: ScanJob }> {
   const res = await csrfFetch(`${BASE}/scans/${jobId}`, {
-    headers: authHeaders(),
+    headers: jsonHeaders(),
   });
   return handleResponse(res);
 }
 
 // Exposures
 export async function listExposures(): Promise<{ exposures: Exposure[] }> {
-  const res = await csrfFetch(`${BASE}/exposures`, { headers: authHeaders() });
+  const res = await csrfFetch(`${BASE}/exposures`, { headers: jsonHeaders() });
   return handleResponse(res);
 }
 
@@ -121,7 +170,7 @@ export async function getExposureSummary(): Promise<{
   summary: ExposureSummary;
 }> {
   const res = await csrfFetch(`${BASE}/exposures/summary`, {
-    headers: authHeaders(),
+    headers: jsonHeaders(),
   });
   return handleResponse(res);
 }
@@ -131,7 +180,7 @@ export async function listRemovalRequests(): Promise<{
   requests: RemovalRequest[];
 }> {
   const res = await csrfFetch(`${BASE}/removal-requests`, {
-    headers: authHeaders(),
+    headers: jsonHeaders(),
   });
   return handleResponse(res);
 }
@@ -142,7 +191,7 @@ export async function authorizeRemoval(exposureId: string): Promise<{
 }> {
   const res = await csrfFetch(`${BASE}/removal-requests/${exposureId}/authorize`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: jsonHeaders(),
   });
   return handleResponse(res);
 }
@@ -152,7 +201,7 @@ export async function getRemovalRequest(requestId: string): Promise<{
   audit_log: RemovalAuditEntry[];
 }> {
   const res = await csrfFetch(`${BASE}/removal-requests/${requestId}`, {
-    headers: authHeaders(),
+    headers: jsonHeaders(),
   });
   return handleResponse(res);
 }
@@ -179,7 +228,7 @@ export interface PrivacyScoreTrend {
 
 export async function getPrivacyScoreHistory(days: number = 30): Promise<PrivacyScoreTrend> {
   const res = await csrfFetch(`${BASE}/privacy-score/history?days=${days}`, {
-    headers: authHeaders(),
+    headers: jsonHeaders(),
   });
   return handleResponse(res);
 }

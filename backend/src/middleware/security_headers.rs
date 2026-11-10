@@ -1,4 +1,9 @@
-use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Response};
+use axum::{
+    extract::{Request, State},
+    http::HeaderValue,
+    middleware::Next,
+    response::Response,
+};
 
 /// Middleware that adds security headers to all responses
 ///
@@ -10,7 +15,11 @@ use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Resp
 /// - Content-Security-Policy: Restricts resource loading to prevent XSS
 /// - Referrer-Policy: Controls referrer information sent with requests
 /// - Permissions-Policy: Controls browser features
-pub async fn security_headers_middleware(request: Request, next: Next) -> Response {
+pub async fn security_headers_middleware(
+    State(hsts): State<bool>,
+    request: Request,
+    next: Next,
+) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
@@ -32,9 +41,11 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
         HeaderValue::from_static("1; mode=block"),
     );
 
-    // Strict Transport Security (HSTS) - Force HTTPS for 1 year
-    // Only enable in production when using HTTPS
-    if std::env::var("ENVIRONMENT").as_deref() == Ok("production") {
+    // Strict Transport Security (HSTS) - Force HTTPS for 1 year.
+    // `hsts` comes from AppConfig::hsts_enabled(), the same validated ENVIRONMENT the
+    // cookies use. (It used to re-read the raw variable on every request, so a value the
+    // config did not recognise could disagree with it.)
+    if hsts {
         headers.insert(
             "Strict-Transport-Security",
             HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
@@ -83,4 +94,38 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
     headers.remove("Server");
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request as HttpRequest, middleware::from_fn_with_state, routing::get, Router};
+    use tower::ServiceExt;
+
+    async fn headers(hsts: bool) -> axum::http::HeaderMap {
+        let app = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(from_fn_with_state(hsts, security_headers_middleware));
+        app.oneshot(HttpRequest::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .headers()
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn hsts_follows_the_flag_it_is_given() {
+        assert!(headers(true).await.contains_key("strict-transport-security"));
+        assert!(!headers(false).await.contains_key("strict-transport-security"));
+    }
+
+    #[tokio::test]
+    async fn the_other_headers_are_always_sent() {
+        for hsts in [true, false] {
+            let h = headers(hsts).await;
+            for name in ["x-frame-options", "x-content-type-options", "content-security-policy", "referrer-policy"] {
+                assert!(h.contains_key(name), "{name} (hsts={hsts})");
+            }
+        }
+    }
 }

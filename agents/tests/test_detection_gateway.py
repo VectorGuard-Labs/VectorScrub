@@ -143,3 +143,71 @@ async def test_low_confidence_and_non_matches_are_not_exposures(identity):
         agent._llm = model
         agent._ner = FakeDetector()
         assert await agent.classify(candidate(), identity) is None
+
+
+# ---------------------------------------------------------------------------
+# "Could not check" must never look like "checked and clean"
+# ---------------------------------------------------------------------------
+
+def _agent(model):
+    a = DetectionAgent()
+    a._llm = model
+    a._ner = FakeDetector()
+    return a
+
+
+async def test_run_report_counts_pages_that_could_not_be_checked(identity):
+    report = await _agent(FakeChatModel(error=RuntimeError("provider down"))).run_report(
+        [candidate(), candidate()], identity
+    )
+    assert (report.checked, report.failed, report.confirmed) == (2, 2, [])
+
+
+async def test_a_clean_page_is_checked_not_failed(identity):
+    report = await _agent(FakeChatModel(is_match=False)).run_report([candidate(), candidate()], identity)
+    assert (report.checked, report.failed, report.confirmed) == (2, 0, [])
+
+
+async def test_a_guard_block_counts_as_a_failed_check(identity, monkeypatch):
+    import detection.agent as module
+
+    monkeypatch.setattr(module, "redact_for_llm", lambda text, ident, person_detector=None: g.Redacted(text, g.Evidence()))
+    llm = FakeChatModel()
+    report = await _agent(llm).run_report([candidate()], identity)
+    assert (report.checked, report.failed) == (1, 1) and llm.sent == []
+
+
+async def test_a_malformed_confidence_is_a_failed_check_not_a_crashed_scan(identity):
+    # 95 instead of 0.95 used to escape as a ValidationError and abort the whole scan
+    report = await _agent(FakeChatModel(confidence=95)).run_report([candidate()], identity)
+    assert (report.checked, report.failed, report.confirmed) == (1, 1, [])
+
+
+async def test_failures_do_not_hide_real_findings_in_the_same_batch(identity):
+    class Flaky(FakeChatModel):
+        def with_structured_output(self, schema):
+            outer, inner = self, super().with_structured_output(schema)
+
+            class _S:
+                async def ainvoke(self, messages):
+                    if len(outer.sent) == 1:        # the second call blows up
+                        outer.sent.append(messages)
+                        raise RuntimeError("blip")
+                    return await inner.ainvoke(messages)
+            return _S()
+
+    report = await _agent(Flaky()).run_report([candidate(), candidate(), candidate()], identity)
+    assert (report.checked, report.failed, len(report.confirmed)) == (3, 1, 2)
+
+
+async def test_failures_are_logged_without_the_listing_url_or_exception_text(identity):
+    import structlog
+
+    with structlog.testing.capture_logs() as logs:
+        await _agent(FakeChatModel(error=RuntimeError("401 for jane-smith at https://secret.example/jane"))).run_report(
+            [candidate()], identity
+        )
+    text = str(logs).lower()
+    assert "detection_llm_error" in text and "runtimeerror" in text
+    assert "jane" not in text and "secret.example" not in text and "peoplesearch.example/people" not in text
+    assert "peoplesearch.example" in text, "the host is logged; the path is not"

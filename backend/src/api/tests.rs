@@ -281,6 +281,38 @@ async fn the_removal_status_endpoint_enforces_the_lifecycle(pool: PgPool) {
 // ===========================================================================
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_removal_submission_can_be_claimed_once_and_only_by_the_agent(pool: PgPool) {
+    let (app, cfg) = app(pool.clone());
+    let c = ts::customer(&pool, "personal", true).await;
+    let e = ts::exposure(&pool, c, true, None).await;
+    let r = ts::removal_request(&pool, c, e, "authorized", None).await;
+    let uri = format!("/internal/removal-requests/{r}/claim");
+
+    let no_key = send(&app, "POST", &uri, &bearer(&cfg, c, "personal"), None).await;
+    assert_eq!(no_key.status, StatusCode::UNAUTHORIZED, "a customer token is not an agent key");
+    assert_eq!(send(&app, "POST", &uri, &agent(&cfg), None).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(send(&app, "POST", &uri, &agent(&cfg), None).await.status, StatusCode::CONFLICT, "second worker is refused");
+    let unknown = format!("/internal/removal-requests/{}/claim", Uuid::new_v4());
+    assert_eq!(send(&app, "POST", &unknown, &agent(&cfg), None).await.status, StatusCode::CONFLICT);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn authorizing_the_same_exposure_twice_is_a_conflict_not_an_error(pool: PgPool) {
+    let (app, cfg) = app(pool.clone());
+    let c = ts::customer(&pool, "personal", true).await;
+    let e = ts::exposure(&pool, c, true, None).await;
+    let uri = format!("/removal-requests/{e}/authorize");
+    let first = send(&app, "POST", &uri, &bearer(&cfg, c, "personal"), None).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    let second = send(&app, "POST", &uri, &bearer(&cfg, c, "personal"), None).await;
+    assert_eq!(second.status, StatusCode::CONFLICT);
+}
+
+// ===========================================================================
+// Scan initiation, job-scoped token, enqueue failure, real Redis
+// ===========================================================================
+
+#[sqlx::test(migrations = "./migrations")]
 async fn starting_a_scan_requires_an_identity_profile(pool: PgPool) {
     let (app, cfg) = app(pool.clone());
     let c = ts::customer(&pool, "premium", false).await;
@@ -372,6 +404,112 @@ async fn login(app: &Router, email: &str, password: &str) -> Reply {
     send(app, "POST", "/auth/login", &[("user-agent", "test-agent/1.0".into())], Some(json!({ "email": email, "password": password }))).await
 }
 
+/// The raw `Set-Cookie` line for the session cookie, if the reply set one.
+fn session_set_cookie(r: &Reply) -> Option<String> {
+    r.headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("vs_session="))
+        .map(str::to_string)
+}
+/// Just the session token out of that cookie.
+fn session_cookie_value(r: &Reply) -> String {
+    let line = session_set_cookie(r).expect("a session cookie was set");
+    line["vs_session=".len()..].split(';').next().unwrap().to_string()
+}
+
+// ===========================================================================
+// Browser session: HttpOnly cookie, not a token the page can read
+// ===========================================================================
+
+#[sqlx::test(migrations = "./migrations")]
+async fn login_and_register_put_the_session_in_an_httponly_cookie_and_not_in_the_body(pool: PgPool) {
+    let (app, _) = app(pool);
+    let reg = register(&app, "cookie@example.com").await;
+    assert_eq!(reg.status, StatusCode::CREATED);
+    let log = login(&app, "cookie@example.com", PASSWORD).await;
+    assert_eq!(log.status, StatusCode::OK);
+
+    for reply in [&reg, &log] {
+        let cookie = session_set_cookie(reply).expect("session cookie");
+        assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict") && cookie.contains("Path=/api/v1"), "{cookie}");
+        let token = session_cookie_value(reply);
+        assert!(!reply.body.contains(&token), "the token must not appear in the response body");
+        assert!(reply.json().get("token").is_none());
+        assert_eq!(reply.json()["customer"]["email"], "cookie@example.com");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_session_cookie_authenticates_requests(pool: PgPool) {
+    let (app, _) = app(pool);
+    register(&app, "me@example.com").await;
+    let token = session_cookie_value(&login(&app, "me@example.com", PASSWORD).await);
+
+    let me = send(&app, "GET", "/me", &[("cookie", format!("theme=dark; vs_session={token}; other=1"))], None).await;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
+    assert_eq!(me.json()["email"], "me@example.com");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn requests_without_a_valid_session_are_refused_without_saying_why(pool: PgPool) {
+    let (app, _) = app(pool);
+    register(&app, "x@example.com").await;
+    let token = session_cookie_value(&login(&app, "x@example.com", PASSWORD).await);
+
+    let none = send(&app, "GET", "/me", &[], None).await;
+    let junk = send(&app, "GET", "/me", &[("cookie", "vs_session=not.a.jwt".into())], None).await;
+    let empty = send(&app, "GET", "/me", &[("cookie", "vs_session=".into())], None).await;
+    let tampered = send(&app, "GET", "/me", &[("cookie", format!("vs_session={token}x"))], None).await;
+    let lookalike = send(&app, "GET", "/me", &[("cookie", format!("xvs_session={token}"))], None).await;
+    for r in [&none, &junk, &empty, &tampered, &lookalike] {
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
+    }
+    assert_eq!(junk.body, "Invalid or expired session", "no library error text");
+    assert_eq!(tampered.body, junk.body);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_bearer_header_still_works_and_a_bad_one_is_not_rescued_by_a_cookie(pool: PgPool) {
+    let (app, cfg) = app(pool.clone());
+    let c = ts::customer(&pool, "personal", true).await;
+    let good = bearer(&cfg, c, "personal");
+    assert_eq!(send(&app, "GET", "/me", &good, None).await.status, StatusCode::OK);
+
+    // a malformed Authorization header does not silently fall back to the cookie
+    let other = ts::customer(&pool, "personal", true).await;
+    let cookie_token = auth_svc::issue_token(other, "personal", &cfg.jwt_secret).unwrap();
+    let r = send(&app, "GET", "/me", &[
+        ("authorization", "Bearer not-a-token".into()),
+        ("cookie", format!("vs_session={cookie_token}")),
+    ], None).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    let r = send(&app, "GET", "/me", &[("authorization", "Basic abc".into()), ("cookie", format!("vs_session={cookie_token}"))], None).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn logout_expires_the_session_cookie_and_needs_no_session(pool: PgPool) {
+    let (app, _) = app(pool);
+    let r = send(&app, "POST", "/auth/logout", &[], None).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT);
+    let cookie = session_set_cookie(&r).expect("the clearing cookie");
+    assert!(cookie.starts_with("vs_session=;") && cookie.contains("Max-Age=0") && cookie.contains("Path=/api/v1"), "{cookie}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn production_sessions_are_marked_secure(pool: PgPool) {
+    use crate::services::config::Environment;
+    let mut cfg = relaxed();
+    cfg.environment = Environment::Production;
+    let (app, _) = app_with(pool, cfg, &redis_url());
+    let reg = register(&app, "sec@example.com").await;
+    assert!(session_set_cookie(&reg).unwrap().contains("Secure"));
+    let out = send(&app, "POST", "/auth/logout", &[], None).await;
+    assert!(session_set_cookie(&out).unwrap().contains("Secure"));
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn five_bad_passwords_lock_the_account_even_against_the_right_password(pool: PgPool) {
     let (app, _) = app(pool.clone());
@@ -431,7 +569,7 @@ async fn a_successful_login_resets_the_failure_count(pool: PgPool) {
     }
     let ok = login(&app, "reset@example.com", PASSWORD).await;
     assert_eq!(ok.status, StatusCode::OK);
-    assert!(ok.json()["token"].as_str().unwrap().len() > 20);
+    assert!(session_cookie_value(&ok).len() > 20, "the session is in the cookie");
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM login_throttle").fetch_one(&pool).await.unwrap();
     assert_eq!(rows, 0, "record cleared");
     // four more failures still do not lock (the count started over)
@@ -463,6 +601,58 @@ async fn an_unknown_email_still_costs_a_password_hash(pool: PgPool) {
         unknown * 2 >= known,
         "unknown email answered in {unknown:?} vs {known:?} for a real account: it skipped the password hash"
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn email_addresses_are_one_account_regardless_of_case_or_padding(pool: PgPool) {
+    let (app, _) = app(pool.clone());
+    assert_eq!(register(&app, "Jane.Smith@Example.com").await.status, StatusCode::CREATED);
+
+    // the same address in another case is the same account: a conflict, not a second account
+    for variant in ["jane.smith@example.com", "JANE.SMITH@EXAMPLE.COM", "jAnE.sMiTh@eXaMpLe.CoM"] {
+        assert_eq!(register(&app, variant).await.status, StatusCode::CONFLICT, "{variant:?}");
+    }
+    // padding is not part of an address: it is rejected as invalid rather than treated as a new one
+    assert_eq!(register(&app, "  jane.smith@example.com ").await.status, StatusCode::UNPROCESSABLE_ENTITY);
+    // and logging in works with any casing, because the lockout and the lookup agree
+    for variant in ["Jane.Smith@Example.com", "jane.smith@example.com", "JANE.SMITH@EXAMPLE.COM"] {
+        assert_eq!(login(&app, variant, PASSWORD).await.status, StatusCode::OK, "{variant:?}");
+    }
+    let accounts: i64 = sqlx::query_scalar("SELECT count(*) FROM customers").fetch_one(&pool).await.unwrap();
+    assert_eq!(accounts, 1);
+    // the address is kept as the customer typed it
+    let stored: String = sqlx::query_scalar("SELECT email FROM customers").fetch_one(&pool).await.unwrap();
+    assert_eq!(stored, "Jane.Smith@Example.com");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_database_itself_refuses_two_accounts_that_differ_only_by_case(pool: PgPool) {
+    ts::customer_with_email(&pool, "Dup@Example.com").await;
+    let err = sqlx::query("INSERT INTO customers (id, email, password_hash, subscription_tier, is_verified, is_active, created_at, updated_at) \
+                           VALUES (gen_random_uuid(), 'dup@example.com', 'x', 'free', false, true, NOW(), NOW())")
+        .execute(&pool).await.unwrap_err();
+    assert!(err.as_database_error().is_some_and(|e| e.is_unique_violation()), "{err}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_login_lockout_applies_across_email_casing(pool: PgPool) {
+    let (app, _) = app(pool);
+    register(&app, "case@example.com").await;
+    for variant in ["case@example.com", "CASE@example.com", "Case@Example.com", "cAsE@example.com", "case@EXAMPLE.com"] {
+        assert_eq!(login(&app, variant, "wrong wrong wrong").await.status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(login(&app, "case@example.com", PASSWORD).await.status, StatusCode::TOO_MANY_REQUESTS,
+        "five failures under five spellings are five failures for one account");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn absurdly_long_passwords_are_rejected_before_they_reach_the_hasher(pool: PgPool) {
+    let (app, _) = app(pool);
+    let long = "p".repeat(129);
+    let r = send(&app, "POST", "/auth/register", &[], Some(json!({ "email": "long@example.com", "password": long }))).await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let r = send(&app, "POST", "/auth/login", &[], Some(json!({ "email": "long@example.com", "password": "p".repeat(5000) }))).await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[sqlx::test(migrations = "./migrations")]

@@ -34,6 +34,20 @@ BLOCK_MARKERS = (
     "just a moment",
     "attention required",
 )
+# Wording that script-driven shells and "enable JavaScript" interstitials carry. It usually sits
+# in a <noscript> block, which extract_text() removes, so it is looked for in the raw HTML.
+JS_SHELL_MARKERS = (
+    "enable javascript",
+    "requires javascript",
+    "javascript is required",
+    "javascript is disabled",
+    "javascript must be enabled",
+    "turn on javascript",
+    "you need to enable js",
+)
+# A page whose visible text is a tiny fraction of its markup is a client-rendered shell.
+JS_SHELL_MAX_TEXT_RATIO = 0.02
+JS_SHELL_MIN_HTML_CHARS = 20_000
 # Characters of context kept before the first occurrence of the surname.
 LEAD_IN_CHARS = 500
 
@@ -57,6 +71,17 @@ def looks_blocked(text: str) -> bool:
         return False
     lowered = text.lower()
     return any(marker in lowered for marker in BLOCK_MARKERS)
+
+
+def looks_js_shell(html: str, text: str) -> bool:
+    """
+    True for a page whose real content is rendered by JavaScript, so the HTML we fetched has
+    nothing in it to judge: an "enable JavaScript" notice, or lots of markup and almost no
+    visible text. Such a page says nothing about whether a record exists.
+    """
+    if len(text) <= BLOCK_PAGE_MAX_CHARS and any(m in html.lower() for m in JS_SHELL_MARKERS):
+        return True
+    return len(html) >= JS_SHELL_MIN_HTML_CHARS and len(text) / len(html) < JS_SHELL_MAX_TEXT_RATIO
 
 
 def surname_of(full_name: str) -> str:

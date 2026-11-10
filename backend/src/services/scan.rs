@@ -40,9 +40,11 @@ pub async fn initiate_scan(
     tier: &SubscriptionTier,
 ) -> Result<ScanJob, ScanError> {
     // Per-tier scan limit. Development: 1 minute for testing, production: 24 hours.
+    // A scan that failed (for example the analysis service was down) does not count: the
+    // customer got nothing from it and must be able to run it again.
     let rate_limit_interval = if cfg!(debug_assertions) { "1 minute" } else { "24 hours" };
     let recent_scan: Option<(OffsetDateTime,)> = sqlx::query_as(&format!(
-        "SELECT queued_at FROM scan_jobs WHERE customer_id = $1 \
+        "SELECT queued_at FROM scan_jobs WHERE customer_id = $1 AND status <> 'failed' \
          AND queued_at > NOW() - INTERVAL '{rate_limit_interval}' ORDER BY queued_at DESC LIMIT 1"
     ))
     .bind(customer_id)

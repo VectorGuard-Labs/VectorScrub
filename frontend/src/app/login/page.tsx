@@ -18,8 +18,7 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
     try {
-      const { token } = await login(email, password);
-      localStorage.setItem("vs_token", token);
+      await login(email, password);
       router.push("/dashboard");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Sign in failed");

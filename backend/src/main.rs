@@ -61,6 +61,10 @@ async fn main() -> anyhow::Result<()> {
         metrics: metrics_handle,
     };
 
+    // Build the password-hash timing-equalization value now, so the first login for an unknown
+    // email does not pay for it (which would be a timing difference of its own).
+    services::auth::warm_up().await;
+
     // Spawn scheduled rescan dispatcher as a background task
     let scheduler_pool = pool.clone();
     let scheduler_redis = redis_client.clone();

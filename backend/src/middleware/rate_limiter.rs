@@ -11,8 +11,9 @@
 //! by the agent key) and the health probes.
 //!
 //! Client identity: the TCP peer address by default. With TRUST_PROXY_HEADERS=true the
-//! forwarded headers are used instead; only enable that behind a proxy that overwrites
-//! them, or a client can pick its own "IP" and walk around the limit.
+//! `X-Forwarded-For` entry added by our own proxy is used instead (TRUSTED_PROXY_HOPS places
+//! from the right; never the client-controlled left side), exactly as the audit trail does
+//! (api/client_ip.rs). IPv6 clients are keyed by their /64, not their full address.
 //!
 //! State is in-memory per backend instance: with N instances the effective limit is up
 //! to N times higher. Per-account lockout (services/login_throttle.rs) is in Postgres
@@ -26,14 +27,38 @@ use axum::{
     response::Response,
     Router,
 };
+use std::net::{IpAddr, SocketAddr};
+
+use axum::extract::ConnectInfo;
 use tower_governor::{
     governor::GovernorConfigBuilder,
-    key_extractor::{KeyExtractor, PeerIpKeyExtractor, SmartIpKeyExtractor},
-    GovernorLayer,
+    key_extractor::KeyExtractor,
+    GovernorError, GovernorLayer,
 };
 
+use crate::api::client_ip::{client_ip, rate_limit_key};
 use crate::db::AppState;
 use crate::services::config::AppConfig;
+
+/// Which client a request is rate-limited as. Uses the same address selection as the audit
+/// trail, so the two always agree, and never trusts the client-controlled part of
+/// `X-Forwarded-For`.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientKeyExtractor {
+    pub trust_proxy_headers: bool,
+    pub trusted_hops: usize,
+}
+
+impl KeyExtractor for ClientKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<Self::Key, GovernorError> {
+        let peer = req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
+        client_ip(req.headers(), peer, self.trust_proxy_headers, self.trusted_hops)
+            .map(rate_limit_key)
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+}
 
 /// Apply the general per-IP limit to `router`.
 pub fn limit_general(router: Router<AppState>, cfg: &AppConfig) -> Router<AppState> {
@@ -55,11 +80,11 @@ fn with_extractor(
     period: Duration,
     burst: u32,
 ) -> Router<AppState> {
-    if cfg.trust_proxy_headers {
-        apply(router, period, burst, SmartIpKeyExtractor)
-    } else {
-        apply(router, period, burst, PeerIpKeyExtractor)
-    }
+    let extractor = ClientKeyExtractor {
+        trust_proxy_headers: cfg.trust_proxy_headers,
+        trusted_hops: cfg.trusted_proxy_hops,
+    };
+    apply(router, period, burst, extractor)
 }
 
 /// One token is replenished every `period`; `burst` is the bucket size.
@@ -114,6 +139,7 @@ async fn add_retry_after(mut res: Response) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower_governor::key_extractor::PeerIpKeyExtractor;
     use axum::{
         body::Body,
         extract::ConnectInfo,
@@ -180,5 +206,64 @@ mod tests {
             statuses.push(app.clone().oneshot(req).await.unwrap().status());
         }
         assert_eq!(statuses, vec![StatusCode::OK, StatusCode::TOO_MANY_REQUESTS, StatusCode::TOO_MANY_REQUESTS]);
+    }
+
+    fn proxied_app(burst: u32, hops: usize) -> Router {
+        let r: Router<AppState> = Router::new().route("/x", get(|| async { "ok" }));
+        let r = apply(
+            r,
+            Duration::from_secs(3600),
+            burst,
+            ClientKeyExtractor { trust_proxy_headers: true, trusted_hops: hops },
+        );
+        r.with_state(crate::test_support::dummy_state())
+    }
+
+    async fn hit_via(app: &Router, peer: &str, xff: Option<&str>) -> StatusCode {
+        let mut req = Request::builder().uri("/x");
+        if let Some(x) = xff {
+            req = req.header("x-forwarded-for", x);
+        }
+        let mut req = req.body(Body::empty()).unwrap();
+        req.extensions_mut().insert(ConnectInfo(format!("{peer}:1").parse::<SocketAddr>().unwrap()));
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn behind_a_trusted_proxy_a_client_cannot_dodge_the_limit_by_prepending_addresses() {
+        // The proxy appends the real client address on the right; the left is client-chosen.
+        let app = proxied_app(1, 1);
+        assert_eq!(hit_via(&app, "10.0.0.1", Some("1.1.1.1, 203.0.113.7")).await, StatusCode::OK);
+        for spoof in ["2.2.2.2", "3.3.3.3", "4.4.4.4"] {
+            let xff = format!("{spoof}, 203.0.113.7");
+            assert_eq!(
+                hit_via(&app, "10.0.0.1", Some(&xff)).await,
+                StatusCode::TOO_MANY_REQUESTS,
+                "still the same client: {spoof}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn behind_a_trusted_proxy_different_real_clients_get_their_own_buckets() {
+        let app = proxied_app(1, 1);
+        assert_eq!(hit_via(&app, "10.0.0.1", Some("203.0.113.7")).await, StatusCode::OK);
+        assert_eq!(hit_via(&app, "10.0.0.1", Some("203.0.113.8")).await, StatusCode::OK);
+        assert_eq!(hit_via(&app, "10.0.0.1", Some("203.0.113.7")).await, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn one_ipv6_network_is_one_client_not_billions() {
+        let app = proxied_app(1, 1);
+        assert_eq!(hit_via(&app, "10.0.0.1", Some("2001:db8:1:2::1")).await, StatusCode::OK);
+        assert_eq!(hit_via(&app, "10.0.0.1", Some("2001:db8:1:2:ffff:eeee:dddd:cccc")).await, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(hit_via(&app, "10.0.0.1", Some("2001:db8:1:3::1")).await, StatusCode::OK, "a different /64");
+    }
+
+    #[tokio::test]
+    async fn a_missing_header_falls_back_to_the_peer_rather_than_failing_open() {
+        let app = proxied_app(1, 1);
+        assert_eq!(hit_via(&app, "10.0.0.1", None).await, StatusCode::OK);
+        assert_eq!(hit_via(&app, "10.0.0.1", None).await, StatusCode::TOO_MANY_REQUESTS);
     }
 }

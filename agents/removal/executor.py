@@ -5,10 +5,14 @@ Supports web forms (Playwright), email requests, and California DROP API.
 
 import asyncio
 import hashlib
+import html
 import re
 import smtplib
+import ssl
+from dataclasses import dataclass
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import make_msgid
 from typing import Optional
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
@@ -20,6 +24,126 @@ from shared.backend_client import BackendClient
 from shared.config import get_config
 
 log = structlog.get_logger()
+
+
+def _host(url: str | None) -> str:
+    """Host only, for logs: listing and opt-out URLs can embed a person's name or a token."""
+    try:
+        return urlparse(url or "").hostname or "unknown"
+    except ValueError:
+        return "unknown"
+
+
+def _why(exc: BaseException) -> str:
+    """
+    A reason that is safe to log and to show the customer: the exception's type only.
+    Exception text from HTTP, SMTP and browser libraries routinely contains URLs, addresses
+    and response bodies, and URLs embed the customer's name.
+    """
+    return type(exc).__name__
+
+
+# ---------------------------------------------------------------------------
+# Reading the page a broker shows after a form is submitted
+#
+# Kept as plain functions of text so the rules can be tested without a browser. The
+# executor's contract is "submitted" only on positive evidence; these rules are that
+# evidence, so they err toward "not confirmed".
+# ---------------------------------------------------------------------------
+
+# A labelled identifier: "Reference: ABC-12345", "Confirmation number #98765", "Case #4521",
+# "Request ID: XYZ789", "Your ticket is T-20481". The label must be followed by a ':' or '#'
+# (or "is"), or by an explicit qualifier (number / no. / id / code); and the value must be 4-40
+# characters of letters/digits/hyphens that include at
+# least one digit. Ordinary prose therefore cannot match: "in case of error", "confirmation
+# email", "reference our policy" and "case closed" have no label+separator+digit-bearing value.
+# Only the label part is case-insensitive.
+_LABEL = r"\b(?:confirmation|reference|ticket|tracking|request|case)"
+_CONFIRMATION_REF = re.compile(
+    # "Reference number 12345", "Request ID XYZ789", "reference no. 5521-AA": an explicit
+    # qualifier makes the separator optional...
+    rf"(?:(?i:{_LABEL}\s+(?:number\b|no\b\.?|id\b|code\b))\s*(?:[:#]+|\bis\b)?"
+    # ...whereas a bare label ("Reference:", "Case #", "ticket is") needs the separator.
+    rf"|(?i:{_LABEL})\s*(?:[:#]+|\bis\b))"
+    r"\s*#?\s*"
+    r"((?=[A-Za-z0-9-]*\d)[A-Za-z0-9][A-Za-z0-9-]{3,39})\b"
+)
+
+# Wording that means the broker did NOT accept the request. Checked against the whole
+# page and it wins over everything else, including a reference that happens to be present.
+_FAILURE_PHRASES = (
+    "please try again",
+    "try again later",
+    "something went wrong",
+    "an error occurred",
+    "error occurred",
+    "invalid",
+    "could not be",
+    "couldn't be",
+    "unable to",
+    "failed",
+    "not found",
+    "not accepted",
+    "not been submitted",
+    "was not submitted",
+    "captcha",
+    "verify you are human",
+    "access denied",
+)
+
+# Wording that says a request was received. Deliberately specific: a bare "thank you" or
+# "successfully" appears on error pages ("Thank you for contacting us. An error occurred").
+_SUCCESS_PHRASES = (
+    "has been submitted",
+    "have been submitted",
+    "was submitted",
+    "submitted successfully",
+    "successfully submitted",
+    "successfully received",
+    "request has been received",
+    "request has been",
+    "we have received your",
+    "we've received your",
+    "thank you for your request",
+    "thank you for submitting",
+    "check your email",
+    "verification email",
+)
+
+
+@dataclass(frozen=True)
+class PageVerdict:
+    """What the result page says about the submission."""
+    accepted: bool
+    reference: Optional[str]
+    reason: str  # short, constant text for logs; never page content
+
+
+def find_confirmation_reference(text: str) -> Optional[str]:
+    """A labelled confirmation identifier in visible page text, or None."""
+    match = _CONFIRMATION_REF.search(text or "")
+    return match.group(1) if match else None
+
+
+def judge_result_page(text: str) -> PageVerdict:
+    """
+    Decide from the visible text of the page shown after submitting whether the broker
+    accepted the request.
+
+      * Failure wording anywhere means NOT accepted, even if a reference is also present
+        (error pages often echo a request or case id).
+      * Otherwise a labelled reference, or specific acceptance wording, means accepted.
+      * Anything else is not accepted: the customer is told it could not be confirmed.
+    """
+    body = (text or "").lower()
+    reference = find_confirmation_reference(text or "")
+    if any(phrase in body for phrase in _FAILURE_PHRASES):
+        return PageVerdict(False, None, "failure_wording")
+    if reference:
+        return PageVerdict(True, reference, "reference")
+    if any(phrase in body for phrase in _SUCCESS_PHRASES):
+        return PageVerdict(True, None, "acceptance_wording")
+    return PageVerdict(False, None, "no_evidence")
 
 
 class RemovalExecutor:
@@ -71,16 +195,16 @@ class RemovalExecutor:
                     "error": f"Unknown procedure type: {procedure.procedure_type}",
                 }
 
-            log.info("submission_complete", result=result)
+            log.info("submission_complete", status=result.get("status"), procedure_type=procedure.procedure_type)
             return result
 
         except Exception as exc:
-            log.error("submission_failed", error=str(exc))
+            log.error("submission_failed", procedure_type=procedure.procedure_type, error_type=_why(exc))
             return {
                 "status": "failed",
                 "confirmation_ref": None,
                 "evidence_hash": None,
-                "error": str(exc),
+                "error": f"Submission failed ({_why(exc)})",
             }
 
     async def submit_web_form(
@@ -99,7 +223,7 @@ class RemovalExecutor:
         truth and can retry, instead of being told a request went through when it
         may not have.
         """
-        log.info("submit_web_form", opt_out_url=procedure.opt_out_url)
+        log.info("submit_web_form", opt_out_host=_host(procedure.opt_out_url))
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -114,7 +238,7 @@ class RemovalExecutor:
                 # Do not attempt to defeat bot protection. A CAPTCHA means the
                 # broker wants a human; report it and stop.
                 if await self._has_captcha(page):
-                    log.warning("web_form_captcha", opt_out_url=procedure.opt_out_url)
+                    log.warning("web_form_captcha", opt_out_host=_host(procedure.opt_out_url))
                     return self._failed(
                         "CAPTCHA challenge on the opt-out page; this source needs "
                         "to be completed manually"
@@ -144,23 +268,36 @@ class RemovalExecutor:
                 screenshot_bytes = await page.screenshot(full_page=True)
                 evidence_hash = self.generate_evidence_hash(screenshot_bytes)
 
-                # Extract confirmation reference and look for success wording
-                confirmation_ref = await self.extract_confirmation_reference(page)
-                looks_successful = await self._page_indicates_success(page)
+                # Judge the page from what a person would read on it. One verdict decides:
+                # failure wording vetoes acceptance, even when a reference is also shown.
+                try:
+                    page_text = await page.inner_text("body")
+                except Exception:
+                    page_text = ""
+                verdict = judge_result_page(page_text)
 
-                if not confirmation_ref and not looks_successful:
-                    log.warning("web_form_unconfirmed", evidence_hash=evidence_hash)
-                    result = self._failed(
-                        "Form was submitted but no confirmation was detected (the "
-                        "request may not have been accepted)"
-                    )
+                if not verdict.accepted:
+                    log.warning("web_form_unconfirmed", evidence_hash=evidence_hash, reason=verdict.reason)
+                    if verdict.reason == "failure_wording":
+                        message = (
+                            "The opt-out page reported a problem after the form was submitted "
+                            "(the request was probably not accepted)"
+                        )
+                    else:
+                        message = (
+                            "Form was submitted but no confirmation was detected (the "
+                            "request may not have been accepted)"
+                        )
+                    result = self._failed(message)
                     result["evidence_hash"] = evidence_hash
                     return result
 
+                confirmation_ref = verdict.reference
                 log.info(
                     "web_form_submitted",
                     confirmation_ref=confirmation_ref,
                     evidence_hash=evidence_hash,
+                    reason=verdict.reason,
                 )
 
                 return {
@@ -171,8 +308,8 @@ class RemovalExecutor:
                 }
 
             except PlaywrightTimeout as exc:
-                log.warning("web_form_timeout", error=str(exc))
-                return self._failed(f"Timeout: {exc}")
+                log.warning("web_form_timeout", opt_out_host=_host(procedure.opt_out_url), error_type=_why(exc))
+                return self._failed("The opt-out page timed out")
             finally:
                 await browser.close()
 
@@ -201,42 +338,6 @@ class RemovalExecutor:
             if await page.locator(selector).count() > 0:
                 return True
         return False
-
-    async def _page_indicates_success(self, page: Page) -> bool:
-        """
-        True if the page after submission reads like an acceptance and not like an
-        error. Deliberately conservative: ambiguous pages are treated as failures.
-        """
-        try:
-            body = (await page.inner_text("body")).lower()
-        except Exception:
-            return False
-
-        failure_phrases = (
-            "please try again",
-            "something went wrong",
-            "an error occurred",
-            "invalid",
-            "could not be",
-            "unable to",
-            "failed",
-        )
-        if any(phrase in body for phrase in failure_phrases):
-            return False
-
-        success_phrases = (
-            "thank you",
-            "has been submitted",
-            "have been submitted",
-            "request has been",
-            "we have received",
-            "we've received",
-            "check your email",
-            "verification email",
-            "confirmation email",
-            "successfully",
-        )
-        return any(phrase in body for phrase in success_phrases)
 
     async def _fill_generic_form(
         self, page: Page, identity: IdentityContext, source_url: str
@@ -326,40 +427,6 @@ class RemovalExecutor:
 
         return False
 
-    async def extract_confirmation_reference(self, page: Page) -> Optional[str]:
-        """
-        Extracts confirmation reference from page using regex patterns.
-
-        Common patterns:
-        - Reference: #12345
-        - Confirmation 67890
-        - Ticket: ABC-123
-        - Request ID: XYZ789
-        """
-        content = await page.content()
-
-        patterns = [
-            r"Reference:?\s*#?([A-Z0-9-]+)",
-            r"Confirmation:?\s*#?([A-Z0-9-]+)",
-            r"Ticket:?\s*#?([A-Z0-9-]+)",
-            r"Request\s*ID:?\s*#?([A-Z0-9-]+)",
-            r"Case\s*#?([A-Z0-9-]+)",
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match:
-                ref = match.group(1)
-                log.debug("extracted_confirmation", ref=ref, pattern=pattern)
-                return ref
-
-        # No match - return page title or first heading as fallback
-        title = await page.title()
-        if "success" in title.lower() or "confirm" in title.lower():
-            return f"page_title:{title[:50]}"
-
-        return None
-
     def generate_evidence_hash(self, screenshot_bytes: bytes) -> str:
         """Generates SHA-256 hash of screenshot for tamper-evidence."""
         return hashlib.sha256(screenshot_bytes).hexdigest()
@@ -390,7 +457,7 @@ class RemovalExecutor:
                 "error": "SMTP credentials not configured",
             }
 
-        log.info("submit_email_request", to=procedure.opt_out_email)
+        log.info("submit_email_request", to_domain=(procedure.opt_out_email or "").rpartition("@")[2])
 
         try:
             # Build email content
@@ -403,6 +470,7 @@ class RemovalExecutor:
             msg["From"] = self.config.smtp_from_email or self.config.smtp_username
             msg["To"] = procedure.opt_out_email
             msg["Reply-To"] = identity.email or self.config.smtp_from_email
+            msg["Message-ID"] = make_msgid(domain=(self.config.smtp_from_email or "vectorscrub.local").rpartition("@")[2] or None)
 
             # Attach text and HTML versions
             msg.attach(MIMEText(body_text, "plain"))
@@ -417,7 +485,7 @@ class RemovalExecutor:
 
             log.info(
                 "email_submitted",
-                to=procedure.opt_out_email,
+                to_domain=procedure.opt_out_email.rpartition("@")[2],
                 message_id=message_id,
                 evidence_hash=evidence_hash,
             )
@@ -430,12 +498,12 @@ class RemovalExecutor:
             }
 
         except Exception as exc:
-            log.error("email_submission_failed", error=str(exc))
+            log.error("email_submission_failed", error_type=_why(exc))
             return {
                 "status": "failed",
                 "confirmation_ref": None,
                 "evidence_hash": None,
-                "error": f"Email send failed: {exc}",
+                "error": f"Email send failed ({_why(exc)})",
             }
 
     def _build_email_body(
@@ -483,7 +551,16 @@ Sincerely,
 This request was submitted via VectorScrub Privacy Protection Platform
 """
 
-        # HTML version
+        # HTML version. Every value is escaped: names, addresses and the listing URL come
+        # from the customer and from scraped pages, and must not be able to inject markup.
+        e = html.escape
+        h_name = e(full_name)
+        h_address = e(identity.current_address or "Not provided")
+        h_email = e(identity.email or "Not provided")
+        h_email_reply = e(identity.email or "the email address this was sent from")
+        h_url = e(source_url, quote=True)
+        h_prev = "".join(f"<li>{e(a)}</li>" for a in (identity.previous_addresses or []))
+        h_phones = "".join(f"<li>{e(ph)}</li>" for ph in (identity.phone_numbers or []))
         html_body = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -510,15 +587,15 @@ This request was submitted via VectorScrub Privacy Protection Platform
         <div class="info-block">
             <h3>Personal Information to Remove:</h3>
             <ul>
-                <li><strong>Full Name:</strong> {full_name}</li>
-                <li><strong>Current Address:</strong> {identity.current_address or 'Not provided'}</li>
-                <li><strong>Email:</strong> {identity.email or 'Not provided'}</li>
-                <li><strong>URL/Listing:</strong> <a href="{source_url}">{source_url}</a></li>
+                <li><strong>Full Name:</strong> {h_name}</li>
+                <li><strong>Current Address:</strong> {h_address}</li>
+                <li><strong>Email:</strong> {h_email}</li>
+                <li><strong>URL/Listing:</strong> <a href="{h_url}">{h_url}</a></li>
             </ul>
 
-            {'<h4>Previous Addresses:</h4><ul>' + ''.join(f'<li>{addr}</li>' for addr in (identity.previous_addresses or [])) + '</ul>' if identity.previous_addresses else ''}
+            {'<h4>Previous Addresses:</h4><ul>' + h_prev + '</ul>' if h_prev else ''}
 
-            {'<h4>Phone Numbers:</h4><ul>' + ''.join(f'<li>{phone}</li>' for phone in (identity.phone_numbers or [])) + '</ul>' if identity.phone_numbers else ''}
+            {'<h4>Phone Numbers:</h4><ul>' + h_phones + '</ul>' if h_phones else ''}
         </div>
 
         <p><strong>I request that you:</strong></p>
@@ -530,12 +607,12 @@ This request was submitted via VectorScrub Privacy Protection Platform
 
         <p><strong>Expected timeline:</strong> {procedure.estimated_days} days as per your published opt-out procedure.</p>
 
-        <p>Please send confirmation to: <strong>{identity.email or 'the email address this was sent from'}</strong></p>
+        <p>Please send confirmation to: <strong>{h_email_reply}</strong></p>
 
         <p>Thank you for your prompt attention to this matter.</p>
 
         <p>Sincerely,<br>
-        <strong>{full_name}</strong></p>
+        <strong>{h_name}</strong></p>
 
         <div class="footer">
             <p><em>This request was submitted via VectorScrub Privacy Protection Platform</em></p>
@@ -553,21 +630,32 @@ This request was submitted via VectorScrub Privacy Protection Platform
         Runs in executor to avoid blocking the event loop.
         """
         def _send_sync():
-            try:
-                if self.config.smtp_use_tls:
-                    server = smtplib.SMTP(self.config.smtp_host, self.config.smtp_port, timeout=30)
-                    server.starttls()
-                else:
-                    server = smtplib.SMTP(self.config.smtp_host, self.config.smtp_port, timeout=30)
+            host, port = self.config.smtp_host, self.config.smtp_port
+            if not self.config.smtp_use_tls and host not in ("localhost", "127.0.0.1", "::1"):
+                # Never send the SMTP password, or a customer's identity, in clear text.
+                raise ssl.SSLError("SMTP without TLS is only allowed to localhost")
 
+            # Verify the server's certificate and hostname. A bare starttls() accepts any
+            # certificate, so anyone on the path could read the credentials and the message.
+            tls = ssl.create_default_context()
+            if port == 465:
+                server = smtplib.SMTP_SSL(host, port, timeout=30, context=tls)
+            else:
+                server = smtplib.SMTP(host, port, timeout=30)
+            try:
+                if port != 465 and self.config.smtp_use_tls:
+                    server.starttls(context=tls)
                 server.login(self.config.smtp_username, self.config.smtp_password)
                 server.send_message(msg)
-                message_id = msg.get("Message-ID", f"vectorscrub-{hash(msg.as_string())}")
-                server.quit()
-                return message_id
             except Exception as exc:
-                log.error("smtp_send_error", error=str(exc))
+                log.error("smtp_send_error", error_type=_why(exc))
                 raise
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    pass  # the message outcome is already decided; a failed goodbye changes nothing
+            return msg["Message-ID"]
 
         # Run SMTP operation in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
@@ -657,24 +745,21 @@ This request was submitted via VectorScrub Privacy Protection Platform
                 }
 
         except httpx.HTTPStatusError as exc:
-            log.error(
-                "drop_api_http_error",
-                status_code=exc.response.status_code,
-                response=exc.response.text,
-            )
+            # Status only: the response body can echo back the identity that was submitted.
+            log.error("drop_api_http_error", status_code=exc.response.status_code)
             return {
                 "status": "failed",
                 "confirmation_ref": None,
                 "evidence_hash": None,
-                "error": f"DROP API error: {exc.response.status_code} - {exc.response.text[:200]}",
+                "error": f"DROP API error: HTTP {exc.response.status_code}",
             }
         except Exception as exc:
-            log.error("drop_api_submission_failed", error=str(exc))
+            log.error("drop_api_submission_failed", error_type=_why(exc))
             return {
                 "status": "failed",
                 "confirmation_ref": None,
                 "evidence_hash": None,
-                "error": f"DROP API submission failed: {exc}",
+                "error": f"DROP API submission failed ({_why(exc)})",
             }
 
     def _build_drop_payload(self, identity: IdentityContext) -> dict:

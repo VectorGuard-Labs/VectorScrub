@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Simple deployment script for VectorScrub on a single VPS
-# Usage: ./deploy-simple.sh
+# Usage: sudo ./deploy-simple.sh
+#
+# What it sets up: Docker Compose services bound to 127.0.0.1 only, behind nginx with a
+# Let's Encrypt certificate. Secrets are written to infra/docker/.env (mode 600) and are never
+# printed.
 set -euo pipefail
 
 echo "=== VectorScrub Simple Deployment ==="
 echo ""
 echo "This script will deploy VectorScrub using Docker Compose on this server."
 echo "Prerequisites:"
-echo "  - Docker and Docker Compose installed"
+echo "  - Docker with the Compose plugin installed"
 echo "  - Domain name pointing to this server"
 echo "  - Ports 80 and 443 available"
 echo ""
-read -p "Continue? (y/N) " -n 1 -r
+read -r -p "Continue? (y/N) " -n 1 REPLY
 echo
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Deployment cancelled."
@@ -26,27 +30,46 @@ fi
 
 # Check prerequisites
 command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not installed"; exit 1; }
-command -v docker-compose >/dev/null 2>&1 || command -v docker compose version >/dev/null 2>&1 || { echo "ERROR: docker-compose not installed"; exit 1; }
+docker compose version >/dev/null 2>&1 || { echo "ERROR: the Docker Compose plugin is not installed"; exit 1; }
+command -v openssl >/dev/null 2>&1 || { echo "ERROR: openssl not installed"; exit 1; }
 
-# Get domain name
-read -p "Enter your domain name (e.g., vectorscrub.com): " DOMAIN
-read -p "Enter your email for Let's Encrypt: " EMAIL
+# ---------------------------------------------------------------------------
+# Input. Everything typed here ends up in a .env file, an nginx config or a URL, so it is
+# validated rather than trusted.
+# ---------------------------------------------------------------------------
 
-# Get database credentials
-echo ""
-echo "Database credentials (or press Enter to generate random):"
-read -sp "PostgreSQL password: " POSTGRES_PASSWORD
-echo
-if [ -z "$POSTGRES_PASSWORD" ]; then
-    POSTGRES_PASSWORD=$(openssl rand -base64 24)
-    echo "Generated PostgreSQL password: $POSTGRES_PASSWORD"
+read -r -p "Enter your domain name (e.g., vectorscrub.com): " DOMAIN
+if [[ ! $DOMAIN =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]]; then
+    echo "ERROR: '$DOMAIN' does not look like a domain name"; exit 1
+fi
+read -r -p "Enter your email for Let's Encrypt: " EMAIL
+if [[ ! $EMAIL =~ ^[^[:space:]@\']+@[^[:space:]@\']+\.[^[:space:]@\']+$ ]]; then
+    echo "ERROR: '$EMAIL' does not look like an email address"; exit 1
 fi
 
-read -sp "Redis password: " REDIS_PASSWORD
+# A password is embedded in a URL (DATABASE_URL, REDIS_URL), where characters such as / + = @ :
+# break parsing. Generated passwords are hex; typed ones must be URL-safe.
+URL_SAFE='^[A-Za-z0-9._~-]{16,}$'
+
+echo ""
+echo "Database credentials (press Enter to generate a random password; it is saved to the"
+echo ".env file and never shown):"
+read -r -s -p "PostgreSQL password (16+ characters of A-Z a-z 0-9 . _ ~ -): " POSTGRES_PASSWORD
+echo
+if [ -z "$POSTGRES_PASSWORD" ]; then
+    POSTGRES_PASSWORD=$(openssl rand -hex 24)
+    echo "Generated a random PostgreSQL password."
+elif [[ ! $POSTGRES_PASSWORD =~ $URL_SAFE ]]; then
+    echo "ERROR: the PostgreSQL password must be 16+ characters of A-Z a-z 0-9 . _ ~ -"; exit 1
+fi
+
+read -r -s -p "Redis password (16+ characters of A-Z a-z 0-9 . _ ~ -): " REDIS_PASSWORD
 echo
 if [ -z "$REDIS_PASSWORD" ]; then
-    REDIS_PASSWORD=$(openssl rand -base64 24)
-    echo "Generated Redis password: $REDIS_PASSWORD"
+    REDIS_PASSWORD=$(openssl rand -hex 24)
+    echo "Generated a random Redis password."
+elif [[ ! $REDIS_PASSWORD =~ $URL_SAFE ]]; then
+    echo "ERROR: the Redis password must be 16+ characters of A-Z a-z 0-9 . _ ~ -"; exit 1
 fi
 
 # Generate secrets
@@ -54,105 +77,116 @@ echo ""
 echo "Generating application secrets..."
 JWT_SECRET=$(openssl rand -base64 48)
 MASTER_ENCRYPTION_KEY=$(openssl rand -base64 32)
-AGENT_API_KEY=$(openssl rand -base64 32)
+AGENT_API_KEY=$(openssl rand -base64 36)
 
-# Get API keys
+# Typed secrets are read without echo and written single-quoted into .env, so reject the
+# characters that would break the quoting.
+read_secret() {  # read_secret VARNAME "prompt"
+    local value
+    read -r -s -p "$2" value
+    echo
+    if [[ $value == *"'"* || $value == *$'\n'* ]]; then
+        echo "ERROR: that value may not contain a single quote"; exit 1
+    fi
+    printf -v "$1" '%s' "$value"
+}
+
 echo ""
-read -p "Anthropic API key: " ANTHROPIC_API_KEY
-read -p "SMTP host (default: smtp.gmail.com): " SMTP_HOST
+read_secret ANTHROPIC_API_KEY "Anthropic API key: "
+read -r -p "SMTP host (default: smtp.gmail.com): " SMTP_HOST
 SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
-read -p "SMTP username: " SMTP_USERNAME
-read -sp "SMTP password: " SMTP_PASSWORD
-echo
+read -r -p "SMTP username: " SMTP_USERNAME
+read_secret SMTP_PASSWORD "SMTP password: "
+for v in "$SMTP_HOST" "$SMTP_USERNAME"; do
+    if [[ $v == *"'"* ]]; then echo "ERROR: values may not contain a single quote"; exit 1; fi
+done
 
-# Create application directory
+# ---------------------------------------------------------------------------
+# Application directory
+# ---------------------------------------------------------------------------
+
 APP_DIR="/opt/vectorscrub"
-mkdir -p $APP_DIR
-cd $APP_DIR
+mkdir -p "$APP_DIR"
+cd "$APP_DIR"
 
-# Clone or update repository
 if [ -d ".git" ]; then
     echo "Updating existing repository..."
     git pull
 else
     echo "Cloning repository..."
-    read -p "Git repository URL: " REPO_URL
-    git clone $REPO_URL .
+    read -r -p "Git repository URL: " REPO_URL
+    git clone -- "$REPO_URL" .
 fi
 
-# Create .env file
-cat > infra/docker/.env <<EOF
-# Database
-POSTGRES_PASSWORD=$POSTGRES_PASSWORD
-DATABASE_URL=postgres://vectorscrub:$POSTGRES_PASSWORD@postgres:5432/vectorscrub
-
-# Redis
-REDIS_PASSWORD=$REDIS_PASSWORD
+# Create the .env file. umask 077 makes it private to root from the moment it exists (not
+# readable-then-chmod'ed), and chmod makes sure of it if the file was already there.
+# Only variables docker-compose.yml actually reads are written; it builds DATABASE_URL and
+# REDIS_URL from the two passwords itself.
+(
+    umask 077
+    cat > infra/docker/.env <<EOF
+# Generated by deploy-simple.sh. Contains secrets: keep mode 600, never commit.
+POSTGRES_PASSWORD='$POSTGRES_PASSWORD'
+REDIS_PASSWORD='$REDIS_PASSWORD'
 
 # Application
 ENVIRONMENT=production
-PORT=8080
-ALLOWED_ORIGINS=https://$DOMAIN,https://www.$DOMAIN
+ALLOWED_ORIGINS='https://$DOMAIN,https://www.$DOMAIN'
+# nginx (below) overwrites X-Forwarded-For with the real client address, so the backend can
+# rate-limit and audit per client. Without this every visitor shares nginx's address.
+TRUST_PROXY_HEADERS=true
 
 # Security
-JWT_SECRET=$JWT_SECRET
-MASTER_ENCRYPTION_KEY=$MASTER_ENCRYPTION_KEY
-AGENT_API_KEY=$AGENT_API_KEY
+JWT_SECRET='$JWT_SECRET'
+MASTER_ENCRYPTION_KEY='$MASTER_ENCRYPTION_KEY'
+AGENT_API_KEY='$AGENT_API_KEY'
 
 # LLM
-ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY'
 DEFAULT_LLM_PROVIDER=anthropic
-DEFAULT_LLM_MODEL=claude-3-5-sonnet-20241022
 
-# SMTP
-SMTP_HOST=$SMTP_HOST
+# SMTP (used for email opt-out requests)
+SMTP_HOST='$SMTP_HOST'
 SMTP_PORT=587
-SMTP_USERNAME=$SMTP_USERNAME
-SMTP_PASSWORD=$SMTP_PASSWORD
-SMTP_FROM_EMAIL=noreply@$DOMAIN
+SMTP_USERNAME='$SMTP_USERNAME'
+SMTP_PASSWORD='$SMTP_PASSWORD'
+SMTP_FROM_EMAIL='noreply@$DOMAIN'
 SMTP_USE_TLS=true
-
-# Networking
-BACKEND_API_URL=http://backend:8080
-REDIS_URL=redis://:$REDIS_PASSWORD@redis:6379
-NEXT_PUBLIC_API_URL=https://$DOMAIN
 EOF
+)
+chmod 600 infra/docker/.env
 
-# Update docker-compose.yml with passwords
-cd infra/docker
-sed -i "s/changeme_in_production/$POSTGRES_PASSWORD/g" docker-compose.yml
-sed -i "s/\${REDIS_PASSWORD:-changeme_in_production}/$REDIS_PASSWORD/g" docker-compose.yml
-
-# Start services
+# Start services. All published ports are bound to 127.0.0.1 in docker-compose.yml; only
+# nginx (below) is reachable from the network. --wait returns once the health checks pass.
 echo ""
-echo "Starting services..."
+echo "Building and starting services (the first build takes several minutes)..."
+cd infra/docker
 docker compose down 2>/dev/null || true
-docker compose up -d
-
-# Wait for services to be healthy
-echo "Waiting for services to be healthy..."
-sleep 10
-
-# Check health
+docker compose up -d --build --wait --wait-timeout 600
 docker compose ps
 
-# Install Nginx
+# ---------------------------------------------------------------------------
+# Nginx + TLS
+# ---------------------------------------------------------------------------
+
 echo ""
 echo "Installing Nginx reverse proxy..."
-apt update
-apt install -y nginx certbot python3-certbot-nginx
+apt-get update
+apt-get install -y nginx certbot python3-certbot-nginx
 
-# Create Nginx config
+# X-Forwarded-For and X-Real-IP are SET to the connecting address, not appended to: a client
+# cannot smuggle its own value through, which is what makes TRUST_PROXY_HEADERS=true safe.
 cat > /etc/nginx/sites-available/vectorscrub <<EOF
 server {
     listen 80;
     server_name $DOMAIN www.$DOMAIN;
+    client_max_body_size 1m;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_buffering off;
     }
@@ -161,17 +195,19 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-    location /api/v1/metrics {
-        proxy_pass http://127.0.0.1:8080;
+    # Prometheus metrics are unauthenticated: not for the internet.
+    location = /api/v1/metrics {
         allow 127.0.0.1;
         deny all;
+        proxy_pass http://127.0.0.1:8080;
     }
 }
 EOF
+chmod 644 /etc/nginx/sites-available/vectorscrub
 
 ln -sf /etc/nginx/sites-available/vectorscrub /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
@@ -180,35 +216,40 @@ nginx -t && systemctl reload nginx
 # Get SSL certificate
 echo ""
 echo "Obtaining SSL certificate from Let's Encrypt..."
-certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos --email $EMAIL
+certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN" --non-interactive --agree-tos --email "$EMAIL"
 
 # Set up auto-renewal
 systemctl enable certbot.timer
 systemctl start certbot.timer
 
-# Set up backups
+# ---------------------------------------------------------------------------
+# Backups
+# ---------------------------------------------------------------------------
+
 echo ""
 echo "Setting up automated backups..."
-cat > /opt/vectorscrub/backup.sh <<'BACKUP_EOF'
+install -d -m 700 /var/backups/vectorscrub
+cat > "$APP_DIR/backup.sh" <<'BACKUP_EOF'
 #!/bin/bash
 set -euo pipefail
+umask 077
 BACKUP_DIR=/var/backups/vectorscrub
 DATE=$(date +%Y%m%d-%H%M%S)
-mkdir -p $BACKUP_DIR
+install -d -m 700 "$BACKUP_DIR"
 
 # Backup database
-docker exec vectorscrub-postgres pg_dump -U vectorscrub vectorscrub | gzip > $BACKUP_DIR/db-$DATE.sql.gz
+docker exec vectorscrub-postgres pg_dump -U vectorscrub vectorscrub | gzip > "$BACKUP_DIR/db-$DATE.sql.gz"
 
 # Keep only last 30 days
-find $BACKUP_DIR -name "db-*.sql.gz" -mtime +30 -delete
+find "$BACKUP_DIR" -name "db-*.sql.gz" -mtime +30 -delete
 
 echo "Backup completed: db-$DATE.sql.gz"
 BACKUP_EOF
 
-chmod +x /opt/vectorscrub/backup.sh
+chmod 700 "$APP_DIR/backup.sh"
 
 # Add to crontab
-(crontab -l 2>/dev/null; echo "0 2 * * * /opt/vectorscrub/backup.sh >> /var/log/vectorscrub-backup.log 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "0 2 * * * $APP_DIR/backup.sh >> /var/log/vectorscrub-backup.log 2>&1") | crontab -
 
 # Print summary
 echo ""
@@ -221,8 +262,10 @@ echo "  Frontend: https://$DOMAIN"
 echo "  Backend API: https://$DOMAIN/api"
 echo "  Health Check: https://$DOMAIN/api/v1/health/live"
 echo ""
-echo "Credentials saved to: $APP_DIR/infra/docker/.env"
-echo "Backups: Daily at 2 AM to /var/backups/vectorscrub"
+echo "Secrets are in $APP_DIR/infra/docker/.env (mode 600, readable by root only)."
+echo "Backups: daily at 2 AM to /var/backups/vectorscrub (mode 700)."
+echo "  NOTE: backups are plain database dumps on this same server. They are not encrypted"
+echo "  and do not survive losing the server; copy them somewhere else."
 echo ""
 echo "Next steps:"
 echo "  1. Test the deployment: curl https://$DOMAIN/api/v1/health/live"

@@ -8,6 +8,11 @@ export const metadata: Metadata = {
     "AI-powered privacy protection that discovers, identifies, and helps remove your personal information from the digital world.",
 };
 
+// Render every page per request. The Content-Security-Policy carries a fresh nonce for each
+// response (see src/middleware.ts), and a page that was prerendered at build time would have
+// inline scripts the nonce cannot be added to, which the policy would then block.
+export const dynamic = "force-dynamic";
+
 export default function RootLayout({
   children,
 }: {

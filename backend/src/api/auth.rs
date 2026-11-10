@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
@@ -13,22 +11,25 @@ use validator::Validate;
 use super::client_ip::ClientIp;
 use super::error::internal_error;
 use crate::db::AppState;
+use crate::middleware::session::{cleared_session_cookie, session_cookie};
 use crate::models::customer::{CreateAccountRequest, CustomerProfile};
 use crate::services::{audit, auth as auth_svc, customer as customer_svc, login_throttle};
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct LoginRequest {
-    #[validate(email)]
+    #[validate(email, length(max = 254))]
     #[schema(example = "user@example.com")]
     pub email: String,
+    /// Capped far above anything a person types; it only stops megabyte bodies reaching the hasher.
+    #[validate(length(max = 1024))]
     #[schema(example = "SecurePassword123!")]
     pub password: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuthResponse {
-    #[schema(example = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")]
-    pub token: String,
+    /// The session itself is not in the body: it is set as an `HttpOnly` cookie
+    /// (`vs_session`) that scripts cannot read. See `middleware::session`.
     pub customer: CustomerProfile,
 }
 
@@ -41,16 +42,6 @@ fn user_agent(headers: &HeaderMap) -> Option<String> {
 
 fn err(status: StatusCode, message: &str) -> Response {
     (status, message.to_string()).into_response()
-}
-
-/// A hash of a throwaway password, used to spend the same time on an unknown email as on
-/// a real account. Without it, "no such account" answers measurably faster than "wrong
-/// password", which reveals which emails are registered.
-fn dummy_hash() -> &'static str {
-    static HASH: OnceLock<String> = OnceLock::new();
-    HASH.get_or_init(|| {
-        auth_svc::hash_password("timing-equalization-only").expect("hash a constant password")
-    })
 }
 
 /// POST /api/v1/auth/register
@@ -71,7 +62,7 @@ pub async fn register(
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
     Json(req): Json<CreateAccountRequest>,
-) -> Result<(StatusCode, Json<AuthResponse>), (StatusCode, String)> {
+) -> Result<(StatusCode, [(header::HeaderName, String); 1], Json<AuthResponse>), (StatusCode, String)> {
     req.validate()
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
 
@@ -107,14 +98,12 @@ pub async fn register(
     if let Some(ua) = user_agent(&headers) {
         entry = entry.user_agent(ua);
     }
-    entry.log(&state.pool).await.ok(); // Don't fail the request if audit logging fails
+    entry.log_or_warn(&state.pool).await; // Don't fail the request if audit logging fails
 
     Ok((
         StatusCode::CREATED,
-        Json(AuthResponse {
-            token,
-            customer: customer.into(),
-        }),
+        [(header::SET_COOKIE, session_cookie(&token, state.config.secure_cookies()).to_string())],
+        Json(AuthResponse { customer: customer.into() }),
     ))
 }
 
@@ -136,7 +125,7 @@ pub async fn login(
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<AuthResponse>, Response> {
+) -> Result<([(header::HeaderName, String); 1], Json<AuthResponse>), Response> {
     req.validate()
         .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()))?;
 
@@ -163,9 +152,8 @@ pub async fn login(
         .map_err(|e| internal_error(e).into_response())?
     {
         audit_entry(audit::actions::USER_LOGIN, audit::AuditStatus::Failure, Some("locked out"))
-            .log(&state.pool)
-            .await
-            .ok();
+            .log_or_warn(&state.pool)
+            .await;
         let minutes = (wait + 59) / 60;
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
@@ -180,10 +168,13 @@ pub async fn login(
         .await
         .map_err(|e| internal_error(e).into_response())?;
     let valid = match &customer {
-        Some(c) => auth_svc::verify_password(&req.password, &c.password_hash)
+        // Verification runs on the blocking pool (see services::auth). An unknown email still
+        // pays for one, so "no such account" is not faster than "wrong password".
+        Some(c) => auth_svc::verify_password_async(req.password.clone(), c.password_hash.clone())
+            .await
             .map_err(|e| internal_error(e).into_response())?,
         None => {
-            let _ = auth_svc::verify_password(&req.password, dummy_hash());
+            auth_svc::verify_against_dummy_async(req.password.clone()).await;
             false
         }
     };
@@ -194,15 +185,13 @@ pub async fn login(
             .await
             .map_err(|e| internal_error(e).into_response())?;
         audit_entry(audit::actions::USER_LOGIN, audit::AuditStatus::Failure, Some("invalid credentials"))
-            .log(&state.pool)
-            .await
-            .ok();
+            .log_or_warn(&state.pool)
+            .await;
         if let Some(secs) = locked {
             audit_entry(audit::actions::USER_LOGIN_LOCKED, audit::AuditStatus::Failure, None)
                 .details(serde_json::json!({ "lock_seconds": secs }))
-                .log(&state.pool)
-                .await
-                .ok();
+                .log_or_warn(&state.pool)
+                .await;
         }
         return Err(err(StatusCode::UNAUTHORIZED, "Invalid email or password"));
     };
@@ -222,12 +211,28 @@ pub async fn login(
     audit_entry(audit::actions::USER_LOGIN, audit::AuditStatus::Success, None)
         .customer_id(customer.id)
         .resource_id(customer.id)
-        .log(&state.pool)
-        .await
-        .ok();
+        .log_or_warn(&state.pool)
+        .await;
 
-    Ok(Json(AuthResponse {
-        token,
-        customer: customer.into(),
-    }))
+    Ok((
+        [(header::SET_COOKIE, session_cookie(&token, state.config.secure_cookies()).to_string())],
+        Json(AuthResponse { customer: customer.into() }),
+    ))
+}
+
+/// POST /api/v1/auth/logout
+/// Ends the browser session by expiring the session cookie. Idempotent, and works whether or
+/// not the caller is signed in. There is no server-side revocation: a token copied before
+/// logout stays valid until it expires (24 hours).
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/logout",
+    tag = "auth",
+    responses((status = 204, description = "Session cookie cleared")),
+)]
+pub async fn logout(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, cleared_session_cookie(state.config.secure_cookies()).to_string())],
+    )
 }

@@ -43,7 +43,7 @@ def make_agent(page: _Fetch, llm=None) -> tuple[MonitoringAgent, FakeBackend, Fa
     agent.detection_agent._llm = llm
     agent.detection_agent._ner = NoNer()
 
-    async def fetch(url):
+    async def fetch(url, allowed_domain=None):
         return page
 
     agent._fetch_url = fetch
@@ -155,7 +155,7 @@ async def test_verification_outcomes(page, llm, expected, identity):
     "page, llm, expected",
     [
         (_Fetch("ok", html(RECORD)), None, MonitoringOutcome.REAPPEARED),
-        (_Fetch("ok", html(RECORD)), FakeChatModel(confidence=0.6), MonitoringOutcome.CLEAR),     # below the alarm bar
+        (_Fetch("ok", html(RECORD)), FakeChatModel(confidence=0.6), MonitoringOutcome.INCONCLUSIVE),  # too weak to alarm on, too real to call clear
         (_Fetch("gone"), None, MonitoringOutcome.CLEAR),
         (_Fetch("ok", html("Only Jones and Brown.")), None, MonitoringOutcome.CLEAR),
         (_Fetch("error"), None, MonitoringOutcome.INCONCLUSIVE),

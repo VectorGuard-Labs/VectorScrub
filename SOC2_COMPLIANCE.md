@@ -8,8 +8,10 @@
 | Master key in an HSM (PyHSM), automatic 90-day rotation | **Not implemented.** Key is read from an environment variable; no rotation. The PyHSM module was removed. |
 | Passwords hashed with Argon2id; JWT HS256, 24 h expiry | **Implemented.** No refresh tokens, no session inactivity timeout, no MFA. |
 | Login lockout and per-IP rate limits | **Implemented** (in-memory limits are per instance) |
-| CSRF protection and security headers | **Implemented** |
-| Append-only audit trail | **Implemented** via triggers on `audit_log` and rules on `removal_audit_log`; a DB superuser can bypass. No HMAC chaining. |
+| CSRF protection and security headers | **Implemented** (backend API responses and the Next.js pages; session in an `HttpOnly` cookie) |
+| SSRF protection when agents fetch third-party pages | **Implemented** (`agents/shared/safe_fetch.py`: public addresses only, connection pinned to the checked address, redirects re-validated and confined to the source domain, size-capped). Tested with mocks plus a live HTTPS check; not penetration-tested. |
+| Agents cannot hold backend secrets | **Implemented as a startup check** (agents refuse to start if the master key, JWT secret or database credentials are in their environment or `.env`). It cannot stop an operator from giving them other secrets. |
+| Append-only audit trail | **Implemented** via triggers on both `audit_log` (pseudonymization only) and `removal_audit_log` (migration 0010; previously silent no-op rules): UPDATE, DELETE and TRUNCATE are rejected with an error. A DB superuser or table owner can bypass. No HMAC chaining or external write-once sink. Failed audit writes are logged and counted (`audit_write_failures_total`), not dropped silently. |
 | Scoped, audited release of identity to agents | **Implemented** |
 | Removal requires explicit customer authorization; server-enforced state machine | **Implemented** |
 | Scan job recovery and health probes | **Implemented** |
@@ -29,7 +31,7 @@ SOC 2 (Service Organization Control 2) is an auditing framework that evaluates t
 
 ### Trust Service Criteria
 
-VectorScrub implements all five Trust Service Criteria:
+This document maps the five Trust Service Criteria to the controls VectorScrub is aiming for. Which of them exist today is stated in the status table at the top; everything else below is a target, and an unchecked box (☐ / `[ ]`) means "not done", never "done":
 
 1. **Security** - Protection against unauthorized access
 2. **Availability** - System availability for operation and use
@@ -43,7 +45,7 @@ VectorScrub implements all five Trust Service Criteria:
 
 **Policy:** Access to systems and data is restricted based on role and need-to-know.
 
-**Implementation:**
+**Target design (not in place unless the status table at the top says so):**
 
 ```yaml
 Access Control Matrix:
@@ -71,24 +73,24 @@ Access Control Matrix:
         Actions: Logged
 ```
 
-**Controls:**
-- ✅ Multi-factor authentication (MFA) required for all access
-- ✅ Role-based access control (RBAC) implemented
-- ✅ Least privilege principle enforced
-- ✅ Access reviews conducted quarterly
-- ✅ Automated access revocation on termination
+**Target controls (not verified; see the status table at the top):**
+- ☐ Multi-factor authentication (MFA) required for all access (target; none exists today)
+- ☐ Role-based access control (RBAC) implemented
+- ☐ Least privilege principle enforced
+- ☐ Access reviews conducted quarterly
+- ☐ Automated access revocation on termination
 
 ### 1.2 Authentication & Authorization
 
-**Implementation:**
+**Target design (not in place unless the status table at the top says so):**
 
 ```bash
 # Backend authentication
 - JWT tokens with 24-hour expiration
-- Refresh tokens with 30-day expiration
+- Refresh tokens with 30-day expiration (target; today: a single 24 h session cookie/JWT, no refresh, no server-side revocation)
 - Strong password policy (12+ characters, complexity)
 - Account lockout after 5 failed attempts
-- Session timeout after 30 minutes inactivity
+- Session timeout after 30 minutes inactivity (target; not implemented)
 
 # API authentication
 - Agent API keys rotated every 90 days
@@ -101,7 +103,7 @@ Access Control Matrix:
 
 **Policy:** All sensitive data is encrypted at rest and in transit.
 
-**Implementation:**
+**Target design (not in place unless the status table at the top says so):**
 
 ```yaml
 Encryption at Rest:
@@ -124,7 +126,7 @@ Key Management:
 
 ### 1.4 Network Security
 
-**Controls:**
+**Target controls (not verified; see the status table at the top):**
 
 ```yaml
 Network Segmentation:
@@ -167,7 +169,7 @@ Disaster Recovery:
 
 ### 2.2 Monitoring & Alerting
 
-**Implementation:**
+**Target design (not in place unless the status table at the top says so):**
 
 ```yaml
 Monitoring:
@@ -220,7 +222,7 @@ Metrics Tracked:
 
 ### 3.1 Data Validation
 
-**Implementation:**
+**Target design (not in place unless the status table at the top says so):**
 
 ```rust
 // Input validation at all layers
@@ -245,7 +247,7 @@ req.validate()
 
 ### 3.2 Data Integrity
 
-**Controls:**
+**Target controls (not verified; see the status table at the top):**
 
 ```yaml
 Database Integrity:
@@ -315,7 +317,7 @@ Classification Levels:
 
 **Policy:** PII is encrypted at rest, minimized, and access-controlled.
 
-**Implementation:**
+**Target design (not in place unless the status table at the top says so):**
 
 ```rust
 // Encryption before storage
@@ -358,7 +360,7 @@ INSERT INTO audit_log (
 
 **Policy:** Data is never shared without explicit customer consent.
 
-**Controls:**
+**Target controls (not verified; see the status table at the top):**
 - No third-party data sharing
 - Subprocessors documented and approved
 - Data Processing Agreements (DPAs) in place
@@ -368,7 +370,7 @@ INSERT INTO audit_log (
 
 ### 5.1 Data Subject Rights
 
-**Implementation:**
+**Target design (not in place unless the status table at the top says so):**
 
 ```yaml
 Right to Access:
@@ -683,25 +685,25 @@ Manual:
 
 ### 11.1 Required Policies
 
-- [x] Information Security Policy
-- [x] Access Control Policy
-- [x] Encryption Policy
-- [x] Incident Response Plan
-- [x] Business Continuity Plan
-- [x] Data Retention Policy
-- [x] Acceptable Use Policy
-- [x] Remote Work Policy
-- [x] Vendor Management Policy
-- [x] Change Management Policy
+- [ ] Information Security Policy
+- [ ] Access Control Policy
+- [ ] Encryption Policy
+- [ ] Incident Response Plan
+- [ ] Business Continuity Plan
+- [ ] Data Retention Policy
+- [ ] Acceptable Use Policy
+- [ ] Remote Work Policy
+- [ ] Vendor Management Policy
+- [ ] Change Management Policy
 
 ### 11.2 Procedures
 
-- [x] Onboarding Procedure
-- [x] Offboarding Procedure
-- [x] Incident Response Procedure
-- [x] Backup & Recovery Procedure
-- [x] Deployment Procedure
-- [x] Access Request Procedure
+- [ ] Onboarding Procedure
+- [ ] Offboarding Procedure
+- [ ] Incident Response Procedure
+- [ ] Backup & Recovery Procedure
+- [ ] Deployment Procedure
+- [ ] Access Request Procedure
 
 ### 11.3 Evidence Collection
 

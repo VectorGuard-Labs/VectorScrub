@@ -19,6 +19,11 @@ class FakeBackend:
         self.record_exposure_error: Exception | None = None
         self.identity_error: Exception | None = None
         self.pending_removals: list[dict] = []
+        self.sticky_pending: list[dict] = []
+        self.claimed_removals: set[str] = set()
+        self.claim_removal_error: Exception | None = None
+        self.removal_status_errors: list[Exception] = []   # raised by successive update_removal_status calls
+        self.removal_audit_errors: list[Exception] = []    # raised by successive record_removal_audit calls
         self.due_removals: list[dict] = []
         self.due_exposures: list[dict] = []
         self.scan_updates: list[dict] = []
@@ -56,8 +61,20 @@ class FakeBackend:
     # --- removals
     async def get_pending_removals(self):
         self._log("get_pending_removals")
+        if self.sticky_pending:   # the backend keeps listing these, as it would before the status lands
+            return list(self.sticky_pending)
         pending, self.pending_removals = self.pending_removals, []
         return pending
+
+    async def claim_removal(self, removal_request_id):
+        """Like the real backend: succeeds once per request, ever."""
+        self._log("claim_removal", removal_request_id)
+        if self.claim_removal_error:
+            raise self.claim_removal_error
+        if removal_request_id in self.claimed_removals:
+            return False
+        self.claimed_removals.add(removal_request_id)
+        return True
 
     async def fetch_removal_identity(self, removal_request_id):
         self._log("fetch_removal_identity", removal_request_id)
@@ -67,10 +84,14 @@ class FakeBackend:
 
     async def update_removal_status(self, removal_request_id, status, **kw):
         self._log("update_removal_status", removal_request_id, status)
+        if self.removal_status_errors:
+            raise self.removal_status_errors.pop(0)
         self.removal_updates.append({"id": removal_request_id, "status": status, **kw})
 
     async def record_removal_audit(self, removal_request_id, customer_id, action, actor, details):
         self._log("record_removal_audit", removal_request_id, action)
+        if self.removal_audit_errors:
+            raise self.removal_audit_errors.pop(0)
         self.audits.append({"id": removal_request_id, "action": action, "details": details})
 
     # --- monitoring

@@ -7,7 +7,10 @@ use uuid::Uuid;
 
 /// Creates a removal request for a specific exposure with status=authorized.
 /// Also creates the first audit log entry.
-/// Returns error if removal already authorized for this exposure.
+/// Fails with `RemovalError::AlreadyInFlight` if a request for this exposure is already
+/// authorized, submitted or acknowledged. The partial unique index
+/// `idx_removal_requests_one_in_flight` enforces this under concurrency; the SELECT below
+/// is only the early, friendly check.
 pub async fn authorize_removal(
     pool: &PgPool,
     customer_id: Uuid,
@@ -31,7 +34,7 @@ pub async fn authorize_removal(
     .context("check existing removal")?;
 
     if existing.is_some() {
-        anyhow::bail!("Removal already authorized for this exposure");
+        return Err(RemovalError::AlreadyInFlight.into());
     }
 
     // Get exposure details for denormalization
@@ -70,7 +73,13 @@ pub async fn authorize_removal(
     .bind(now)
     .fetch_one(&mut *tx)
     .await
-    .context("insert removal request")?;
+    .map_err(|e| match &e {
+        // Lost the race to a concurrent authorization for the same exposure.
+        sqlx::Error::Database(db) if db.is_unique_violation() => {
+            anyhow::Error::new(RemovalError::AlreadyInFlight)
+        }
+        _ => anyhow::Error::new(e).context("insert removal request"),
+    })?;
 
     // Create initial audit log entry
     sqlx::query(
@@ -162,8 +171,77 @@ pub async fn get_removal_request(
 pub enum RemovalError {
     #[error("removal request not found")]
     NotFound,
+    #[error("a removal request for this exposure is already in flight")]
+    AlreadyInFlight,
     #[error("illegal removal status transition: {from:?} -> {to:?}")]
     IllegalTransition { from: RemovalStatus, to: RemovalStatus },
+}
+
+/// A submission claim that has not been resolved for this long is presumed abandoned (the
+/// worker crashed or lost the backend mid-submission). See `fail_abandoned_claims`.
+pub const SUBMISSION_CLAIM_STALE_AFTER_SECS: i64 = 60 * 60;
+
+/// Atomically claim an authorized request for submission. Returns true for exactly one
+/// caller; every other caller (a second worker, or the same worker after a restart) gets
+/// false and must not submit. The claim lives in the database, so it survives restarts and
+/// holds across worker replicas, unlike the in-memory set it replaces.
+pub async fn claim_submission(pool: &PgPool, request_id: Uuid) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE removal_requests \
+         SET submission_claimed_at = NOW(), updated_at = NOW() \
+         WHERE id = $1 AND status = 'authorized' AND submission_claimed_at IS NULL",
+    )
+    .bind(request_id)
+    .execute(pool)
+    .await
+    .context("claim removal submission")?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Ends submission claims that were never resolved as `failed`, so the request stops
+/// being polled, the customer is told, and they can re-authorize. A request is never
+/// handed to a second worker: if the first one did submit and only failed to report it,
+/// the worst outcome is that the customer is asked to approve again, not a double send.
+/// Safe to run on several instances: the status change locks and re-checks the row, so
+/// whichever instance gets there second sees an illegal transition and skips it.
+/// Returns the (request, customer) pairs that were ended.
+pub async fn fail_abandoned_claims(pool: &PgPool, stale_after_secs: i64) -> Result<Vec<(Uuid, Uuid)>> {
+    let stale: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, customer_id FROM removal_requests \
+         WHERE status = 'authorized' AND submission_claimed_at IS NOT NULL \
+           AND submission_claimed_at < NOW() - make_interval(secs => $1::int) \
+         ORDER BY submission_claimed_at \
+         LIMIT 100",
+    )
+    .bind(stale_after_secs)
+    .fetch_all(pool)
+    .await
+    .context("find abandoned submission claims")?;
+
+    let mut ended = Vec::new();
+    for (request_id, customer_id) in stale {
+        match update_removal_status(pool, request_id, RemovalStatus::Failed, None, None, None).await {
+            Ok(_) => {
+                record_audit_entry(
+                    pool,
+                    request_id,
+                    customer_id,
+                    "claim_expired".to_string(),
+                    "system".to_string(),
+                    serde_json::json!({
+                        "reason": "the worker that claimed this submission never reported an outcome; \
+                                   it is not retried automatically in case it was already sent"
+                    }),
+                )
+                .await?;
+                ended.push((request_id, customer_id));
+            }
+            // The worker reported in between: nothing to do.
+            Err(e) if matches!(e.downcast_ref::<RemovalError>(), Some(RemovalError::IllegalTransition { .. })) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(ended)
 }
 
 /// Updates removal request status and related metadata, enforcing the lifecycle in
@@ -376,8 +454,126 @@ mod tests {
             let e = ts::exposure(&pool, c, true, None).await;
             ts::removal_request(&pool, c, e, in_flight, Some(1)).await;
             let err = authorize_removal(&pool, c, e).await.unwrap_err();
-            assert!(err.to_string().contains("already authorized"), "{in_flight}: {err}");
+            assert!(
+                matches!(err.downcast_ref::<RemovalError>(), Some(RemovalError::AlreadyInFlight)),
+                "{in_flight}: {err}"
+            );
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn concurrent_authorizations_create_exactly_one_request(pool: PgPool) {
+        let c = ts::customer(&pool, "personal", true).await;
+        let e = ts::exposure(&pool, c, true, None).await;
+
+        let attempts = (0..8).map(|_| {
+            let pool = pool.clone();
+            tokio::spawn(async move { authorize_removal(&pool, c, e).await })
+        });
+        let results = join_all(attempts).await;
+
+        let created = results.iter().filter(|r| r.is_ok()).count();
+        let refused = results
+            .iter()
+            .filter(|r| matches!(r.as_ref().err().and_then(|e| e.downcast_ref::<RemovalError>()), Some(RemovalError::AlreadyInFlight)))
+            .count();
+        assert_eq!((created, refused), (1, 7), "one winner; the rest get a clean conflict, not a 500");
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM removal_requests WHERE exposure_id = $1", e).await, 1);
+    }
+
+    async fn join_all(
+        handles: impl Iterator<Item = tokio::task::JoinHandle<Result<RemovalRequest>>>,
+    ) -> Vec<Result<RemovalRequest>> {
+        let mut out = Vec::new();
+        for h in handles.collect::<Vec<_>>() {
+            out.push(h.await.unwrap());
+        }
+        out
+    }
+
+    // ---- submission claim ---------------------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_submission_can_be_claimed_by_exactly_one_worker(pool: PgPool) {
+        let c = ts::customer(&pool, "personal", true).await;
+        let e = ts::exposure(&pool, c, true, None).await;
+        let r = ts::removal_request(&pool, c, e, "authorized", None).await;
+
+        assert!(claim_submission(&pool, r).await.unwrap(), "first worker wins");
+        assert!(!claim_submission(&pool, r).await.unwrap(), "a second worker (or a restart) must not submit");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn concurrent_claims_have_one_winner(pool: PgPool) {
+        let c = ts::customer(&pool, "personal", true).await;
+        let e = ts::exposure(&pool, c, true, None).await;
+        let r = ts::removal_request(&pool, c, e, "authorized", None).await;
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let pool = pool.clone();
+                tokio::spawn(async move { claim_submission(&pool, r).await.unwrap() })
+            })
+            .collect();
+        let mut winners = 0;
+        for h in handles {
+            if h.await.unwrap() {
+                winners += 1;
+            }
+        }
+        assert_eq!(winners, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn only_authorized_requests_can_be_claimed(pool: PgPool) {
+        let c = ts::customer(&pool, "personal", true).await;
+        for status in ["submitted", "acknowledged", "failed", "verified_removed"] {
+            let e = ts::exposure(&pool, c, true, None).await;
+            let r = ts::removal_request(&pool, c, e, status, None).await;
+            assert!(!claim_submission(&pool, r).await.unwrap(), "{status}");
+        }
+        assert!(!claim_submission(&pool, Uuid::new_v4()).await.unwrap(), "unknown id");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_abandoned_claim_is_failed_with_an_audit_entry_and_never_reissued(pool: PgPool) {
+        let c = ts::customer(&pool, "personal", true).await;
+        let e = ts::exposure(&pool, c, true, None).await;
+        let r = ts::removal_request(&pool, c, e, "authorized", None).await;
+        let fresh = ts::removal_request(&pool, c, ts::exposure(&pool, c, true, None).await, "authorized", None).await;
+        let unclaimed = ts::removal_request(&pool, c, ts::exposure(&pool, c, true, None).await, "authorized", None).await;
+        claim_submission(&pool, r).await.unwrap();
+        claim_submission(&pool, fresh).await.unwrap();
+        sqlx::query("UPDATE removal_requests SET submission_claimed_at = NOW() - interval '2 hours' WHERE id = $1")
+            .bind(r).execute(&pool).await.unwrap();
+
+        let ended = fail_abandoned_claims(&pool, SUBMISSION_CLAIM_STALE_AFTER_SECS).await.unwrap();
+
+        assert_eq!(ended, vec![(r, c)]);
+        assert_eq!(status_of(&pool, r).await, "failed");
+        assert_eq!(status_of(&pool, fresh).await, "authorized", "a recent claim is still in progress");
+        assert_eq!(status_of(&pool, unclaimed).await, "authorized", "unclaimed work is left for a worker");
+        let action: String = sqlx::query_scalar(
+            "SELECT action FROM removal_audit_log WHERE removal_request_id = $1 AND actor = 'system'",
+        ).bind(r).fetch_one(&pool).await.unwrap();
+        assert_eq!(action, "claim_expired");
+        assert!(!claim_submission(&pool, r).await.unwrap(), "a failed request is never claimable again");
+        // second pass finds nothing
+        assert!(fail_abandoned_claims(&pool, SUBMISSION_CLAIM_STALE_AFTER_SECS).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_claim_that_resolved_in_time_is_not_failed(pool: PgPool) {
+        let c = ts::customer(&pool, "personal", true).await;
+        let e = ts::exposure(&pool, c, true, None).await;
+        let r = ts::removal_request(&pool, c, e, "authorized", None).await;
+        claim_submission(&pool, r).await.unwrap();
+        update_removal_status(&pool, r, RemovalStatus::Submitted, None, None, None).await.unwrap();
+        sqlx::query("UPDATE removal_requests SET submission_claimed_at = NOW() - interval '2 hours' WHERE id = $1")
+            .bind(r).execute(&pool).await.unwrap();
+
+        assert!(fail_abandoned_claims(&pool, SUBMISSION_CLAIM_STALE_AFTER_SECS).await.unwrap().is_empty());
+        assert_eq!(status_of(&pool, r).await, "submitted");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -541,9 +737,28 @@ mod tests {
         let c = ts::customer(&pool, "personal", true).await;
         let e = ts::exposure(&pool, c, true, None).await;
         let r = authorize_removal(&pool, c, e).await.unwrap().id;
-        sqlx::query("UPDATE removal_audit_log SET action = 'tampered' WHERE removal_request_id = $1").bind(r).execute(&pool).await.unwrap();
-        sqlx::query("DELETE FROM removal_audit_log WHERE removal_request_id = $1").bind(r).execute(&pool).await.unwrap();
+
+        // Each of these used to "succeed" and silently do nothing (RULE ... DO INSTEAD NOTHING).
+        // They now fail loudly, so tampering is noticed instead of looking like it worked.
+        let update = sqlx::query("UPDATE removal_audit_log SET action = 'tampered' WHERE removal_request_id = $1")
+            .bind(r).execute(&pool).await.unwrap_err();
+        let delete = sqlx::query("DELETE FROM removal_audit_log WHERE removal_request_id = $1")
+            .bind(r).execute(&pool).await.unwrap_err();
+        let truncate = sqlx::query("TRUNCATE removal_audit_log").execute(&pool).await.unwrap_err();
+        for (what, err) in [("UPDATE", update), ("DELETE", delete), ("TRUNCATE", truncate)] {
+            assert!(err.to_string().contains("append-only"), "{what}: {err}");
+        }
+
         let actions: Vec<String> = sqlx::query_scalar("SELECT action FROM removal_audit_log WHERE removal_request_id = $1").bind(r).fetch_all(&pool).await.unwrap();
-        assert_eq!(actions, vec!["authorized".to_string()], "UPDATE and DELETE are no-ops");
+        assert_eq!(actions, vec!["authorized".to_string()], "the history is intact");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn appending_to_the_removal_audit_log_still_works(pool: PgPool) {
+        let c = ts::customer(&pool, "personal", true).await;
+        let e = ts::exposure(&pool, c, true, None).await;
+        let r = authorize_removal(&pool, c, e).await.unwrap().id;
+        record_audit_entry(&pool, r, c, "submitted".into(), "removal_executor".into(), serde_json::json!({})).await.unwrap();
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM removal_audit_log WHERE removal_request_id = $1", r).await, 2);
     }
 }

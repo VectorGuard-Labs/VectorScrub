@@ -18,8 +18,7 @@ export default function RegisterPage() {
     setError("");
     setLoading(true);
     try {
-      const { token } = await register(email, password);
-      localStorage.setItem("vs_token", token);
+      await register(email, password);
       router.push("/dashboard");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Registration failed");

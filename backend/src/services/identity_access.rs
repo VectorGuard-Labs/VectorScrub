@@ -219,12 +219,14 @@ impl Purpose {
 }
 
 async fn record_denied(pool: &PgPool, purpose: Purpose, scope_id: Uuid) {
-    let _ = audit::AuditEntry::builder(audit::actions::IDENTITY_RELEASE, audit::resources::IDENTITY)
+    // A refusal is already refusing; a failure to record it must not turn into anything else,
+    // but it must not vanish either (log_or_warn counts and logs it).
+    audit::AuditEntry::builder(audit::actions::IDENTITY_RELEASE, audit::resources::IDENTITY)
         .resource_id(scope_id)
         .status(audit::AuditStatus::Failure)
         .error_message("access denied")
         .details(serde_json::json!({ "purpose": purpose.as_str() }))
-        .log(pool)
+        .log_or_warn(pool)
         .await;
 }
 

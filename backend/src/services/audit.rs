@@ -126,6 +126,38 @@ impl AuditEntryBuilder {
         let entry = self.build();
         log_audit_entry(pool, &entry).await
     }
+
+    /// Log, but never fail the caller. Use where the audit write must not block the request
+    /// (a login should not fail because the audit insert did), but not where the write IS the
+    /// safeguard: identity release uses `.log()` and fails closed.
+    ///
+    /// A failure is never silent: it is logged at error level with the action and the kind of
+    /// error (not its text, which can carry values), and counted in
+    /// `audit_write_failures_total` so it can be alerted on.
+    pub async fn log_or_warn(self, pool: &PgPool) {
+        let entry = self.build();
+        if let Err(e) = log_audit_entry(pool, &entry).await {
+            metrics::counter!("audit_write_failures_total").increment(1);
+            tracing::error!(
+                action = %entry.action,
+                resource_type = %entry.resource_type,
+                status = %entry.status.as_str(),
+                error_kind = audit_error_kind(&e),
+                "Audit log write FAILED; the audit trail is missing this event"
+            );
+        }
+    }
+}
+
+/// A loggable classification of a database error. `sqlx::Error`'s Display can include
+/// constraint names, values or connection strings, so it is not logged.
+fn audit_error_kind(e: &sqlx::Error) -> &'static str {
+    match e {
+        sqlx::Error::Database(_) => "database",
+        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => "pool",
+        sqlx::Error::Io(_) | sqlx::Error::Tls(_) => "connection",
+        _ => "other",
+    }
 }
 
 /// Log an audit entry to the database
@@ -298,5 +330,37 @@ mod tests {
             sqlx::query_as("SELECT customer_id, action FROM audit_log WHERE id = $1").bind(id).fetch_one(&pool).await.unwrap();
         assert_eq!(cust, None);
         assert_eq!(action, "user.login", "the record itself survives");
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_failed_audit_write_is_reported_to_the_caller_of_log(pool: PgPool) {
+        pool.close().await;
+        let r = AuditEntry::builder(actions::USER_LOGIN, resources::CUSTOMER).log(&pool).await;
+        assert!(r.is_err());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn log_or_warn_never_fails_or_panics_the_caller_when_the_write_fails(pool: PgPool) {
+        pool.close().await;
+        // returns normally (the request carries on); the failure is logged and counted
+        AuditEntry::builder(actions::USER_LOGIN, resources::CUSTOMER).log_or_warn(&pool).await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn log_or_warn_writes_the_entry_when_the_database_is_fine(pool: PgPool) {
+        AuditEntry::builder(actions::USER_LOGIN, resources::CUSTOMER).log_or_warn(&pool).await;
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'user.login'").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn error_kinds_are_fixed_labels_not_error_text() {
+        assert_eq!(audit_error_kind(&sqlx::Error::PoolTimedOut), "pool");
+        assert_eq!(audit_error_kind(&sqlx::Error::RowNotFound), "other");
     }
 }

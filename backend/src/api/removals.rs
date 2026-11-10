@@ -58,10 +58,11 @@ pub async fn authorize(
 
     let request = removal::authorize_removal(&state.pool, auth.id, exposure_id)
         .await
-        .map_err(|e| {
-            if e.to_string().contains("already authorized") {
-                StatusCode::CONFLICT
-            } else {
+        .map_err(|e| match e.downcast_ref::<removal::RemovalError>() {
+            Some(removal::RemovalError::AlreadyInFlight) => StatusCode::CONFLICT,
+            Some(removal::RemovalError::NotFound) => StatusCode::NOT_FOUND,
+            _ => {
+                tracing::error!(error = ?e, "Failed to authorize removal");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         })?;
@@ -70,9 +71,8 @@ pub async fn authorize(
         .customer_id(auth.id)
         .resource_id(exposure_id)
         .details(serde_json::json!({ "removal_request_id": request.id }))
-        .log(&state.pool)
-        .await
-        .ok();
+        .log_or_warn(&state.pool)
+        .await;
 
     Ok(Json(AuthorizeRemovalResponse {
         request,
@@ -137,6 +137,26 @@ pub async fn list_pending(
     Ok(Json(ListPendingResponse { requests }))
 }
 
+/// POST /api/v1/internal/removal-requests/:id/claim
+/// Claims an authorized request for submission. 204 for exactly one caller; 409 for every
+/// other (already claimed, no longer authorized, or unknown), and the agent must then not
+/// submit. This is what stops a restart or a second worker from sending the same request
+/// to a broker twice.
+pub async fn claim_submission(
+    _auth: AgentAuth,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, StatusCode> {
+    match removal::claim_submission(&state.pool, id).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(StatusCode::CONFLICT),
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to claim removal submission");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct UpdateStatusRequest {
     status: RemovalStatus,
@@ -169,7 +189,7 @@ pub async fn update_status(
     .map_err(|e| match e.downcast_ref::<removal::RemovalError>() {
         Some(removal::RemovalError::NotFound) => StatusCode::NOT_FOUND,
         Some(removal::RemovalError::IllegalTransition { .. }) => StatusCode::CONFLICT,
-        None => {
+        Some(removal::RemovalError::AlreadyInFlight) | None => {
             tracing::error!(error = %e, "Failed to update removal status");
             StatusCode::INTERNAL_SERVER_ERROR
         }

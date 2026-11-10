@@ -13,7 +13,7 @@ import {
   Filter,
   Download,
 } from "lucide-react";
-import { listExposures, listRemovalRequests } from "@/lib/api";
+import { listExposures, listRemovalRequests, logout } from "@/lib/api";
 import { formatDate, severityColor, piiCategoryLabel } from "@/lib/utils";
 import type { Exposure, RemovalRequest } from "@/types";
 
@@ -37,11 +37,9 @@ export default function HistoryPage() {
   const [typeFilter, setTypeFilter] = useState<string>("all");
 
   useEffect(() => {
-    const token = localStorage.getItem("vs_token");
-    if (!token) {
-      router.push("/login");
-      return;
-    }
+    // No client-side token check: the session is an HttpOnly cookie the page cannot see.
+    // If it is missing or expired the first API call answers 401 and the API client sends
+    // the user to /login.
     loadHistory();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -200,8 +198,7 @@ export default function HistoryPage() {
   }
 
   function handleSignOut() {
-    localStorage.removeItem("vs_token");
-    router.push("/");
+    void logout().finally(() => router.push("/"));
   }
 
   if (loading) {

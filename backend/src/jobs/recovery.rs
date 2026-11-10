@@ -25,7 +25,7 @@ use crate::crypto::MasterKey;
 use crate::services::scan::RecoveryConfig;
 use crate::services::{
     audit, login_throttle, notification as notification_svc, privacy_score as privacy_score_svc,
-    scan as scan_svc,
+    removal as removal_svc, scan as scan_svc,
 };
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -80,9 +80,8 @@ pub async fn recover_once(
         audit::AuditEntry::builder(audit::actions::SCAN_RECOVERED, audit::resources::SCAN)
             .customer_id(*customer_id)
             .resource_id(*job_id)
-            .log(pool)
-            .await
-            .ok();
+            .log_or_warn(pool)
+            .await;
     }
 
     for (job_id, customer_id) in &report.failed {
@@ -92,10 +91,9 @@ pub async fn recover_once(
             .resource_id(*job_id)
             .status(audit::AuditStatus::Failure)
             .error_message("worker stopped responding; max attempts reached")
-            .log(pool)
-            .await
-            .ok();
-        notification_svc::send_alert(
+            .log_or_warn(pool)
+            .await;
+        if let Err(e) = notification_svc::send_alert(
             pool,
             *customer_id,
             "scan_failed",
@@ -103,7 +101,9 @@ pub async fn recover_once(
             "We were unable to finish your scan after several attempts. Please start a new scan from your dashboard.",
         )
         .await
-        .ok();
+        {
+            warn!(job_id = %job_id, error = %e, "Could not alert the customer that their scan failed");
+        }
     }
 
     for pending in &report.to_dispatch {
@@ -114,13 +114,28 @@ pub async fn recover_once(
                 error!(job_id = %pending.job_id, error = %e, "Could not dispatch scan job; will retry");
                 // Make it eligible again on the next pass instead of waiting out the
                 // re-dispatch interval.
-                sqlx::query("UPDATE scan_jobs SET dispatched_at = NULL WHERE id = $1 AND status = 'queued'")
+                if let Err(e) = sqlx::query("UPDATE scan_jobs SET dispatched_at = NULL WHERE id = $1 AND status = 'queued'")
                     .bind(pending.job_id)
                     .execute(pool)
                     .await
-                    .ok();
+                {
+                    warn!(job_id = %pending.job_id, error = %e, "Could not reset dispatch time; the job waits out the re-dispatch interval");
+                }
             }
         }
+    }
+
+    // Removal submissions that a worker claimed and never reported on (it crashed, or the
+    // backend was unreachable for too long). They are ended as failed, never handed to
+    // another worker, because the first one may already have sent the request.
+    match removal_svc::fail_abandoned_claims(pool, removal_svc::SUBMISSION_CLAIM_STALE_AFTER_SECS).await {
+        Ok(ended) => {
+            for (request_id, _) in &ended {
+                warn!(removal_request_id = %request_id, "Removal submission claim abandoned; request failed");
+            }
+            metrics::counter!("removal_claims_abandoned_total").increment(ended.len() as u64);
+        }
+        Err(e) => error!(error = ?e, "Could not fail abandoned removal claims"),
     }
 
     metrics::counter!("scan_jobs_requeued_total").increment(summary.requeued as u64);

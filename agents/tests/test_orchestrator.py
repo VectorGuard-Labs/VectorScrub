@@ -13,8 +13,10 @@ import uuid
 
 import httpx
 import pytest
+from tenacity import wait_none
 
 import orchestrator.orchestrator as orch_mod
+from detection import DetectionReport
 from orchestrator.orchestrator import Orchestrator
 from shared.backend_client import IdentityDenied, ScanJobLost
 from shared.models import DetectionResult, ExposureSeverity, PiiCategory, ScanJobPayload
@@ -43,13 +45,15 @@ def orch(monkeypatch):
     monkeypatch.setattr(o.cfg, "scan_heartbeat_seconds", 0.05)
     monkeypatch.setattr(o.cfg, "removal_request_delay_seconds", 0)
     monkeypatch.setattr(o.cfg, "monitoring_request_delay_seconds", 0)
+    monkeypatch.setattr(orch_mod, "_REPORT_WAIT", wait_none())  # do not really sleep between retries
 
     class Discovery:
         def __init__(self, tier): pass
         async def run(self, identity): return ["candidate-1", "candidate-2"]
 
     class Detection:
-        async def run(self, candidates, identity): return [detection()]
+        report = DetectionReport(confirmed=[detection()], checked=2, failed=0)
+        async def run_report(self, candidates, identity): return type(self).report
 
     monkeypatch.setattr(orch_mod, "DiscoveryAgent", Discovery)
     monkeypatch.setattr(orch_mod, "DetectionAgent", Detection)
@@ -77,6 +81,48 @@ async def test_the_happy_path_claims_then_fetches_scoped_identity_then_completes
     assert "record_exposure" in names
     final = orch.backend.scan_updates[-1]
     assert (final["status"], final["attempt"], final["exposures_found"]) == ("completed", 4, 1)
+
+
+async def test_a_scan_where_pages_could_not_be_analyzed_is_failed_not_reported_clean(orch, monkeypatch):
+    """An LLM outage used to produce COMPLETED / 0 exposures, i.e. a perfect privacy score."""
+    class AllFailed:
+        report = DetectionReport(confirmed=[], checked=5, failed=5)
+        async def run_report(self, candidates, identity): return type(self).report
+
+    monkeypatch.setattr(orch_mod, "DetectionAgent", AllFailed)
+    orch.backend.claim_result = 3
+    await orch.process_job(payload())
+
+    final = orch.backend.scan_updates[-1]
+    assert final["status"] == "failed" and final["attempt"] == 3
+    assert (final["sources_failed"], final["sources_completed"], final["exposures_found"]) == (5, 0, 0)
+    assert "run the scan again" in final["error_message"] and "5 of 5" in final["error_message"]
+    assert "completed" not in [u["status"] for u in orch.backend.scan_updates]
+
+
+async def test_a_partly_analyzed_scan_keeps_what_it_found_but_is_still_failed(orch, monkeypatch):
+    class Partial:
+        report = DetectionReport(confirmed=[detection()], checked=4, failed=1)
+        async def run_report(self, candidates, identity): return type(self).report
+
+    monkeypatch.setattr(orch_mod, "DetectionAgent", Partial)
+    await orch.process_job(payload())
+
+    assert "record_exposure" in orch.backend.names(), "real findings are not thrown away"
+    final = orch.backend.scan_updates[-1]
+    assert final["status"] == "failed"
+    assert (final["sources_completed"], final["sources_failed"], final["exposures_found"]) == (3, 1, 1)
+
+
+async def test_a_scan_with_nothing_to_analyze_still_completes_clean(orch, monkeypatch):
+    class NoCandidates:
+        report = DetectionReport(confirmed=[], checked=0, failed=0)
+        async def run_report(self, candidates, identity): return type(self).report
+
+    monkeypatch.setattr(orch_mod, "DetectionAgent", NoCandidates)
+    await orch.process_job(payload())
+    final = orch.backend.scan_updates[-1]
+    assert (final["status"], final["sources_failed"], final["exposures_found"]) == ("completed", 0, 0)
 
 
 async def test_a_failing_scan_reports_failed_with_the_attempt_and_a_message_that_leaks_nothing(orch, monkeypatch):
@@ -256,10 +302,129 @@ async def test_a_failed_submission_is_reported_failed_and_not_resubmitted(orch, 
     orch.backend.pending_removals = [req]
     await run_removal_worker_until(orch, lambda: orch.backend.removal_updates)
     orch.backend.pending_removals = [req]
-    orch._submitted_request_ids.add(req["id"])
     await run_removal_worker_until(orch, lambda: False, timeout=0.2)
-    assert len(calls) == 1, "the duplicate-submission guard stops a second attempt at the broker"
+    assert len(calls) == 1, "the backend's claim stops a second attempt at the broker"
     assert orch.backend.removal_updates[0]["status"] == "failed"
+
+
+def submit_ok(calls):
+    async def fake_submit(**kw):
+        calls.append(kw["removal_request_id"])
+        return {"status": "submitted", "confirmation_ref": "REF", "evidence_hash": "abc", "error": None}
+    return lambda **kw: fake_submit(**kw)
+
+
+async def test_a_restarted_worker_does_not_resubmit_a_request_it_already_sent(orch, monkeypatch):
+    """The old guard was an in-memory set: a restart emptied it and the request went out again."""
+    req = removal()
+    calls = []
+    monkeypatch.setattr(orch.removal_executor, "submit_removal_request", submit_ok(calls))
+    orch.backend.pending_removals = [req]
+    await run_removal_worker_until(orch, lambda: orch.backend.removal_updates)
+
+    restarted = Orchestrator()                      # a brand new process: empty memory
+    restarted.backend = orch.backend                # ...talking to the same backend
+    monkeypatch.setattr(restarted.cfg, "removal_request_delay_seconds", 0)
+    monkeypatch.setattr(restarted.removal_executor, "submit_removal_request", submit_ok(calls))
+    orch.backend.pending_removals = [req]           # still listed: e.g. the status update never landed
+    await run_removal_worker_until(restarted, lambda: False, timeout=0.2)
+
+    assert calls == [req["id"]], "sent exactly once across the restart"
+
+
+async def test_two_workers_racing_for_the_same_request_submit_it_once(orch, monkeypatch):
+    req = removal()
+    calls = []
+    other = Orchestrator()
+    other.backend = orch.backend
+    monkeypatch.setattr(other.cfg, "removal_request_delay_seconds", 0)
+    for o in (orch, other):
+        monkeypatch.setattr(o.removal_executor, "submit_removal_request", submit_ok(calls))
+
+    orch.backend.sticky_pending = [req]
+    await asyncio.gather(
+        run_removal_worker_until(orch, lambda: False, timeout=0.3),
+        run_removal_worker_until(other, lambda: False, timeout=0.3),
+    )
+    assert calls == [req["id"]]
+
+
+async def test_a_request_someone_else_claimed_is_never_touched(orch, monkeypatch):
+    req = removal()
+    calls = []
+    monkeypatch.setattr(orch.removal_executor, "submit_removal_request", submit_ok(calls))
+    orch.backend.claimed_removals.add(req["id"])
+    orch.backend.pending_removals = [req]
+    await run_removal_worker_until(orch, lambda: False, timeout=0.2)
+    assert calls == [] and "fetch_removal_identity" not in orch.backend.names()
+
+
+async def test_a_transient_status_update_failure_is_retried_and_not_resubmitted(orch, monkeypatch):
+    req, calls = removal(), []
+    monkeypatch.setattr(orch.removal_executor, "submit_removal_request", submit_ok(calls))
+    orch.backend.removal_status_errors = [httpx.ConnectError("blip"), httpx.ConnectError("blip")]
+    orch.backend.pending_removals = [req]
+    await run_removal_worker_until(orch, lambda: orch.backend.audits)
+    assert orch.backend.removal_updates[0]["status"] == "submitted"
+    assert calls == [req["id"]] and not orch._unreported
+
+
+async def test_an_outcome_the_backend_would_not_take_is_kept_and_reported_later_not_forgotten(orch, monkeypatch):
+    req, calls = removal(), []
+    monkeypatch.setattr(orch.removal_executor, "submit_removal_request", submit_ok(calls))
+    # the backend is down for longer than the retries last
+    orch.backend.removal_status_errors = [httpx.ConnectError("down")] * orch_mod.REPORT_ATTEMPTS
+    orch.backend.pending_removals = [req]
+    task = asyncio.create_task(orch.process_removal_jobs())
+    await asyncio.sleep(0.15)
+    assert req["id"] in orch._unreported, "kept in memory, not lost"
+    assert not orch.backend.removal_updates
+    # the next poll flushes it, without sending the request again
+    task.cancel(); await task
+    await orch._flush_unreported()
+    assert orch.backend.removal_updates[0]["status"] == "submitted"
+    assert orch.backend.audits[0]["action"] == "submitted"
+    assert not orch._unreported and calls == [req["id"]]
+
+
+async def test_a_failed_audit_write_is_retried_without_repeating_the_status_update(orch, monkeypatch):
+    req, calls = removal(), []
+    monkeypatch.setattr(orch.removal_executor, "submit_removal_request", submit_ok(calls))
+    orch.backend.removal_audit_errors = [httpx.ConnectError("down")] * orch_mod.REPORT_ATTEMPTS
+    orch.backend.pending_removals = [req]
+    task = asyncio.create_task(orch.process_removal_jobs())
+    await asyncio.sleep(0.15)
+    task.cancel(); await task
+    assert len(orch.backend.removal_updates) == 1 and not orch.backend.audits and req["id"] in orch._unreported
+    await orch._flush_unreported()
+    assert len(orch.backend.removal_updates) == 1, "the status was already recorded"
+    assert len(orch.backend.audits) == 1 and not orch._unreported
+
+
+async def test_an_outcome_for_a_request_the_backend_already_ended_is_dropped_not_retried_forever(orch, monkeypatch):
+    req, calls = removal(), []
+    monkeypatch.setattr(orch.removal_executor, "submit_removal_request", submit_ok(calls))
+    http_req = httpx.Request("PUT", "http://x")
+    orch.backend.removal_status_errors = [
+        httpx.HTTPStatusError("conflict", request=http_req, response=httpx.Response(409, request=http_req))
+    ]
+    orch.backend.pending_removals = [req]
+    await run_removal_worker_until(orch, lambda: False, timeout=0.2)
+    assert not orch._unreported and not orch.backend.removal_updates
+
+
+async def test_an_executor_that_crashes_after_the_claim_is_reported_failed(orch, monkeypatch):
+    req = removal()
+
+    async def boom(**kw):
+        raise RuntimeError("GET https://www.spokeo.com/Jane-Smith exploded")
+
+    monkeypatch.setattr(orch.removal_executor, "submit_removal_request", lambda **kw: boom(**kw))
+    orch.backend.pending_removals = [req]
+    await run_removal_worker_until(orch, lambda: orch.backend.audits)
+    assert orch.backend.removal_updates[0]["status"] == "failed"
+    detail = str(orch.backend.audits[0]["details"])
+    assert "RuntimeError" in detail and "Jane" not in detail and "spokeo" not in detail
 
 
 # ===========================================================================

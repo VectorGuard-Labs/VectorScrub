@@ -2,8 +2,23 @@
 Shared configuration for all VectorScrub AI agents.
 All settings loaded from environment variables via pydantic-settings.
 """
+import os
 from functools import lru_cache
+
+from dotenv import dotenv_values
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Secrets that belong to the Rust backend and must never be visible to the Python agents.
+# The master key decrypts every customer's identity; the agents get identity only through the
+# backend's scoped release endpoints. The JWT secret signs customer sessions, and the database
+# credentials reach the data directly. An agent that can see any of these has more access than
+# its design gives it, and a compromised agent (it fetches and parses untrusted web pages)
+# would inherit it.
+BACKEND_ONLY_SECRETS = ("MASTER_ENCRYPTION_KEY", "JWT_SECRET", "DATABASE_URL", "POSTGRES_PASSWORD")
+
+
+class ForbiddenSecretsError(RuntimeError):
+    """The agent's environment contains backend-only secrets."""
 
 
 class AgentConfig(BaseSettings):
@@ -65,6 +80,28 @@ class AgentConfig(BaseSettings):
     drop_enable_sandbox: bool = True  # Use sandbox environment for testing
 
 
+def assert_no_backend_secrets(env_file: str | None = None) -> None:
+    """
+    Refuse to run if the process environment, or the .env file the settings would read,
+    contains a backend-only secret. Names only are reported, never values.
+    """
+    found = [name for name in BACKEND_ONLY_SECRETS if os.environ.get(name)]
+    if env_file and os.path.isfile(env_file):
+        found += [
+            f"{name} (in {env_file})"
+            for name, value in dotenv_values(env_file).items()
+            if name in BACKEND_ONLY_SECRETS and value
+        ]
+    if found:
+        raise ForbiddenSecretsError(
+            "The agents must not have backend-only secrets, but found: "
+            + ", ".join(found)
+            + ". Give the agent process its own environment (BACKEND_API_URL, AGENT_API_KEY, "
+            "REDIS_URL, LLM and SMTP settings only); see .env.example."
+        )
+
+
 @lru_cache
 def get_config() -> AgentConfig:
+    assert_no_backend_secrets(AgentConfig.model_config.get("env_file"))
     return AgentConfig()

@@ -66,10 +66,10 @@ pub struct CleartextIdentity {
 /// Request body for account creation.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateAccountRequest {
-    #[validate(email(message = "Must be a valid email address"))]
+    #[validate(email(message = "Must be a valid email address"), length(max = 254))]
     #[schema(example = "user@example.com")]
     pub email: String,
-    #[validate(length(min = 12, message = "Password must be at least 12 characters"))]
+    #[validate(length(min = 12, max = 128, message = "Password must be between 12 and 128 characters"))]
     #[schema(example = "SecurePassword123!")]
     pub password: String,
 }

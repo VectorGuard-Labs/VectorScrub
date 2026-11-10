@@ -1,6 +1,16 @@
-# P2 Improvements - Implementation Complete
+# [ARCHIVED] P2 Improvements
 
-> **Historical / planning document - not a statement of current capability.** The scores and "implemented" claims below were written before an audit that found several items documented but not wired into the code (PyHSM key management, a Rust circuit breaker, automated data retention, a broker registry, A/B testing, an input-validation layer); those were removed. For what exists today see README.md (Security Model, Production Deployment, Recent Updates) and `SOC2_COMPLIANCE.md`.
+> **ARCHIVED, NOT CURRENT. Do not rely on anything in this file.**
+> It was written before an audit that found much of what it describes was documented but never
+> wired in or was later removed: PyHSM/HSM key management, a Rust circuit breaker, automated data
+> retention, the Family tier and its `/family/*` endpoints, an IP rate limiter that was still a
+> TODO, and others. The check marks and "complete" claims below are the original authors' and
+> were not verified against the code. It is kept only as history.
+>
+> What actually exists today is in [`README.md`](../../README.md), the status table at the top of
+> [`SOC2_COMPLIANCE.md`](../../SOC2_COMPLIANCE.md), [`DATA_RETENTION.md`](../../DATA_RETENTION.md)
+> and [`CIRCUIT_BREAKERS.md`](../../CIRCUIT_BREAKERS.md).
+
 
 All 5 P2 (Nice to Have) improvements have been successfully implemented.
 

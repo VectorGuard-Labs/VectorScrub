@@ -24,13 +24,15 @@ Do not add another LLM call site anywhere in the agents package. If a new task
 needs a model, route it through _run_classifier's guard.
 """
 import asyncio
+from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 import structlog
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from shared.config import get_config
 from shared.models import (
@@ -92,11 +94,29 @@ Severity guidelines:
 """
 
 
+@dataclass
+class DetectionReport:
+    """Outcome of classifying a batch of candidates."""
+    confirmed: list[DetectionResult]
+    checked: int   # candidates examined
+    failed: int    # of those, how many could not be assessed (not the same as "no match")
+
+
+def _host(url: str) -> str:
+    """Host only, for logs: listing URLs embed the customer's name."""
+    try:
+        return urlparse(url).hostname or "unknown"
+    except ValueError:
+        return "unknown"
+
+
 class LLMClassification(BaseModel):
     is_match: bool
     pii_categories: list[str]
     severity: str
-    confidence: float
+    # Bounded so a malformed model answer (e.g. 95) is rejected as a failed check instead of
+    # crashing the whole scan later when the DetectionResult is built.
+    confidence: float = Field(ge=0.0, le=1.0)
     # No longer requested from the model: the dashboard summary is built locally
     # (shared.pii_guard.build_pii_summary) because the model never sees identity.
     pii_summary: str = ""
@@ -218,26 +238,22 @@ class DetectionAgent:
         )
         return classification
 
-    async def classify(
+    async def classify_strict(
         self,
         candidate: DiscoveryResult,
         identity: IdentityContext,
     ) -> Optional[DetectionResult]:
         """
-        Run LLM classification on a discovery candidate.
-        Returns a DetectionResult if confirmed exposure, None otherwise.
+        Classify one candidate. Returns a DetectionResult for a confirmed exposure and None
+        for a page that was checked and is not a match.
+
+        RAISES if the page could not be checked (LLM outage, bad credentials, rate limit,
+        malformed model output, or the PII guard blocking the call). "Not a match" and
+        "could not check" must never look the same: the first is a clean result, the
+        second is a gap in the scan.
         """
-        try:
-            classification, evidence = await self._run_classifier(candidate, identity)
-            log.info("detection_classified", source=candidate.source_name, is_match=classification.is_match)
-        except Exception as exc:
-            log.error(
-                "detection_llm_error",
-                source=candidate.source_name,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            return None
+        classification, evidence = await self._run_classifier(candidate, identity)
+        log.info("detection_classified", source=candidate.source_name, is_match=classification.is_match)
 
         if not classification.is_match or classification.confidence < 0.5:
             return None
@@ -271,17 +287,50 @@ class DetectionAgent:
             confidence=round(classification.confidence, 2),
         )
 
-    async def run(
+    async def classify(
+        self,
+        candidate: DiscoveryResult,
+        identity: IdentityContext,
+    ) -> Optional[DetectionResult]:
+        """
+        Lenient variant of classify_strict(): a page that could not be checked yields None,
+        exactly like a page that is not a match. Use only where that distinction does not
+        matter; scans use run_report(), which counts the failures.
+        """
+        try:
+            return await self.classify_strict(candidate, identity)
+        except Exception as exc:
+            # Type only: exception text from HTTP/LLM libraries can embed URLs or request
+            # bodies, and URLs embed the customer's name.
+            log.error(
+                "detection_llm_error",
+                host=_host(candidate.source_url),
+                error_type=type(exc).__name__,
+            )
+            return None
+
+    async def run_report(
         self,
         candidates: list[DiscoveryResult],
         identity: IdentityContext,
-    ) -> list[DetectionResult]:
+    ) -> DetectionReport:
         """
-        Classify all discovery candidates. Returns confirmed exposures.
+        Classify all discovery candidates and say how many could not be checked, so the
+        caller never reports "no exposures" for pages that were never actually assessed.
         """
         confirmed: list[DetectionResult] = []
+        failed = 0
         for candidate in candidates:
-            result = await self.classify(candidate, identity)
+            try:
+                result = await self.classify_strict(candidate, identity)
+            except Exception as exc:
+                failed += 1
+                log.error(
+                    "detection_llm_error",
+                    host=_host(candidate.source_url),
+                    error_type=type(exc).__name__,
+                )
+                continue
             if result:
                 confirmed.append(result)
                 log.info(
@@ -290,4 +339,12 @@ class DetectionAgent:
                     category=result.pii_category.value,
                     severity=result.severity.value,
                 )
-        return confirmed
+        return DetectionReport(confirmed=confirmed, checked=len(candidates), failed=failed)
+
+    async def run(
+        self,
+        candidates: list[DiscoveryResult],
+        identity: IdentityContext,
+    ) -> list[DetectionResult]:
+        """Classify all discovery candidates. Returns confirmed exposures only."""
+        return (await self.run_report(candidates, identity)).confirmed

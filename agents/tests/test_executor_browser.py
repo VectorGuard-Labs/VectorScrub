@@ -28,6 +28,12 @@ PAGES = {
     "blank.html": "<html><body><h1>Opt-out</h1><p>Nothing to see here.</p></body></html>",
     "errorpage.html": '<html><body><form action="/err.html" method="get"><input name="full_name"><button type="submit">Submit</button></form></body></html>',
     "err.html": "<html><body><p>Thank you for contacting us. However, an error occurred. Please try again.</p></body></html>",
+    # Result pages that used to be accepted: ordinary words after "case"/"confirmation", and an
+    # error page that echoes a request id.
+    "prose.html": '<html><body><form action="/prose_result.html" method="get"><input name="full_name"><button type="submit">Submit</button></form></body></html>',
+    "prose_result.html": "<html><head><title>Confirmation</title></head><body><h1>Opt-out</h1><p>In case of error, see the confirmation email policy. For reference, case closed.</p></body></html>",
+    "errref.html": '<html><body><form action="/errref_result.html" method="get"><input name="full_name"><button type="submit">Submit</button></form></body></html>',
+    "errref_result.html": "<html><body><p>An error occurred while processing your request. Request ID: REQ-99812</p></body></html>",
 }
 
 
@@ -97,6 +103,20 @@ async def test_submitting_without_seeing_a_confirmation_is_a_failure_with_eviden
 async def test_error_wording_beats_polite_wording(broker, jane):
     r = await RemovalExecutor().submit_web_form(proc(broker, "errorpage.html"), jane, "u")
     assert r["status"] == "failed", "'Thank you ... an error occurred' is not an acceptance"
+
+
+async def test_ordinary_prose_with_case_and_confirmation_in_it_is_not_a_confirmation(broker, jane):
+    # "In case of error" used to yield the reference "of", and the page title "Confirmation"
+    # used to count as evidence, so this page was recorded as an accepted submission.
+    r = await RemovalExecutor().submit_web_form(proc(broker, "prose.html"), jane, "u")
+    assert r["status"] == "failed" and r["confirmation_ref"] is None
+    assert "no confirmation" in r["error"].lower()
+
+
+async def test_an_error_page_that_shows_a_request_id_is_not_an_acceptance(broker, jane):
+    r = await RemovalExecutor().submit_web_form(proc(broker, "errref.html"), jane, "u")
+    assert r["status"] == "failed" and r["confirmation_ref"] is None
+    assert "problem" in r["error"].lower()
 
 
 async def test_an_identity_with_nothing_to_fill_cannot_silently_succeed(broker):

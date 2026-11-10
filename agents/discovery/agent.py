@@ -18,6 +18,7 @@ from shared.circuit_breaker import CircuitBreakerConfig, CircuitOpenError, get_c
 from shared.config import get_config
 from shared.models import DiscoveryResult, IdentityContext
 from shared.page_text import MIN_PAGE_TEXT_CHARS, extract_text, looks_blocked, surname_of, window_around_surname
+from shared.safe_fetch import FetchBlocked, ResponseTooLarge, safe_get
 
 # Characters of page text handed to the detection agent per candidate. The detection agent
 # redacts it (shared/pii_guard.py) and then sends at most its own cap to the model.
@@ -37,7 +38,12 @@ log = structlog.get_logger(__name__)
 
 # Supported data broker sources
 # FREE tier: 4 brokers (acquisition tier)
-# PERSONAL/PREMIUM: All 15 brokers
+# PERSONAL: those 4 plus 11 more (15 total)
+# PREMIUM: all of Personal's plus 4 more (19 total), the "expanded source coverage" of the plan.
+# Every source here needs an entry in removal/agent.py OPT_OUT_REGISTRY, or a customer would
+# be offered a removal that cannot run (tests/test_discovery.py checks this).
+# The URL templates follow each site's public search-URL pattern; they have not been
+# exercised against the live sites from the test suite.
 DISCOVERY_SOURCES = [
     # FREE tier brokers (4)
     {
@@ -116,10 +122,32 @@ DISCOVERY_SOURCES = [
         "url": "https://radaris.com/p/{name_slug}/",
         "tier": "personal",
     },
+    # PREMIUM-only expanded coverage (4 additional, 19 total)
+    {
+        "name": "truthfinder.com",
+        "url": "https://www.truthfinder.com/results/?firstName={first}&lastName={last}",
+        "tier": "premium",
+    },
+    {
+        "name": "thatsthem.com",
+        "url": "https://thatsthem.com/name/{name_slug}",
+        "tier": "premium",
+    },
+    {
+        "name": "smartbackgroundchecks.com",
+        "url": "https://www.smartbackgroundchecks.com/people/{name_slug}",
+        "tier": "premium",
+    },
+    {
+        "name": "advancedbackgroundchecks.com",
+        "url": "https://www.advancedbackgroundchecks.com/name/{name_slug}",
+        "tier": "premium",
+    },
 ]
 
-# Tier hierarchy: free gets 4 brokers, all paid tiers get all 15
-TIER_ORDER = {"free": 0, "personal": 1, "premium": 1}
+# Tier hierarchy: free gets 4 brokers, personal 15, premium 19. A tier gets every source
+# at or below its own level.
+TIER_ORDER = {"free": 0, "personal": 1, "premium": 2}
 
 
 class DiscoveryAgent:
@@ -178,13 +206,19 @@ class DiscoveryAgent:
         host = urlparse(url).hostname or source_name
         breaker = get_circuit_breaker(f"discovery:{host}", SOURCE_BREAKER)
 
-        async def get() -> httpx.Response:
-            resp = await client.get(
-                url, headers=headers, follow_redirects=True, timeout=self.cfg.request_timeout_seconds
+        async def get():
+            # safe_get follows redirects itself, one validated hop at a time, stays on this
+            # source's domain, refuses private/loopback/link-local addresses, and caps the body.
+            fetched = await safe_get(
+                client,
+                url,
+                headers=headers,
+                timeout=self.cfg.request_timeout_seconds,
+                allowed_domain=source_name,
             )
-            if resp.status_code == 429 or resp.status_code >= 500:
-                raise SourceUnhealthy(resp.status_code)
-            return resp
+            if fetched.status == 429 or fetched.status >= 500:
+                raise SourceUnhealthy(fetched.status)
+            return fetched
 
         try:
             resp = await breaker.execute_async(get)
@@ -194,13 +228,19 @@ class DiscoveryAgent:
         except SourceUnhealthy as exc:
             log.warning("discovery_source_unhealthy", source=source_name, status=exc.args[0])
             return []
+        except FetchBlocked as exc:
+            log.warning("discovery_fetch_blocked", source=source_name, reason=exc.reason)
+            return []
+        except ResponseTooLarge:
+            log.warning("discovery_response_too_large", source=source_name)
+            return []
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             # Type only: transport error text can embed the URL, and the URL embeds the name.
             log.warning("discovery_fetch_failed", source=source_name, error_type=type(exc).__name__)
             return []
 
-        if resp.status_code != 200:
-            log.debug("discovery_non_200", source=source_name, status=resp.status_code)
+        if resp.status != 200:
+            log.debug("discovery_non_200", source=source_name, status=resp.status)
             return []
 
         # Visible text, not raw HTML, so markup and scripts do not count as matches.
@@ -266,7 +306,7 @@ class DiscoveryAgent:
 
         for batch in batches:
             if isinstance(batch, Exception):
-                log.error("discovery_source_error", error=str(batch))
+                log.error("discovery_source_error", error_type=type(batch).__name__)
                 continue
             all_results.extend(batch)
 

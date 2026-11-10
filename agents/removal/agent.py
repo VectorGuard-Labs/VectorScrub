@@ -160,6 +160,32 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
         requires_id_verification=False,
         estimated_days=5,
     ),
+    # Premium-only expanded sources (see discovery/agent.py)
+    "thatsthem.com": RemovalProcedure(
+        source_name="thatsthem.com",
+        procedure_type="web_form",
+        opt_out_url="https://thatsthem.com/optout",
+        instructions="Submit the listing details on the opt-out form. The form uses a CAPTCHA, "
+                     "so automated submission stops and the request is reported as needing manual completion.",
+        requires_id_verification=False,
+        estimated_days=3,
+    ),
+    "smartbackgroundchecks.com": RemovalProcedure(
+        source_name="smartbackgroundchecks.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.smartbackgroundchecks.com/optout",
+        instructions="Find the record and request removal; a confirmation email must be followed.",
+        requires_id_verification=False,
+        estimated_days=7,
+    ),
+    "advancedbackgroundchecks.com": RemovalProcedure(
+        source_name="advancedbackgroundchecks.com",
+        procedure_type="web_form",
+        opt_out_url="https://www.advancedbackgroundchecks.com/removal",
+        instructions="Two steps: submit name and email, follow the verification link, then complete the removal form.",
+        requires_id_verification=False,
+        estimated_days=7,
+    ),
     # California DROP platform (batch submission for 600+ brokers)
     "ca-drop": RemovalProcedure(
         source_name="California DROP Platform",

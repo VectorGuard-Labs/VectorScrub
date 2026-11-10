@@ -13,13 +13,17 @@ only on positive evidence, never because a check failed or was blocked.
 
 Positive evidence for ABSENT is one of:
   * the page is gone (HTTP 404/410),
-  * the customer's surname does not appear anywhere on the page (checked locally,
-    no LLM call), or
-  * the LLM, shown the page text and *anonymized* identity tokens, says no match.
+  * the page is a substantial, server-rendered page at the SAME address that we asked for,
+    and the customer's surname does not appear anywhere on it (checked locally, no LLM
+    call), or
+  * the LLM, shown the page text and *anonymized* identity tokens, says "no match" with
+    real confidence.
 
-Everything else — fetch errors, 403/429/5xx, CAPTCHA or bot-wall pages, pages too
-thin to judge (typically JS-rendered), LLM failures — is UNKNOWN and is retried
-soon by the backend rather than being reported as a result.
+Everything else is UNKNOWN and is retried soon by the backend rather than being reported
+as a result: fetch errors, 403/429/5xx, CAPTCHA or bot-wall pages, a redirect to a different
+page (often the homepage or a search page, which never mentions anyone), client-rendered
+shells and "enable JavaScript" pages, pages too thin to judge, an LLM that is down, and an
+LLM verdict that is low-confidence or ambiguous.
 
 Privacy: raw PII is never logged and never sent to the LLM. Only page text and
 anonymized tokens (see DetectionAgent._anonymize_identity) reach the model.
@@ -44,9 +48,11 @@ from shared.page_text import (
     MIN_PAGE_TEXT_CHARS,
     extract_text,
     looks_blocked,
+    looks_js_shell,
     surname_of,
     window_around_surname,
 )
+from shared.safe_fetch import FetchBlocked, ResponseTooLarge, safe_get
 
 if TYPE_CHECKING:
     from shared.models import IdentityContext
@@ -59,6 +65,12 @@ PRESENT_MIN_CONFIDENCE = 0.5
 # Higher bar to alert a customer that a *removed* record has reappeared, to keep
 # false alarms down.
 REAPPEARANCE_MIN_CONFIDENCE = 0.7
+# Confidence the LLM needs behind a "this page is not the customer" verdict before that
+# counts as the record being gone. Anything between is ambiguous and stays UNKNOWN.
+ABSENT_MIN_CONFIDENCE = 0.7
+# "The surname is not on this page" only means something if there is enough page to have
+# found it on. A few hundred characters is a stub, a notice, or a login wall.
+MIN_ABSENT_TEXT_CHARS = 500
 
 # How much page text (centred on the customer's surname) is shown to the LLM.
 # Kept deliberately small: this is third-party page content that can include the
@@ -100,6 +112,9 @@ class PageState(str, Enum):
 class _Fetch:
     kind: str  # "ok" | "gone" | "error"
     html: str = ""
+    # The request ended up on a different page than the one asked for (e.g. a removed profile
+    # redirecting to the homepage). Such a page says nothing about the original record.
+    moved: bool = False
 
 
 class MonitoringAgent:
@@ -160,11 +175,12 @@ class MonitoringAgent:
 
         if state is PageState.PRESENT and confidence >= REAPPEARANCE_MIN_CONFIDENCE:
             outcome = MonitoringOutcome.REAPPEARED
-        elif state is PageState.UNKNOWN:
-            outcome = MonitoringOutcome.INCONCLUSIVE
-        else:
-            # ABSENT, or only weakly matching: don't raise a false alarm.
+        elif state is PageState.ABSENT:
             outcome = MonitoringOutcome.CLEAR
+        else:
+            # UNKNOWN, or a match too weak to alarm on but too real to call "clear":
+            # don't raise a false alarm, and don't claim the record is still gone either.
+            outcome = MonitoringOutcome.INCONCLUSIVE
 
         log.info(
             "reappearance_checked",
@@ -184,11 +200,14 @@ class MonitoringAgent:
         self, source_name: str, source_url: str, identity: IdentityContext
     ) -> tuple[PageState, float]:
         """Return (state, confidence) for "does this page still show the customer?"."""
-        fetched = await self._fetch_url(source_url)
+        fetched = await self._fetch_url(source_url, allowed_domain=source_name)
 
         if fetched.kind == "gone":
             return PageState.ABSENT, 1.0
         if fetched.kind == "error":
+            return PageState.UNKNOWN, 0.0
+        if fetched.moved:
+            log.info("page_redirected_elsewhere", source=source_name)
             return PageState.UNKNOWN, 0.0
 
         text = extract_text(fetched.html)
@@ -198,6 +217,9 @@ class MonitoringAgent:
         if looks_blocked(text):
             log.info("page_looks_blocked", source=source_name)
             return PageState.UNKNOWN, 0.0
+        if looks_js_shell(fetched.html, text):
+            log.info("page_is_client_rendered", source=source_name)
+            return PageState.UNKNOWN, 0.0
 
         surname = surname_of(identity.full_name)
         if not surname:
@@ -206,6 +228,9 @@ class MonitoringAgent:
 
         window = window_around_surname(text, surname, LLM_WINDOW_CHARS)
         if window is None:
+            if len(text) < MIN_ABSENT_TEXT_CHARS:
+                log.debug("page_too_short_to_rule_out", source=source_name, length=len(text))
+                return PageState.UNKNOWN, 0.0
             return PageState.ABSENT, 1.0
 
         candidate = DiscoveryResult(
@@ -219,21 +244,29 @@ class MonitoringAgent:
                 candidate, identity, max_chars=LLM_WINDOW_CHARS
             )
         except Exception as exc:
-            # An LLM outage must never read as "the record is gone".
-            log.error("assessment_failed", source=source_name, error=str(exc))
+            # An LLM outage must never read as "the record is gone". Type only: the text of
+            # an LLM/HTTP error can contain request details.
+            log.error("assessment_failed", source=source_name, error_type=type(exc).__name__)
             return PageState.UNKNOWN, 0.0
 
         confidence = round(float(verdict.confidence), 2)
         if verdict.is_match and confidence >= PRESENT_MIN_CONFIDENCE:
             return PageState.PRESENT, confidence
-        return PageState.ABSENT, confidence
+        if not verdict.is_match and confidence >= ABSENT_MIN_CONFIDENCE:
+            return PageState.ABSENT, confidence
+        # A match the model is unsure of, or a non-match it is unsure of: not evidence of
+        # removal, and not enough to say the record is back.
+        return PageState.UNKNOWN, confidence
 
-    async def _fetch_url(self, url: str) -> _Fetch:
+    async def _fetch_url(self, url: str, allowed_domain: str | None = None) -> _Fetch:
         """
         GET the page. 404/410 means the page is gone (a good outcome after a removal);
         any other non-200 or a transport error is inconclusive. Calls to one host go through
         a circuit breaker: after repeated failures or 429/5xx answers the host is left alone
         for a few minutes, and those checks come back inconclusive instead of piling on.
+
+        The request goes through safe_get: only public addresses, only the source's own
+        domain (including after redirects), and a cap on the body size.
         """
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -243,12 +276,14 @@ class MonitoringAgent:
         host = urlparse(url).hostname or "unknown"
         breaker = get_circuit_breaker(f"monitor:{host}", FETCH_BREAKER)
 
-        async def get() -> httpx.Response:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-                resp = await client.get(url, headers=headers)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                raise SourceUnhealthy(resp.status_code)
-            return resp
+        async def get():
+            async with httpx.AsyncClient(timeout=20) as client:
+                fetched = await safe_get(
+                    client, url, headers=headers, timeout=20, allowed_domain=allowed_domain
+                )
+            if fetched.status == 429 or fetched.status >= 500:
+                raise SourceUnhealthy(fetched.status)
+            return fetched
 
         try:
             resp = await breaker.execute_async(get)
@@ -258,14 +293,20 @@ class MonitoringAgent:
         except SourceUnhealthy as exc:
             log.warning("fetch_failed", host=host, status_code=exc.args[0])
             return _Fetch("error")
+        except FetchBlocked as exc:
+            log.warning("fetch_blocked", host=host, reason=exc.reason)
+            return _Fetch("error")
+        except ResponseTooLarge:
+            log.warning("fetch_response_too_large", host=host)
+            return _Fetch("error")
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             # Type only: transport error text can embed the URL, and URLs can embed names.
             log.warning("fetch_exception", host=host, error_type=type(exc).__name__)
             return _Fetch("error")
 
-        if resp.status_code == 200:
-            return _Fetch("ok", resp.text)
-        if resp.status_code in (404, 410):
+        if resp.status == 200:
+            return _Fetch("ok", resp.text, moved=resp.moved)
+        if resp.status in (404, 410):
             return _Fetch("gone")
-        log.warning("fetch_failed", host=host, status_code=resp.status_code)
+        log.warning("fetch_failed", host=host, status_code=resp.status)
         return _Fetch("error")

@@ -87,7 +87,7 @@ export interface ScanJob {
 }
 
 export interface AuthResponse {
-  token: string;
+  // The session is an HttpOnly cookie; it is deliberately not part of the response body.
   customer: CustomerProfile;
 }
 

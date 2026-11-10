@@ -8,7 +8,7 @@ use crate::middleware::rate_limiter;
 
 mod agent_callbacks;
 pub mod auth;
-mod client_ip;
+pub mod client_ip;
 mod csrf;
 mod customers;
 pub mod error;
@@ -40,6 +40,9 @@ pub fn router(state: AppState) -> Router {
             .route("/metrics", get(metrics::get_metrics))
             // CSRF token
             .route("/csrf-token", get(csrf::get_csrf_token))
+            // Ends the browser session (clears the HttpOnly cookie). Under /auth/, which the
+            // CSRF check exempts: signing someone out is harmless.
+            .route("/auth/logout", post(auth::logout))
             // Customer profile & identity
             .route("/me", get(customers::get_profile))
             .route("/me/identity", post(customers::submit_identity))
@@ -83,6 +86,7 @@ pub fn router(state: AppState) -> Router {
         // removal submission and verification
         .route("/internal/removal-requests", get(removals::list_pending))
         .route("/internal/removal-requests/:id/identity", post(agent_callbacks::removal_identity))
+        .route("/internal/removal-requests/:id/claim", post(removals::claim_submission))
         .route("/internal/removal-requests/:id/status", put(removals::update_status))
         .route("/internal/removal-requests/:id/audit", post(removals::record_audit))
         .route(

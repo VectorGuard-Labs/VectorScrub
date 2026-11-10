@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { User, MapPin, Phone, Mail, Calendar, Plus, X } from "lucide-react";
 import { csrfFetch } from "@/lib/csrf";
+import { errorMessage } from "@/lib/api";
 
 export default function ProfilePage() {
   const router = useRouter();
@@ -75,35 +76,26 @@ export default function ProfilePage() {
     };
 
     try {
-      const token = localStorage.getItem("vs_token");
-      if (!token) {
-        throw new Error("Not authenticated. Please log in again.");
-      }
-
+      // The session cookie is sent automatically (and is invisible to this code); the CSRF
+      // header is added by csrfFetch.
       const response = await csrfFetch("/api/v1/me/identity", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
+      if (response.status === 401) {
+        router.push("/login");
+        throw new Error("Your session has expired. Please sign in again.");
+      }
       if (!response.ok) {
-        let errorMsg = "Failed to save identity profile";
-        try {
-          const data = await response.json();
-          errorMsg = data.message || errorMsg;
-        } catch {
-          errorMsg = `Server error: ${response.status} ${response.statusText}`;
-        }
-        throw new Error(errorMsg);
+        throw new Error(await errorMessage(response));
       }
 
       setSuccess(true);
       setTimeout(() => router.push("/dashboard"), 2000);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to save identity profile");
     } finally {
       setLoading(false);
     }

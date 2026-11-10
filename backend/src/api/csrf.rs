@@ -11,7 +11,7 @@ use crate::middleware::csrf::{create_csrf_cookie, generate_csrf_token};
 /// client echoes it back in the `X-CSRF-Token` header on POST/PUT/DELETE.
 pub async fn get_csrf_token(State(state): State<AppState>) -> Response {
     let token = generate_csrf_token();
-    let cookie = create_csrf_cookie(&token, state.config.is_production());
+    let cookie = create_csrf_cookie(&token, state.config.secure_cookies());
 
     (
         StatusCode::OK,

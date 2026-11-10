@@ -21,6 +21,7 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile, Subscriptio
     paths(
         crate::api::auth::register,
         crate::api::auth::login,
+        crate::api::auth::logout,
     ),
     components(
         schemas(

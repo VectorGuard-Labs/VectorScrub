@@ -89,9 +89,9 @@ MASTER_ENCRYPTION_KEY=<generated-32-byte-base64>
 AGENT_API_KEY=<generated-random-string>
 
 # Application
-ENVIRONMENT=production
+ENVIRONMENT=production            # must be development, staging or production; anything else stops the backend
 PORT=8080
-ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
+ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com   # required in production; https only, not localhost
 
 # LLM Provider (choose one)
 ANTHROPIC_API_KEY=<your-key>

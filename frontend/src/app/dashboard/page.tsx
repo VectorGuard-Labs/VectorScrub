@@ -18,6 +18,7 @@ import {
   initiateSccan,
   authorizeRemoval,
   listScans,
+  logout,
 } from "@/lib/api";
 import {
   privacyScoreLabel,
@@ -41,11 +42,9 @@ export default function DashboardPage() {
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    const token = localStorage.getItem("vs_token");
-    if (!token) {
-      router.push("/login");
-      return;
-    }
+    // No client-side token check: the session is an HttpOnly cookie the page cannot see.
+    // If it is missing or expired the first API call answers 401 and the API client sends
+    // the user to /login.
     loadData();
 
     // Cleanup polling interval on unmount
@@ -153,8 +152,7 @@ export default function DashboardPage() {
   }
 
   function handleSignOut() {
-    localStorage.removeItem("vs_token");
-    router.push("/");
+    void logout().finally(() => router.push("/"));
   }
 
   async function handleAuthorizeRemoval(exposureId: string) {

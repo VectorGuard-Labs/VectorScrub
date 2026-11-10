@@ -1,6 +1,16 @@
-# VectorScrub Phase 3 - COMPLETE ✅
+# [ARCHIVED] VectorScrub Phase 3
 
-> **Historical snapshot - superseded in part.** Family accounts described below were later removed (migration `0005_remove_family_tier.sql`): all plans are per person and the `/family/*` endpoints and family service were later deleted. Monitoring was later completed end to end (migration `0006_monitoring_support.sql`); the monitoring loop described as a scaffold or "fully operational" here is now implemented and verified. See README.md > Recent Updates and Legal and Operational Risk.
+> **ARCHIVED, NOT CURRENT. Do not rely on anything in this file.**
+> It was written before an audit that found much of what it describes was documented but never
+> wired in or was later removed: PyHSM/HSM key management, a Rust circuit breaker, automated data
+> retention, the Family tier and its `/family/*` endpoints, an IP rate limiter that was still a
+> TODO, and others. The check marks and "complete" claims below are the original authors' and
+> were not verified against the code. It is kept only as history.
+>
+> What actually exists today is in [`README.md`](../../README.md), the status table at the top of
+> [`SOC2_COMPLIANCE.md`](../../SOC2_COMPLIANCE.md), [`DATA_RETENTION.md`](../../DATA_RETENTION.md)
+> and [`CIRCUIT_BREAKERS.md`](../../CIRCUIT_BREAKERS.md).
+
 
 
 ## 🎉 All 12 Tasks Complete (100%)

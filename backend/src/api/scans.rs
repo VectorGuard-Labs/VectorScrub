@@ -51,9 +51,8 @@ pub async fn initiate(
     audit::AuditEntry::builder(audit::actions::SCAN_INITIATE, audit::resources::SCAN)
         .customer_id(auth.id)
         .resource_id(job.id)
-        .log(&state.pool)
-        .await
-        .ok();
+        .log_or_warn(&state.pool)
+        .await;
 
     Ok((
         StatusCode::ACCEPTED,

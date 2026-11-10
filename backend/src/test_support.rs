@@ -20,6 +20,18 @@ pub fn other_master_key_b64() -> String {
 }
 
 /// Insert a customer. `tier` is free | personal | premium.
+/// A customer with a specific email address.
+pub async fn customer_with_email(pool: &PgPool, email: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO customers (id, email, password_hash) VALUES ($1, $2, 'x')")
+        .bind(id)
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("insert customer");
+    id
+}
+
 pub async fn customer(pool: &PgPool, tier: &str, monitoring_enabled: bool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
@@ -151,6 +163,7 @@ pub fn test_config() -> crate::services::config::AppConfig {
         allowed_origins: vec!["http://localhost:3000".into()],
         otlp_endpoint: None,
         trust_proxy_headers: false,
+        trusted_proxy_hops: 1,
         rate_limit_general_per_second: 20,
         rate_limit_general_burst: 60,
         rate_limit_auth_per_minute: 5,

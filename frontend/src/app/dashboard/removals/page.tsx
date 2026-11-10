@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Shield, LogOut, ArrowLeft } from "lucide-react";
-import { listRemovalRequests } from "@/lib/api";
+import { listRemovalRequests, logout } from "@/lib/api";
 import { removalStatusLabel, removalStatusColor, formatDate } from "@/lib/utils";
 import type { RemovalRequest } from "@/types";
 
@@ -13,11 +13,9 @@ export default function RemovalsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem("vs_token");
-    if (!token) {
-      router.push("/login");
-      return;
-    }
+    // No client-side token check: the session is an HttpOnly cookie the page cannot see.
+    // If it is missing or expired the first API call answers 401 and the API client sends
+    // the user to /login.
     loadRequests();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -32,8 +30,7 @@ export default function RemovalsPage() {
   }
 
   function handleSignOut() {
-    localStorage.removeItem("vs_token");
-    router.push("/");
+    void logout().finally(() => router.push("/"));
   }
 
   if (loading) {

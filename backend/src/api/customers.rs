@@ -41,9 +41,8 @@ pub async fn submit_identity(
     audit::AuditEntry::builder(audit::actions::IDENTITY_SUBMIT, audit::resources::IDENTITY)
         .customer_id(auth.id)
         .resource_id(auth.id)
-        .log(&state.pool)
-        .await
-        .ok();
+        .log_or_warn(&state.pool)
+        .await;
 
     Ok((
         StatusCode::OK,

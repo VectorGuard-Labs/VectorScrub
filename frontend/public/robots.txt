@@ -1,0 +1,6 @@
+# Keep account pages out of search indexes.
+User-agent: *
+Disallow: /dashboard
+Disallow: /login
+Disallow: /register
+Disallow: /api/

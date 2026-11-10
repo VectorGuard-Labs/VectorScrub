@@ -170,6 +170,22 @@ class BackendClient:
             data = resp.json()
             return data.get("requests", [])
 
+    async def claim_removal(self, removal_request_id: str) -> bool:
+        """
+        Atomically claim an authorized removal request for submission. True for exactly one
+        caller; False (409) if someone else has it or it is no longer authorized. Only submit
+        when this returns True: it is the guard against sending a request twice.
+        """
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._base}/internal/removal-requests/{removal_request_id}/claim",
+                headers=self._headers,
+            )
+        if resp.status_code == 409:
+            return False
+        resp.raise_for_status()
+        return True
+
     async def update_removal_status(
         self,
         removal_request_id: str,

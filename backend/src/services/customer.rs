@@ -7,20 +7,31 @@ use crate::crypto::{decrypt_str, derive_customer_key, encrypt_str, MasterKey};
 use crate::models::customer::{
     CleartextIdentity, CreateAccountRequest, Customer, IdentityProfile, SubmitIdentityRequest,
 };
-use crate::services::auth::hash_password;
+use crate::services::auth::hash_password_async;
 
 /// Returned by `create_account` when the email is already registered. The API maps this
 /// (and only this) to 409; any other failure is an internal error.
 pub const EMAIL_TAKEN: &str = "An account with this email address already exists";
+
+/// Email addresses are compared case-insensitively everywhere: `Jane@x.com` and `jane@x.com`
+/// are one account, as they are for every mail system and for the login throttle (which keys
+/// on the lowercased address). The comparison is `lower(email) = lower($1)` on both sides so
+/// Postgres applies the same folding to the stored and the supplied value, and a unique index
+/// on `lower(email)` (migration 0010) makes that the rule the database enforces. The address
+/// is stored as the customer typed it (trimmed), so what we show and mail back is theirs.
+fn clean_email(email: &str) -> &str {
+    email.trim()
+}
 
 /// Create a new customer account. Returns the created customer.
 pub async fn create_account(
     pool: &PgPool,
     req: &CreateAccountRequest,
 ) -> Result<Customer> {
+    let email = clean_email(&req.email);
     let existing: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM customers WHERE email = $1")
-            .bind(&req.email)
+        sqlx::query_as("SELECT id FROM customers WHERE lower(email) = lower($1)")
+            .bind(email)
             .fetch_optional(pool)
             .await?;
 
@@ -28,7 +39,8 @@ pub async fn create_account(
         return Err(anyhow!(EMAIL_TAKEN));
     }
 
-    let password_hash = hash_password(&req.password)?;
+    // Off the async runtime: Argon2 is deliberately slow and would otherwise pin a worker.
+    let password_hash = hash_password_async(req.password.clone()).await?;
     let id = Uuid::new_v4();
     let now = OffsetDateTime::now_utc();
 
@@ -41,7 +53,7 @@ pub async fn create_account(
         "#,
     )
     .bind(id)
-    .bind(&req.email)
+    .bind(email)
     .bind(&password_hash)
     .bind(now)
     .fetch_one(pool)
@@ -56,11 +68,13 @@ pub async fn create_account(
     Ok(customer)
 }
 
-/// Fetch a customer by email address.
+/// Fetch a customer by email address, ignoring case (see `clean_email`).
 pub async fn find_by_email(pool: &PgPool, email: &str) -> Result<Option<Customer>> {
     Ok(
-        sqlx::query_as::<_, Customer>("SELECT * FROM customers WHERE email = $1 AND is_active = true")
-            .bind(email)
+        sqlx::query_as::<_, Customer>(
+            "SELECT * FROM customers WHERE lower(email) = lower($1) AND is_active = true",
+        )
+            .bind(clean_email(email))
             .fetch_optional(pool)
             .await?,
     )

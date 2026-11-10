@@ -14,6 +14,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Hermetic: a developer shell often exports DATABASE_URL and friends, which the agents
+# deliberately refuse to run with (shared.config.assert_no_backend_secrets).
+for _name in ("MASTER_ENCRYPTION_KEY", "JWT_SECRET", "DATABASE_URL", "POSTGRES_PASSWORD"):
+    os.environ.pop(_name, None)
+
 os.environ.update(
     AGENT_API_KEY="test-agent-key-" + "x" * 30,
     ANTHROPIC_API_KEY="test-not-a-real-key",
@@ -47,6 +52,29 @@ def identity() -> IdentityContext:
         email_addresses=["jane.smith@example.com"],
         date_of_birth="1984-03-09",
     )
+
+
+# What the fake DNS answers. Anything not listed resolves to a public address, so tests never
+# touch the network or depend on real DNS; the SSRF tests use the special names.
+FAKE_DNS = {
+    "internal.test": ["10.0.0.5"],
+    "metadata.test": ["169.254.169.254"],
+    "loopback.test": ["127.0.0.1"],
+    "mixed.test": ["93.184.216.34", "10.0.0.5"],
+    "v6private.test": ["fd00::1"],
+    "mapped.test": ["::ffff:10.0.0.5"],
+    "nxdomain.test": [],
+}
+
+
+@pytest.fixture(autouse=True)
+def _fake_dns(monkeypatch):
+    from shared import safe_fetch
+
+    async def resolve(host, port):
+        return FAKE_DNS.get(host, ["93.184.216.34"])
+
+    monkeypatch.setattr(safe_fetch, "_resolve", resolve)
 
 
 @pytest.fixture(autouse=True)

@@ -19,17 +19,18 @@ This is the main entry point for the Python agent layer.
 """
 import asyncio
 import json
-import logging
 import uuid
+from dataclasses import dataclass
 
 import redis.asyncio as aioredis
 import structlog
 from tenacity import (
+    AsyncRetrying,
     retry,
+    retry_if_exception,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
-    before_sleep_log,
 )
 import httpx
 
@@ -47,6 +48,18 @@ log = structlog.get_logger(__name__)
 MONITORING_BUSY_DELAY_SECONDS = 5        # work was done; check for more shortly
 MONITORING_FAILURE_BACKOFF_SECONDS = 300  # everything errored; back off
 
+
+def _log_retry(retry_state) -> None:
+    """Log a retry by exception type only: library exception text can embed URLs."""
+    exc = retry_state.outcome.exception()
+    log.info(
+        "retrying_after_error",
+        fn=getattr(retry_state.fn, "__name__", "call"),
+        attempt=retry_state.attempt_number,
+        error_type=type(exc).__name__ if exc else None,
+    )
+
+
 # Retry decorator for transient network/timeout errors
 retry_transient = retry(
     stop=stop_after_attempt(3),
@@ -58,9 +71,39 @@ retry_transient = retry(
         ConnectionError,
         TimeoutError,
     )),
-    before_sleep=before_sleep_log(log, logging.INFO),
+    before_sleep=_log_retry,
     reraise=True,
 )
+
+# Reporting what happened to a removal request after it was really sent to a broker. This
+# must not be lost to a brief backend blip, so it is retried harder than other calls.
+REPORT_ATTEMPTS = 5
+_REPORT_WAIT = wait_exponential(multiplier=1, min=1, max=15)
+
+
+def _is_transient_http(exc: BaseException) -> bool:
+    """Network trouble or a 5xx: worth retrying. A 4xx is a definite answer."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError))
+
+
+def _is_http_status(exc: BaseException, *codes: int) -> bool:
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in codes
+
+
+@dataclass
+class RemovalOutcome:
+    """What happened when a claimed removal request was submitted, awaiting a durable report."""
+    customer_id: str
+    status: str
+    procedure_type: str
+    error: str | None = None
+    confirmation_ref: str | None = None
+    evidence_hash: str | None = None
+    next_check_days: int | None = None
+    status_reported: bool = False
+    audit_reported: bool = False
 
 
 class Orchestrator:
@@ -70,8 +113,11 @@ class Orchestrator:
         self.removal_agent = RemovalAgent()
         self.removal_executor = RemovalExecutor()
         self.monitoring_agent = MonitoringAgent()
-        # Removal requests already submitted by this process (duplicate-submission guard).
-        self._submitted_request_ids: set[str] = set()
+        # Outcomes of requests this process really submitted, whose report to the backend has
+        # not got through yet (see _report_outcome). The duplicate-submission guard itself is
+        # NOT in memory: it is the backend's atomic claim, which survives restarts and holds
+        # across worker replicas.
+        self._unreported: dict[str, RemovalOutcome] = {}
 
     async def process_job(self, payload: ScanJobPayload) -> None:
         """
@@ -125,7 +171,8 @@ class Orchestrator:
 
             # Phase 1b: Detection
             detection_agent = DetectionAgent()
-            confirmed_exposures = await detection_agent.run(candidates, identity)
+            report = await detection_agent.run_report(candidates, identity)
+            confirmed_exposures = report.confirmed
 
             # Record each confirmed exposure via backend API
             for exposure in confirmed_exposures:
@@ -134,6 +181,34 @@ class Orchestrator:
             # Phase 2 prep: Identify removal procedures (stored for customer review)
             removal_pairs = self.removal_agent.prepare_removal_requests(confirmed_exposures)
             sources_with_procedures = sum(1 for _, p in removal_pairs if p is not None)
+
+            if report.failed:
+                # Some pages could not be assessed (LLM outage, bad credentials, rate limit,
+                # PII guard block). Reporting "completed" would tell the customer they are
+                # clean, and set a perfect privacy score, for pages nobody actually checked.
+                # Anything that was confirmed stays recorded; the scan itself is failed so
+                # the customer is told to run it again.
+                log.error(
+                    "job_incomplete_detection_failures",
+                    job_id=job_id,
+                    checked=report.checked,
+                    failed=report.failed,
+                    confirmed=len(confirmed_exposures),
+                )
+                await self.backend.update_scan_status(
+                    job_id,
+                    ScanJobStatus.FAILED,
+                    attempt=attempt,
+                    sources_completed=report.checked - report.failed,
+                    sources_failed=report.failed,
+                    exposures_found=len(confirmed_exposures),
+                    error_message=(
+                        f"The scan was incomplete: {report.failed} of {report.checked} possible "
+                        "matches could not be analyzed, so some exposures may be missing. "
+                        "Your privacy score was not updated. Please run the scan again."
+                    ),
+                )
+                return
 
             log.info(
                 "job_completed",
@@ -147,7 +222,8 @@ class Orchestrator:
                 job_id,
                 ScanJobStatus.COMPLETED,
                 attempt=attempt,
-                sources_completed=len(candidates),
+                sources_completed=report.checked,
+                sources_failed=0,
                 exposures_found=len(confirmed_exposures),
             )
 
@@ -266,6 +342,9 @@ class Orchestrator:
 
         while True:
             try:
+                # Anything this process really sent earlier but could not report yet.
+                await self._flush_unreported()
+
                 # Fetch pending removals from backend
                 pending = await self.backend.get_pending_removals()
 
@@ -281,11 +360,14 @@ class Orchestrator:
                     source_name = request["source_name"]
                     source_url = request["source_url"]
 
-                    # Never submit the same request twice. If a previous status update
-                    # failed after a successful submission, the request is still
-                    # "authorized" in the backend and would otherwise be resubmitted.
-                    if request_id in self._submitted_request_ids:
-                        log.warning("skipping_already_submitted", request_id=request_id)
+                    # Claim before doing anything. The claim is an atomic update in the
+                    # backend that succeeds for exactly one caller, so a restart, or a second
+                    # worker replica, can never submit the same request to a broker twice.
+                    # (An in-memory set could not: it is empty after a restart and invisible
+                    # to other replicas.) A claim that is never resolved is failed by the
+                    # backend after a timeout rather than handed out again.
+                    if not await self.backend.claim_removal(request_id):
+                        log.info("removal_not_claimable_skipping", request_id=request_id)
                         continue
 
                     # Get procedure from removal_agent
@@ -317,46 +399,35 @@ class Orchestrator:
                         )
                         continue
 
-                    # Execute removal
-                    result = await self.removal_executor.submit_removal_request(
-                        removal_request_id=request_id,
-                        customer_id=customer_id,
-                        procedure=procedure,
-                        identity=identity,
-                        source_url=source_url,
-                    )
-                    self._submitted_request_ids.add(request_id)
-
+                    # Execute removal. From here on the request may really have been sent, so
+                    # whatever happens, an outcome is reported; it is never silently dropped.
                     try:
-                        # Update backend status ("submitted" or "failed" — both are
-                        # terminal for this poll, so the request leaves "authorized").
-                        await self.backend.update_removal_status(
+                        result = await self.removal_executor.submit_removal_request(
                             removal_request_id=request_id,
+                            customer_id=customer_id,
+                            procedure=procedure,
+                            identity=identity,
+                            source_url=source_url,
+                        )
+                    except Exception as exc:
+                        log.error("removal_submission_crashed", request_id=request_id, error_type=type(exc).__name__)
+                        result = {
+                            "status": "failed",
+                            "error": f"Submission did not complete ({type(exc).__name__})",
+                        }
+
+                    await self._report_outcome(
+                        request_id,
+                        RemovalOutcome(
+                            customer_id=customer_id,
                             status=result["status"],
+                            procedure_type=procedure.procedure_type,
+                            error=result.get("error"),
                             confirmation_ref=result.get("confirmation_ref"),
                             evidence_hash=result.get("evidence_hash"),
                             next_check_days=procedure.estimated_days if result["status"] == "submitted" else None,
-                        )
-
-                        # Log to audit trail
-                        await self.backend.record_removal_audit(
-                            removal_request_id=request_id,
-                            customer_id=customer_id,
-                            action=result["status"],
-                            actor="removal_executor",
-                            details={
-                                "procedure_type": procedure.procedure_type,
-                                "error": result.get("error"),
-                                "confirmation_ref": result.get("confirmation_ref"),
-                            },
-                        )
-                    except Exception as exc:
-                        log.error(
-                            "removal_status_update_failed",
-                            request_id=request_id,
-                            status=result["status"],
-                            error_type=type(exc).__name__,
-                        )
+                        ),
+                    )
 
                     # Space out submissions to third-party sites.
                     await asyncio.sleep(self.cfg.removal_request_delay_seconds)
@@ -370,11 +441,92 @@ class Orchestrator:
                 log.error("removal_loop_error", error_type=type(exc).__name__)
                 await asyncio.sleep(5)
 
+    async def _with_report_retry(self, fn):
+        """Call `fn` (a no-argument coroutine function), retrying network errors and 5xx."""
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(REPORT_ATTEMPTS),
+            wait=_REPORT_WAIT,
+            retry=retry_if_exception(_is_transient_http),
+            before_sleep=_log_retry,
+            reraise=True,
+        ):
+            with attempt:
+                return await fn()
+
+    async def _report_outcome(self, request_id: str, outcome: RemovalOutcome) -> bool:
+        """
+        Tell the backend what happened to a request this process really submitted. Retries
+        transient errors. If it still cannot get through, the outcome is kept and retried at
+        the top of every poll (`_flush_unreported`), instead of being forgotten with the
+        request left looking unsent. Returns True when fully reported.
+
+        Reporting is resumable: the status and the audit entry are tracked separately so a
+        retry never repeats the half that already succeeded.
+        """
+        if not outcome.status_reported:
+            try:
+                await self._with_report_retry(
+                    lambda: self.backend.update_removal_status(
+                        removal_request_id=request_id,
+                        status=outcome.status,
+                        confirmation_ref=outcome.confirmation_ref,
+                        evidence_hash=outcome.evidence_hash,
+                        next_check_days=outcome.next_check_days,
+                    )
+                )
+                outcome.status_reported = True
+            except Exception as exc:
+                if _is_http_status(exc, 404, 409):
+                    # The backend already moved the request on (for example it ended an
+                    # abandoned claim). Nothing more can be recorded; do not retry forever.
+                    log.warning("removal_outcome_superseded", request_id=request_id, status=outcome.status)
+                    self._unreported.pop(request_id, None)
+                    return True
+                log.error(
+                    "removal_status_update_failed",
+                    request_id=request_id,
+                    status=outcome.status,
+                    error_type=type(exc).__name__,
+                )
+                self._unreported[request_id] = outcome
+                return False
+
+        if not outcome.audit_reported:
+            try:
+                await self._with_report_retry(
+                    lambda: self.backend.record_removal_audit(
+                        removal_request_id=request_id,
+                        customer_id=outcome.customer_id,
+                        action=outcome.status,
+                        actor="removal_executor",
+                        details={
+                            "procedure_type": outcome.procedure_type,
+                            "error": outcome.error,
+                            "confirmation_ref": outcome.confirmation_ref,
+                        },
+                    )
+                )
+                outcome.audit_reported = True
+            except Exception as exc:
+                log.error("removal_audit_failed", request_id=request_id, error_type=type(exc).__name__)
+                self._unreported[request_id] = outcome
+                return False
+
+        self._unreported.pop(request_id, None)
+        return True
+
+    async def _flush_unreported(self) -> None:
+        """Retry reporting outcomes that did not get through earlier."""
+        for request_id, outcome in list(self._unreported.items()):
+            if await self._report_outcome(request_id, outcome):
+                log.info("removal_outcome_reported_late", request_id=request_id, status=outcome.status)
+
     async def _fail_removal(self, request_id: str, customer_id: str, reason: str) -> None:
         """
-        End a removal request as 'failed' so it stops being polled and the customer
-        is alerted (and can re-authorize). Best-effort: if the backend is
-        unreachable the request simply stays 'authorized' and is retried next poll.
+        End a claimed removal request as 'failed' so it stops being polled and the customer
+        is alerted (and can re-authorize). Nothing was sent to the broker on these paths.
+        Best-effort: if the backend is unreachable the claim stays open and the backend ends
+        the request as failed once the claim times out.
         """
         try:
             await self.backend.update_removal_status(

@@ -21,9 +21,9 @@ Tagline: "Your personal information. Under your control."
 7. Customer PII is never used to train AI models.
 
 ## Development Conventions
-- Rust: use `thiserror` for error types, `tracing` for structured logging, `sqlx` with compile-time query verification
+- Rust: use `thiserror` for error types, `tracing` for structured logging, `sqlx` for queries. Only one query (`services/audit.rs`) uses the compile-time `sqlx::query!` macro; the other ~140 are runtime-checked strings. Their safety net is the test suite: `#[sqlx::test(migrations = "./migrations")]` runs them against a real Postgres with every migration applied, so a wrong column or type fails `cargo test`, not production. New queries need such a test. Do not describe the queries as compile-time verified.
 - Python: use `pydantic` for all data models, `structlog` for structured logging, `tenacity` for retries
-- All API responses are JSON. Error responses include a human-readable string message.
+- All API responses are JSON. Error responses are `{"message": "<human-readable string>"}`; `middleware/json_errors.rs` guarantees it for every layer (handlers, extractors, CSRF, rate limiter, timeout), so handlers may return a bare status or text and still comply.
 - Internal agent-to-backend endpoints use `X-Agent-Key` header, not customer JWT.
 - Privacy score formula: 100 − (critical×25 + high×10 + medium×5 + low×2), floor at 0.
 
@@ -42,6 +42,12 @@ Hardening conventions:
 - Agent key and JWT secret are at least 32 characters; compare secrets with `crypto::secrets_equal`.
 - Removal status changes go through `RemovalStatus::can_transition_to` inside the locked transaction in `services/removal.rs`.
 - Do not log URLs, page text, or exception text from fetched pages; log error type and host only.
+- Agents fetch third-party pages only through `shared/safe_fetch.safe_get` (public addresses only, connection pinned to the checked address, redirects re-validated per hop and confined to the source domain, body size capped). Never call `httpx` with `follow_redirects=True` on a URL from a page or the database.
+- The agent process must not have backend-only secrets (`MASTER_ENCRYPTION_KEY`, `JWT_SECRET`, `DATABASE_URL`, `POSTGRES_PASSWORD`); `shared/config.assert_no_backend_secrets` refuses to start if it sees one in the environment or its `.env`. Keep `agents/.env` to agent settings only.
+- Audit writes that must not block a request use `AuditEntry::log_or_warn` (logged and counted in `audit_write_failures_total`), never `.ok()`. Where the audit write is the safeguard (identity release) use `.log()` and fail closed.
+- Client IP (audit and rate limiting share `api/client_ip.rs`) is the TCP peer unless `TRUST_PROXY_HEADERS=true`, then the `X-Forwarded-For` entry `TRUSTED_PROXY_HOPS` places from the right. Never the leftmost entry: it is client-controlled.
+- Password hashing uses the `*_async` functions in `services/auth.rs` (blocking pool, concurrency-capped), never Argon2 directly in a handler. Account emails compare case-insensitively (`lower(email)`).
+- Both `audit_log` and `removal_audit_log` are guarded by triggers that reject UPDATE/DELETE/TRUNCATE (`audit_log` allows only pseudonymization).
 - There is no HSM/KMS, no automated data retention, and no Rust circuit breaker. Do not document them as existing.
 - Tests and CI: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cd agents && python -m pytest`, frontend typecheck and build. After changing a `sqlx::query!` macro run `infra/scripts/sqlx_prepare.sh` and commit `backend/.sqlx/`. Keep `backend/Cargo.lock` tracked.
 

@@ -244,7 +244,7 @@ Security is the core architectural constraint, not an afterthought. Every design
 | Master key | Loaded once into the Rust process from the `MASTER_ENCRYPTION_KEY` environment variable and validated at startup (the process refuses to start if it is not 32 base64 bytes). Never written to disk, never accessible to the Python agent layer. **There is no HSM or KMS integration**: a PyHSM module and its documentation existed but were never wired in (and put a key-store password in the agent process, against this rule), so they were removed. For production, inject the key from a secrets manager or KMS. |
 | PII and LLMs | No customer PII and no third-party names are ever sent to an LLM, enforced in code. All model calls go through one gateway that redacts the customer's values (patterns), detects other people's names (local spaCy NER), drops every word outside a short structural vocabulary, sends no identity (not even masked hints) and no URLs, and re-checks the final excerpt, blocking the call if anything unsafe remains (`agents/shared/pii_guard.py`, `pii_ner.py`, `pii_vocab.py`). See [How the AI Works](#how-the-ai-works). |
 | Removal authorization | No removal request is ever submitted to a data source without an explicit customer authorization recorded in the database with timestamp. The agent prepares; the customer approves; the executor submits. |
-| Audit trail | Two append-only logs. `removal_audit_log` records every action on a removal request (PostgreSQL rules turn UPDATE/DELETE into no-ops). `audit_log` records registration, login (success, failure, lockout, with client IP), identity submission, **every release of decrypted identity to the agents (and every refusal)**, scan start/recovery/failure, and removal authorization. `audit_log` is enforced append-only by database triggers (migration 0007): edits, deletes and TRUNCATE fail loudly; the only permitted change is clearing `customer_id`/`user_email` (pseudonymization). This protects against the application and ordinary SQL, not against a database superuser or table owner, who could drop the trigger; real tamper evidence against them needs an external write-once sink or a hash chain, which does not exist. |
+| Audit trail | Two append-only logs. `removal_audit_log` records every action on a removal request. `audit_log` records registration, login (success, failure, lockout, with client IP), identity submission, **every release of decrypted identity to the agents (and every refusal)**, scan start/recovery/failure, and removal authorization. Both logs are enforced append-only by database triggers (`audit_log` in migration 0007, `removal_audit_log` in 0010, which replaced rules that silently turned writes into no-ops): UPDATE, DELETE and TRUNCATE fail loudly. The only permitted change is clearing `audit_log.customer_id`/`user_email` (pseudonymization). A failed audit write that must not block a request is logged at error level and counted in `audit_write_failures_total`; identity release fails closed instead. This protects against the application and ordinary SQL, not against a database superuser or table owner, who could drop the trigger; real tamper evidence against them needs an external write-once sink or a hash chain, which does not exist. |
 | Evidence collection | Screenshot evidence captured during web form submission is SHA-256 hashed. The hash is stored in the database; screenshots can be stored in encrypted S3 for retrieval. Hashes prove authenticity without storing large binary data. |
 | Model training | Customer PII is never used to fine-tune or train any AI model — not VectorScrub's, not a provider's. |
 | Agent authentication and scoping | Internal endpoints accept only the `X-Agent-Key` header (compared in constant time, length-hiding), not customer JWTs; the key must be 32+ characters or the backend will not start. The key is **not a skeleton key**: decrypted identity is released only against a concrete, currently-actionable work item, and the customer is derived from that item, never supplied by the caller. A scan needs the job-scoped token minted for exactly that job (AES-GCM under the customer's key, 24 h TTL) and the job must be queued or running; a removal request must be `authorized` or due for verification; an exposure must be due for a reappearance check for an eligible customer. Every release and every refusal is audited, and a release fails if its audit write fails. There is no "identity by customer id" endpoint. Remaining limit: the key is still one shared secret, and a release contains every identity field because redaction and form filling need them. |
@@ -252,8 +252,12 @@ Security is the core architectural constraint, not an afterthought. Every design
 | Password storage | Argon2id with random per-user salt. No plaintext or reversibly encoded passwords stored anywhere. |
 | **Production Security** | **Additional hardening for production deployments** |
 | CSRF protection | Double-submit cookie on all state-changing requests (POST/PUT/DELETE; login/register and agent endpoints are exempt). The server issues a URL-safe token at `/api/v1/csrf-token`, sets it as the `csrf_token` cookie (`Secure` in production, `SameSite=Strict`), and requires the same value in `X-CSRF-Token`, compared in constant time. The frontend sends it automatically through `csrfFetch` (`frontend/src/lib/csrf.ts`). |
-| Security headers | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy configured via dedicated middleware. |
-| Rate limiting and lockout | Per-client-IP token buckets (tower_governor): a strict one on login and register (default 5/minute, burst 5) and a general one on the customer API (20/s, burst 60); 429 responses carry `Retry-After`. Internal agent routes and health probes are exempt. Limits are in-memory per backend instance. Client IP is the TCP peer unless `TRUST_PROXY_HEADERS=true` (only behind a proxy that overwrites `X-Forwarded-For`). Separately, 5 failed logins for an email lock it for 15 minutes, doubling every 5 further failures up to an hour; keyed on a hash of the email in Postgres so a non-existent email locks exactly like a real one, and unknown emails still pay for one Argon2 verification so response time does not reveal which emails are registered. Trade-off: someone who knows a victim's email can lock them out for up to an hour; the per-IP limit bounds how fast one source can do it. Request timeout is 30 s. |
+| Browser session | The session JWT is an `HttpOnly`, `SameSite=Strict` cookie (`Secure` outside development, `Path=/api/v1`). It is not in the response body and the frontend stores nothing in `localStorage`, so a script injected into a page cannot read it. Writes made with the cookie still need the double-submit CSRF header. Limits: injected script could still act within the session while the page is open, and there is no server-side revocation (logout clears the cookie; a copied token lives until it expires). |
+| Security headers | Two layers. The **backend** sets CSP, HSTS (production only), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy` and `Permissions-Policy` on API responses. The **web app** (Next.js) sets its own on pages: a per-request-nonce CSP with no `unsafe-inline` for scripts (`src/middleware.ts`, `src/lib/csp.ts`), plus `X-Frame-Options`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, COOP and HSTS in `next.config.ts`. Styles still allow `unsafe-inline` (React and the charts set inline style attributes). |
+| Fetching third-party pages (SSRF) | Discovery and monitoring fetch URLs that come from brokers' pages and from the database, so every fetch goes through `agents/shared/safe_fetch.py`: http/https on standard ports only, no credentials in the URL, every hop (the first request and each redirect) confined to the source's own domain, DNS resolved by us and refused unless EVERY address is public (loopback, private, link-local such as cloud metadata, CGNAT, multicast and IPv4-mapped forms are all refused), the connection pinned to the address that was checked (so DNS rebinding cannot swap in a private one; TLS still verifies the certificate for the original hostname), redirects followed manually with a limit, and the DECOMPRESSED body capped at 2 MB with a 45 s overall limit. Exceptions carry a fixed reason, never the URL. |
+| Agents and backend secrets | The Python agents never receive the master key, JWT secret or database credentials: `agents/shared/config.py` refuses to start if any is in the process environment or the `.env` it would read. This is a guard against misconfiguration, not a sandbox; it cannot stop an operator handing the agents other secrets. |
+| "Removed" evidence | A record is reported removed only on positive evidence: the page is gone (404/410), or a substantial server-rendered page at the SAME address has no sign of the customer, or the model says "not a match" with confidence of at least 0.7. A redirect to a different page, a client-rendered or "enable JavaScript" shell, a bot wall, a stub page, a fetch error, or an unsure model are all inconclusive and retried. |
+| Rate limiting and lockout | Per-client-IP token buckets (tower_governor): a strict one on login and register (default 5/minute, burst 5) and a general one on the customer API (20/s, burst 60); 429 responses carry `Retry-After`. Internal agent routes and health probes are exempt. Limits are in-memory per backend instance. Client IP is the TCP peer unless `TRUST_PROXY_HEADERS=true`, in which case it is the `X-Forwarded-For` entry added by your own proxy (`TRUSTED_PROXY_HOPS` places from the right, default 1), never the client-controlled left side; the audit trail and the limiter use the same address, and IPv6 clients are limited per /64. Separately, 5 failed logins for an email lock it for 15 minutes, doubling every 5 further failures up to an hour; keyed on a hash of the email in Postgres so a non-existent email locks exactly like a real one, and unknown emails still pay for one Argon2 verification so response time does not reveal which emails are registered. Trade-off: someone who knows a victim's email can lock them out for up to an hour; the per-IP limit bounds how fast one source can do it. Request timeout is 30 s. |
 | Circuit breakers | Per-host breakers (`agents/shared/circuit_breaker.py`) around the discovery and monitoring page fetches: after 5 failures or 429/5xx answers a host is left alone for 5 minutes, and those checks come back inconclusive instead of piling on. **Not covered**: the opt-out form submission, SMTP, and the DROP API. |
 | Input validation | Request bodies are validated with `validator` (Rust) and `pydantic` (Python); callback ranges and lengths are bounded; agent writes are checked for ownership (an exposure can only be recorded against a running job of that customer; an audit entry only against the request's real owner). Errors that are not the caller's fault return a generic 500 and are logged server-side. A separate Python "PII validation framework" existed but was never connected and was removed. |
 | Request tracing | Unique request IDs tracked across all services for security auditing and debugging. |
@@ -268,9 +272,9 @@ Security is the core architectural constraint, not an afterthought. Every design
 
 | Plan     | Price/month | Key Features |
 |----------|-------------|--------------|
-| **Free**     | $0     | Initial exposure scan, privacy score, exposure report |
-| **Personal** | $8.99  | Automated removal requests, continuous monitoring (monthly re-check), monthly rescan, alerts |
-| **Premium**  | $14.99 | Everything in Personal + expanded source coverage, priority removal, weekly rescan and weekly reappearance re-check, evidence collection |
+| **Free**     | $0     | Initial exposure scan (4 sources), privacy score, exposure report |
+| **Personal** | $8.99  | 15 sources, automated removal requests, continuous monitoring (monthly re-check), monthly rescan, alerts |
+| **Premium**  | $14.99 | Everything in Personal + expanded source coverage (19 sources: TruthFinder, ThatsThem, SmartBackgroundChecks and AdvancedBackgroundChecks on top of Personal's 15), priority removal, weekly rescan and weekly reappearance re-check, evidence collection |
 
 All plans are per person. A Family tier ($24.99, up to 4 members) existed in earlier versions and was removed; migration `0005_remove_family_tier.sql` moved any existing Family customers to Premium.
 
@@ -293,7 +297,9 @@ VectorScrub/
 │   │   ├── 0005_remove_family_tier.sql  # Drops the 'family' tier; plans are per person
 │   │   ├── 0006_monitoring_support.sql  # 'failed' removal status, monitoring on by default, verification index
 │   │   ├── 0007_security_hardening.sql  # login_throttle table, audit_log immutability triggers
-│   │   └── 0008_scan_job_recovery.sql   # scan_jobs attempts / heartbeat_at / dispatched_at
+│   │   ├── 0008_scan_job_recovery.sql   # scan_jobs attempts / heartbeat_at / dispatched_at
+│   │   ├── 0009_removal_integrity.sql   # one in-flight removal per exposure; submission claim
+│   │   └── 0010_audit_and_email_integrity.sql  # removal_audit_log triggers; case-insensitive unique email
 │   ├── .sqlx/                        # Offline query metadata (commit this; see "Regenerating .sqlx")
 │   └── src/
 │       ├── main.rs                   # Entry point, server setup
@@ -415,10 +421,8 @@ VectorScrub/
 ├── CIRCUIT_BREAKERS.md               # Per-host circuit breaker (Python agents)
 ├── DATA_RETENTION.md                 # Retention: what runs today, and what is still open
 ├── OBSERVABILITY.md                  # Metrics, logging, and monitoring guide
-├── P1_IMPROVEMENTS.md                # Priority 1 feature enhancements
-├── P2_IMPROVEMENTS.md                # Priority 2 feature enhancements
-├── SECURITY_FIXES.md                 # P0 security improvements implemented
-└── SOC2_COMPLIANCE.md                # SOC 2 Type II compliance framework
+├── SOC2_COMPLIANCE.md                # SOC 2 control framework: target design, with a code-checked status table
+└── docs/archive/                     # Old planning/"complete" notes, kept for history only; NOT current (see the banner in each)
 ```
 
 ---
@@ -523,6 +527,15 @@ pip install -r requirements.txt
 # Install Playwright browsers for removal automation
 playwright install chromium
 
+# The agents get their OWN, smaller environment. Do not copy the root .env here: it holds the
+# master key and the database password, and the agents refuse to start if they can see them.
+# Create agents/.env containing only (and lock it down):
+#   BACKEND_API_URL=http://localhost:8080
+#   AGENT_API_KEY=<the same value as in the root .env>
+#   REDIS_URL=redis://localhost:6379
+#   ANTHROPIC_API_KEY=<your key>     # or OPENAI_API_KEY with DEFAULT_LLM_PROVIDER=openai
+chmod 600 .env
+
 python -m orchestrator.orchestrator
 ```
 
@@ -577,11 +590,12 @@ All variables are defined in `.env.example`. Copy it to `.env` before starting a
 | `JWT_SECRET` | Yes | Random string used to sign JWTs, at least 32 characters (the backend refuses to start otherwise). Generate with `openssl rand -base64 48` |
 | `MASTER_ENCRYPTION_KEY` | Yes | Base64-encoded 32-byte AES master key, validated at startup. Generate with `openssl rand -base64 32`. Read from the environment only; there is no HSM/KMS integration. Held by the Rust backend only. |
 | `PORT` | No | Port for the Rust API (default: `8080`) |
-| `ENVIRONMENT` | No | `development`, `staging`, or `production` (default: `development`) |
+| `ENVIRONMENT` | No | `development`, `staging`, or `production` (default: `development`). Any other value stops the backend at startup. Outside `development` it also requires `ALLOWED_ORIGINS`, and in `production` those must be `https://` and not localhost. Drives the `Secure` flag on cookies (staging and production) and HSTS (production). |
 | `DB_POOL_SIZE` | No | PostgreSQL connection pool size (default: `10`) |
-| `ALLOWED_ORIGINS` | No | Comma-separated list of allowed CORS origins (default: `http://localhost:3000`) |
+| `ALLOWED_ORIGINS` | In staging/production | Comma-separated list of allowed CORS origins. Default in development only: `http://localhost:3000` |
 | `AGENT_API_KEY` | Yes | Shared secret for Python agent → Rust internal API authentication, at least 32 characters. Needed by both the backend and the agents. |
-| `TRUST_PROXY_HEADERS` | No | `true` only behind a proxy that overwrites `X-Forwarded-For` / `X-Real-IP`; used to identify clients for rate limiting (default: `false`, uses the socket address) |
+| `TRUST_PROXY_HEADERS` | No | `true` only when the backend is behind your own reverse proxy; the client address then comes from `X-Forwarded-For` / `X-Real-IP` as set by that proxy, for rate limiting and the audit trail (default: `false`, uses the socket address) |
+| `TRUSTED_PROXY_HOPS` | No | How many of your proxies are in front of the backend when `TRUST_PROXY_HEADERS=true`: the client is the `X-Forwarded-For` entry this many places from the right (default `1`; allowed 1-10). The left side of that header is client-controlled and never used. |
 | `RATE_LIMIT_GENERAL_PER_SECOND` / `RATE_LIMIT_GENERAL_BURST` | No | Per-IP limit for customer routes (defaults: `20`, `60`) |
 | `RATE_LIMIT_AUTH_PER_MINUTE` / `RATE_LIMIT_AUTH_BURST` | No | Per-IP limit for login and register (defaults: `5`, `5`) |
 | `SCAN_RECOVERY_INTERVAL_SECS` | No | How often the recovery loop runs (default: `60`) |
@@ -594,7 +608,7 @@ All variables are defined in `.env.example`. Copy it to `.env` before starting a
 | `ANTHROPIC_API_KEY` | Optional | Anthropic API key as an alternative to OpenAI |
 | `DEFAULT_LLM_PROVIDER` | No | `openai` or `anthropic` (default: `anthropic`) |
 | `DEFAULT_LLM_MODEL` | No | Model name for the LLM provider (e.g., `claude-3-5-sonnet-20241022`, `gpt-4o`) |
-| `NEXT_PUBLIC_API_URL` | No | URL the Next.js frontend uses for API calls (default: `http://localhost:8080`) |
+| `API_URL` | No | Where the Next.js server proxies `/api/v1` (default: `http://localhost:8080`). Read at **build** time (Next.js bakes rewrites in); in Docker it is the `API_URL` build argument. Server-side only. |
 | **Observability** | | **Metrics and Tracing** |
 | `OTLP_ENDPOINT` | Optional | OpenTelemetry OTLP endpoint for distributed tracing (e.g., `http://localhost:4317`). Leave empty to disable. Metrics are always available at `GET /api/v1/metrics`. |
 | **Agent Pacing** | | **Monitoring and removal workers (Python agents)** |
@@ -713,14 +727,15 @@ All five services (PostgreSQL, Redis, backend, agents, frontend) start together.
 
 ## API Reference
 
-All endpoints are prefixed with `/api/v1`. Customer endpoints require a `Bearer` JWT in the `Authorization` header. Internal agent endpoints require an `X-Agent-Key` header.
+All endpoints are prefixed with `/api/v1`. Customer endpoints require the session: the `vs_session` `HttpOnly` cookie that login and register set (the browser app), or a `Bearer` JWT in the `Authorization` header (other clients; it takes precedence). The token is not returned in the response body. State-changing requests also need the `X-CSRF-Token` header, whichever way you authenticate. Internal agent endpoints require an `X-Agent-Key` header.
 
 ### Authentication
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/auth/register` | Create a new account. Body: `{ email, password }`. Returns `{ token, customer }`. |
-| `POST` | `/auth/login` | Sign in. Body: `{ email, password }`. Returns `{ token, customer }`. After 5 consecutive failures for an email the endpoint returns `429` with a `Retry-After` header (15 min, doubling every further 5 failures, capped at 60 min). Unknown emails lock out identically, so the endpoint does not reveal which accounts exist. |
+| `POST` | `/auth/register` | Create a new account. Body: `{ email, password }`. Returns `{ customer }` and sets the `vs_session` cookie (`HttpOnly`, `SameSite=Strict`, `Secure` outside development, `Path=/api/v1`, 24 h). |
+| `POST` | `/auth/login` | Sign in. Body: `{ email, password }`. Returns `{ customer }` and sets the `vs_session` cookie, as register does. After 5 consecutive failures for an email the endpoint returns `429` with a `Retry-After` header (15 min, doubling every further 5 failures, capped at 60 min). Unknown emails lock out identically, so the endpoint does not reveal which accounts exist. |
+| `POST` | `/auth/logout` | Expires the session cookie. Works with or without a session. There is no server-side revocation: a token copied before logout stays valid until it expires (24 h). |
 
 Login and register are limited to 5 requests/minute per IP, and all customer routes to 20/second (burst 60). Exceeding a limit returns `429` with `Retry-After`. Internal agent routes and health checks are not rate limited.
 
@@ -813,6 +828,8 @@ The PostgreSQL schema is defined across eight migrations and applied automatical
 - `0006_monitoring_support.sql` - Adds the `failed` removal status, turns `monitoring_enabled` on by default, indexes verification lookups
 - `0007_security_hardening.sql` - `login_throttle` table; triggers that make `audit_log` append-only (the only permitted change is clearing `customer_id` / `user_email`)
 - `0008_scan_job_recovery.sql` - `scan_jobs.attempts`, `heartbeat_at`, `dispatched_at`
+- `0009_removal_integrity.sql` - one in-flight removal request per exposure (partial unique index) and the durable submission claim (`submission_claimed_at`)
+- `0010_audit_and_email_integrity.sql` - trigger guard for `removal_audit_log` (replacing silent no-op rules) and a unique index on `lower(email)`
 
 | Table | Purpose |
 |-------|---------|
@@ -858,7 +875,7 @@ A customer with no active exposures scores 100. Each critical exposure (e.g., fu
 - Confirmation reference extraction from success pages
 - Removal request status tracking (authorized → submitted → verified_removed)
 - Dual-worker orchestrator (scans + removal jobs in parallel)
-- Immutable append-only audit log (enforced by PostgreSQL rules)
+- Immutable append-only audit logs (enforced by PostgreSQL triggers)
 - Removal tracking dashboard showing all request statuses
 - Email-based opt-out (stub for Phase 3 completion)
 - California DROP API integration (stub for Phase 3 completion)
@@ -1007,15 +1024,15 @@ This section lists what exists in the code today. Items that are *not* implement
 
 **Secrets.** The backend refuses to start unless `JWT_SECRET` and `AGENT_API_KEY` are at least 32 characters and `MASTER_ENCRYPTION_KEY` decodes to exactly 32 bytes. `infra/scripts/gen_keys.sh` generates all of them. The master key is read from the environment only; in production inject it from a secret manager. There is no HSM/KMS integration and no automatic key rotation.
 
-**Rate limiting and lockout.** Per-IP limits (see [Authentication](#authentication)) and per-email login lockout. Both are held per backend instance (limits in memory, lockout in Postgres). Behind a proxy set `TRUST_PROXY_HEADERS=true` *only if* the proxy overwrites `X-Forwarded-For`/`X-Real-IP`; otherwise every client appears as the proxy. Lockout can be used to lock a known email out for up to an hour; that trade-off was accepted over leaving the endpoint open to guessing.
+**Rate limiting and lockout.** Per-IP limits (see [Authentication](#authentication)) and per-email login lockout. Both are held per backend instance (limits in memory, lockout in Postgres). Behind a proxy set `TRUST_PROXY_HEADERS=true` (and `TRUSTED_PROXY_HOPS` if you have more than one proxy); the client is taken from the right-hand end of `X-Forwarded-For`, so a client cannot choose its own address by sending the header itself. Without it every client appears as the proxy. Lockout can be used to lock a known email out for up to an hour; that trade-off was accepted over leaving the endpoint open to guessing.
 
 **CSRF.** Double-submit cookie on POST/PUT/DELETE (`GET /api/v1/csrf-token`); internal agent endpoints are exempt. The frontend sends the token through `csrfFetch`. It works same-origin through the Next.js rewrites with `SameSite=Strict`. A cross-origin deployment would also need `X-CSRF-Token` added to the CORS allowed headers.
 
-**Security headers.** CSP, HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`.
+**Security headers.** Set separately by the backend (API responses) and by the Next.js app (pages); see the Security Model table. Pages are rendered per request because the CSP carries a fresh nonce.
 
 **Agent key.** Compared in constant time. It is still one shared secret, and an identity release contains all identity fields for the one customer/work item it was requested for. The key cannot enumerate customers or read identity in bulk.
 
-**Audit trail.** `audit_log` is protected by triggers (migration 0007) and `removal_audit_log` by rules; neither stops a database superuser.
+**Audit trail.** `audit_log` (migration 0007) and `removal_audit_log` (migration 0010) are both protected by triggers that reject UPDATE/DELETE/TRUNCATE; neither stops a database superuser or the table owner.
 
 ### Observability
 
@@ -1269,7 +1286,7 @@ An earlier version of this entry listed capabilities that were documented but ne
 - All TypeScript types valid
 - Environment variables documented in `.env.example`
 - Migration 0003 applies automatically on backend start
-- Full PHASE_3_COMPLETE.md documentation available
+- The original phase notes are archived in `docs/archive/` (historical, not current)
 
 ### Frontend Modernization (Phase 2)
 

@@ -1,20 +1,38 @@
 use axum::{
     async_trait,
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
-    RequestPartsExt,
-};
-use axum_extra::{
-    headers::{authorization::Bearer, Authorization},
-    TypedHeader,
+    http::{header, request::Parts, StatusCode},
 };
 use uuid::Uuid;
 
+use super::session::SESSION_COOKIE;
 use crate::db::AppState;
 use crate::services::auth::{validate_token, Claims};
 
-/// Extractor that validates a Bearer JWT and provides the customer's UUID
-/// and subscription tier to route handlers.
+/// The session token on a request: an `Authorization: Bearer` header if there is one
+/// (non-browser clients), otherwise the `HttpOnly` session cookie (the browser frontend).
+fn request_token(parts: &Parts) -> Option<String> {
+    if let Some(value) = parts.headers.get(header::AUTHORIZATION) {
+        // A present-but-malformed header is not silently ignored in favour of a cookie.
+        let value = value.to_str().ok()?;
+        let (scheme, token) = value.split_once(' ')?;
+        return (scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty())
+            .then(|| token.trim().to_string());
+    }
+    parts
+        .headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|cookies| cookies.split(';'))
+        .find_map(|pair| {
+            let (name, value) = pair.trim().split_once('=')?;
+            (name == SESSION_COOKIE && !value.is_empty()).then(|| value.to_string())
+        })
+}
+
+/// Extractor that validates the session JWT (Bearer header or session cookie) and provides
+/// the customer's UUID and subscription tier to route handlers.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AuthenticatedCustomer {
@@ -30,21 +48,15 @@ impl FromRequestParts<AppState> for AuthenticatedCustomer {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let TypedHeader(Authorization(bearer)) = parts
-            .extract::<TypedHeader<Authorization<Bearer>>>()
-            .await
-            .map_err(|_| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    "Missing or malformed Authorization header".into(),
-                )
-            })?;
+        let token = request_token(parts)
+            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Not signed in".to_string()))?;
 
-        let claims: Claims = validate_token(bearer.token(), &state.config.jwt_secret)
-            .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+        // The library's error text (which says why a token failed) is not sent to the caller.
+        let claims: Claims = validate_token(&token, &state.config.jwt_secret)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session".to_string()))?;
 
         let id = Uuid::parse_str(&claims.sub)
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token subject".into()))?;
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid session".to_string()))?;
 
         Ok(AuthenticatedCustomer { id, tier: claims.tier })
     }
