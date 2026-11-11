@@ -1,6 +1,8 @@
 use utoipa::OpenApi;
 
 use crate::api::auth::{AuthResponse, LoginRequest};
+use crate::services::optout_health::{OptOutPageStatus, PublicOptOutHealth};
+use crate::services::scan::{PublicCoverage, PublicSourceStatus};
 use crate::services::billing::{BillingView, PlanView, SubscriptionView};
 use crate::models::customer::{CreateAccountRequest, CustomerProfile, SubscriptionTier};
 
@@ -25,6 +27,8 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile, Subscriptio
         crate::api::auth::logout,
         crate::api::billing::get_billing,
         crate::api::billing::stripe_webhook,
+        crate::api::public::coverage,
+        crate::api::public::optout_health,
     ),
     components(
         schemas(
@@ -36,11 +40,17 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile, Subscriptio
             BillingView,
             PlanView,
             SubscriptionView,
+            PublicCoverage,
+            PublicSourceStatus,
+            crate::api::public::OptOutHealthResponse,
+            PublicOptOutHealth,
+            OptOutPageStatus,
         )
     ),
     tags(
         (name = "auth", description = "Authentication endpoints"),
         (name = "customers", description = "Customer profile management"),
+        (name = "public", description = "Unauthenticated aggregate figures"),
         (name = "billing", description = "Plans, subscription state and the Stripe webhook"),
         (name = "scans", description = "Privacy scan operations"),
         (name = "exposures", description = "Data exposure management"),
@@ -64,5 +74,7 @@ mod tests {
         assert!(paths.contains_key("/api/v1/me/billing"), "{:?}", paths.keys().collect::<Vec<_>>());
         assert!(paths.contains_key("/api/v1/webhooks/stripe"));
         assert!(doc["components"]["schemas"].get("BillingView").is_some());
+        assert!(paths.contains_key("/api/v1/public/coverage"));
+        assert!(paths.contains_key("/api/v1/public/optout-health"));
     }
 }

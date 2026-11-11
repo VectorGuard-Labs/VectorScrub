@@ -8,6 +8,7 @@ import type {
   CustomerProfile,
   Exposure,
   ExposureSummary,
+  OptOutHealth,
   RemovalAuditEntry,
   RemovalRequest,
   ScanJob,
@@ -115,6 +116,13 @@ export async function logout(): Promise<void> {
 export async function getProfile(): Promise<CustomerProfile> {
   const res = await csrfFetch(`${BASE}/me`, { headers: jsonHeaders() });
   return handleResponse<CustomerProfile>(res);
+}
+
+// Public: whether each broker's opt-out page loaded at its last nightly check. No session needed.
+export async function getOptOutHealth(): Promise<OptOutHealth[]> {
+  const res = await fetch(`${BASE}/public/optout-health`, { credentials: "same-origin" });
+  const body = await handleResponse<{ checks: OptOutHealth[] }>(res, { authenticated: false });
+  return body.checks;
 }
 
 // Billing

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Shield, Search, Trash2, Bell, BarChart3, Lock } from "lucide-react";
+import { fetchPublicCoverage, planCoverage, type PlanTier } from "@/lib/coverage";
 
 const features = [
   {
@@ -40,15 +41,27 @@ const features = [
   },
 ];
 
-const plans = [
+const plans: {
+  name: string;
+  tier: PlanTier;
+  price: string;
+  per?: string;
+  description: string;
+  badge: string | null;
+  note: string | null;
+  features: string[];
+  cta: string;
+  highlight: boolean;
+}[] = [
   {
     name: "Free",
+    tier: "free",
     price: "$0",
     description: "See where you are listed",
-    badge: null as string | null,
-    note: null as string | null,
+    badge: null,
+    note: null,
     features: [
-      "Scan up to 4 brokers, once every 7 days",
+      "Checks up to 4 brokers, once every 7 days",
       "Up to 3 automated opt-out requests",
       "Step-by-step guide for opting out by hand",
       "One identity",
@@ -58,15 +71,16 @@ const plans = [
   },
   {
     name: "Early Access",
+    tier: "personal",
     price: "$4.99",
     per: "/month",
     description: "Opt out of the listings we find",
     badge: "Early access",
     note: "Founding members keep this price for as long as they stay subscribed, even when it goes up for new members. Cancel any time.",
     features: [
-      "Scan 15 brokers",
+      "Checks up to 15 brokers, wherever the site allows it",
       "Unlimited automated opt-out requests for the listings we find",
-      "Opt-out progress tracking",
+      "Guided manual opt-outs for the sites we cannot reach",
       "Monthly rescans and reappearance checks",
       "Alerts when removed information reappears",
       "One identity",
@@ -76,7 +90,9 @@ const plans = [
   },
 ];
 
-export default function LandingPage() {
+export default async function LandingPage() {
+  const coverage = await fetchPublicCoverage();
+  const overall = planCoverage("premium", coverage);
   return (
     <main className="flex flex-col min-h-screen">
       {/* Nav */}
@@ -208,7 +224,7 @@ export default function LandingPage() {
                 <p className="text-gray-400 text-sm mb-2">{plan.description}</p>
                 {plan.note && <p className="text-teal-300/80 text-xs mb-6">{plan.note}</p>}
                 {!plan.note && <div className="mb-4" />}
-                <ul className="space-y-2 mb-8 flex-1">
+                <ul className="space-y-2 mb-4">
                   {plan.features.map((f) => (
                     <li key={f} className="flex items-start gap-2 text-sm text-gray-300">
                       <span className="text-teal-400 mt-0.5">✓</span>
@@ -216,6 +232,7 @@ export default function LandingPage() {
                     </li>
                   ))}
                 </ul>
+                <PlanReach tier={plan.tier} coverage={coverage} />
                 <Link
                   href="/register"
                   className={`text-center py-2.5 rounded-lg text-sm font-medium transition-colors ${
@@ -229,7 +246,16 @@ export default function LandingPage() {
               </div>
             ))}
           </div>
-          <p className="text-gray-500 text-sm text-center mt-10 max-w-3xl mx-auto">
+          {overall.readable !== null && (
+            <p className="text-gray-300 text-sm text-center mt-10 max-w-3xl mx-auto">
+              In our recent scans we could read{" "}
+              <span className="text-white font-semibold">
+                {overall.readable} of the {overall.listed}
+              </span>{" "}
+              brokers we list. The others block automated tools or can only be searched by hand.
+            </p>
+          )}
+          <p className="text-gray-500 text-sm text-center mt-4 max-w-3xl mx-auto">
             Many data brokers block automated tools. Your dashboard shows exactly which sites we could and
             could not check, and for the ones we cannot reach, our guide walks you through opting out by
             hand. Finding nothing on a site we could not check does not mean you are not listed there.
@@ -261,5 +287,37 @@ export default function LandingPage() {
         </p>
       </footer>
     </main>
+  );
+}
+
+/** What a plan's broker list means in practice, from recent scans (or general wording until measured). */
+function PlanReach({
+  tier,
+  coverage,
+}: {
+  tier: PlanTier;
+  coverage: Awaited<ReturnType<typeof fetchPublicCoverage>>;
+}) {
+  const { listed, readable } = planCoverage(tier, coverage);
+  return (
+    <p
+      className="text-xs text-gray-400 border-t border-gray-700/60 pt-3 mb-6 flex-1"
+      data-testid={`reach-${tier}`}
+    >
+      {readable === null ? (
+        <>
+          Some of these {listed} brokers block automated tools. Your dashboard shows exactly which ones we
+          could and could not check.
+        </>
+      ) : (
+        <>
+          Right now we can read{" "}
+          <span className="text-gray-200 font-medium">
+            {readable} of these {listed}
+          </span>{" "}
+          automatically. For the rest, you get a guide to opt out by hand.
+        </>
+      )}
+    </p>
   );
 }

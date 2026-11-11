@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from discovery.agent import DISCOVERY_SOURCES
 from removal.agent import OPT_OUT_REGISTRY
 
 OUTPUT = Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "brokers.generated.ts"
@@ -39,15 +40,27 @@ def brokers() -> list[dict]:
     return out
 
 
+def scan_sources() -> list[dict]:
+    """Which plan scans which source, in discovery order. `tier` is the lowest plan that scans it
+    (free, personal or premium); `manual` sources are listed but cannot be searched automatically."""
+    return [
+        {"name": s["name"], "tier": s["tier"], "manual": bool(s.get("manual"))}
+        for s in DISCOVERY_SOURCES
+    ]
+
+
 def render() -> str:
     body = json.dumps(brokers(), indent=2, ensure_ascii=False)
+    sources = json.dumps(scan_sources(), indent=2, ensure_ascii=False)
     return (
         HEADER
         + "\nexport interface BrokerOptOut {\n"
         + '  name: string;\n  method: "web_form" | "email";\n  optOutUrl: string | null;\n'
         + "  optOutEmail: string | null;\n  instructions: string;\n  estimatedDays: number;\n"
         + "  requiresIdVerification: boolean;\n}\n\n"
-        + f"export const BROKER_OPT_OUTS: BrokerOptOut[] = {body};\n"
+        + f"export const BROKER_OPT_OUTS: BrokerOptOut[] = {body};\n\n"
+        + "export interface ScanSource {\n  name: string;\n  tier: \"free\" | \"personal\" | \"premium\";\n  manual: boolean;\n}\n\n"
+        + f"export const SCAN_SOURCES: ScanSource[] = {sources};\n"
     )
 
 

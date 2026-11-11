@@ -211,6 +211,65 @@ pub async fn record_coverage(
     Ok(())
 }
 
+/// Scans older than this do not count towards the public "which sites can we read" figure.
+pub const PUBLIC_COVERAGE_WINDOW_DAYS: i32 = 30;
+
+/// One source in the public coverage summary.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct PublicSourceStatus {
+    pub source: String,
+    /// True when the source could be read in at least half of the recent scans that tried it.
+    pub readable: bool,
+}
+
+/// Which sources our scans could actually read lately, across all customers. Site names and a
+/// yes/no only: nothing here identifies a customer or a scan.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct PublicCoverage {
+    pub window_days: i32,
+    /// How many recent scans the figures come from. 0 means nothing has been measured yet and
+    /// the caller must not present `sources` as a result.
+    pub scans: i64,
+    pub sources: Vec<PublicSourceStatus>,
+}
+
+/// Summarise the per-source outcomes of recent finished scans (see `record_coverage`).
+pub async fn public_coverage(pool: &PgPool) -> Result<PublicCoverage, sqlx::Error> {
+    // `jsonb_typeof` guards the expansion: `jsonb_array_elements` raises an error on anything
+    // that is not an array, and one odd row must not break the public page.
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT e->>'source', count(*) FILTER (WHERE e->>'outcome' = 'checked'), count(*) \
+         FROM scan_jobs j \
+         CROSS JOIN LATERAL jsonb_array_elements( \
+             CASE WHEN jsonb_typeof(j.coverage) = 'array' THEN j.coverage ELSE '[]'::jsonb END) e \
+         WHERE j.status IN ('completed', 'failed') \
+           AND j.queued_at > NOW() - make_interval(days => $1) \
+           AND e->>'source' IS NOT NULL \
+         GROUP BY 1 ORDER BY 1",
+    )
+    .bind(PUBLIC_COVERAGE_WINDOW_DAYS)
+    .fetch_all(pool)
+    .await?;
+
+    let scans: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM scan_jobs \
+         WHERE jsonb_typeof(coverage) = 'array' AND status IN ('completed', 'failed') \
+           AND queued_at > NOW() - make_interval(days => $1)",
+    )
+    .bind(PUBLIC_COVERAGE_WINDOW_DAYS)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(PublicCoverage {
+        window_days: PUBLIC_COVERAGE_WINDOW_DAYS,
+        scans,
+        sources: rows
+            .into_iter()
+            .map(|(source, checked, attempts)| PublicSourceStatus { source, readable: checked * 2 >= attempts })
+            .collect(),
+    })
+}
+
 /// Progress / completion report from the worker holding the job. Applies only if the
 /// job is `running` and, when `attempt` is given, still on that attempt. This fences
 /// out a worker that was presumed dead and comes back after a newer attempt took over.

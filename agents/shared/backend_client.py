@@ -6,7 +6,7 @@ import httpx
 import structlog
 
 from .config import get_config
-from .models import DetectionResult, ScanJobStatus
+from .models import DetectionResult, OptOutCheck, ScanJobStatus
 
 log = structlog.get_logger(__name__)
 
@@ -125,6 +125,17 @@ class BackendClient:
             raise ScanJobLost(job_id)
         resp.raise_for_status()
         log.info("scan_status_updated", job_id=job_id, status=status.value)
+
+    async def report_optout_health(self, checks: list[OptOutCheck]) -> None:
+        """
+        Report which brokers' public opt-out pages loaded. Public pages only, so this needs no
+        work item and carries no customer data: site names, a status and an HTTP code.
+        """
+        payload = {"checks": [c.model_dump(mode="json") for c in checks]}
+        async with self._client(timeout=30) as client:
+            resp = await client.put(f"{self._base}/internal/optout-health", json=payload, headers=self._headers)
+        resp.raise_for_status()
+        log.info("optout_health_reported", pages=len(checks))
 
     async def record_exposure(
         self,

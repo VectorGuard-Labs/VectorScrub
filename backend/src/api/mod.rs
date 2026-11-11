@@ -18,6 +18,7 @@ mod health;
 mod metrics;
 mod notifications;
 mod privacy_score;
+pub mod public;
 mod removals;
 mod scans;
 #[cfg(test)]
@@ -47,6 +48,11 @@ pub fn router(state: AppState) -> Router {
             // Customer profile & identity
             .route("/me", get(customers::get_profile))
             .route("/me/identity", post(customers::submit_identity))
+            // The state of the saved address (two letters or null); never the address itself
+            .route("/me/residence", get(customers::get_residence))
+            // Which brokers recent scans could read (public: shown on the pricing page)
+            .route("/public/coverage", get(public::coverage))
+            .route("/public/optout-health", get(public::optout_health))
             // Billing: plans on offer and current subscription
             .route("/me/billing", get(billing::get_billing))
             // Stripe calls this; authenticated by its signature, not a session (see handler)
@@ -88,6 +94,8 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/scan/status", put(agent_callbacks::update_scan_status))
         .route("/internal/identity", post(agent_callbacks::scan_identity))
         .route("/internal/exposures", post(agent_callbacks::record_exposure))
+        // nightly check that brokers' public opt-out pages still load (no customer data)
+        .route("/internal/optout-health", put(agent_callbacks::report_optout_health))
         // removal submission and verification
         .route("/internal/removal-requests", get(removals::list_pending))
         .route("/internal/removal-requests/:id/identity", post(agent_callbacks::removal_identity))

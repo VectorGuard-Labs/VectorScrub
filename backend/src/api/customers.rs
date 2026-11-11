@@ -49,3 +49,19 @@ pub async fn submit_identity(
         Json(serde_json::json!({ "message": "Identity profile saved successfully" })),
     ))
 }
+
+/// GET /api/v1/me/residence
+/// The US state of the signed-in customer's saved address, as two letters, or null if there is
+/// no address or its state cannot be told. The opt-out guide uses it to offer California's DROP
+/// service to California residents only. Only the state is returned, never the address.
+pub async fn get_residence(
+    auth: AuthenticatedCustomer,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let master = MasterKey::from_base64(&state.config.master_key_b64)
+        .map_err(super::error::internal_error)?;
+    let found = customer_svc::residence_state(&state.pool, &master, auth.id)
+        .await
+        .map_err(super::error::internal_error)?;
+    Ok(Json(serde_json::json!({ "state": found })))
+}

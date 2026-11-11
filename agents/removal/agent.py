@@ -40,8 +40,8 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
     "peoplefinder.com": RemovalProcedure(
         source_name="peoplefinder.com",
         procedure_type="web_form",
-        opt_out_url="https://www.peoplefinder.com/optout.php",
-        instructions="Search for your record, select it, and submit opt-out.",
+        opt_out_url="https://www.intelius.com/privacy-center/",
+        instructions="PeopleFinder.com is run alongside Intelius and links to Intelius's privacy center for removal requests. Start there; the PeopleConnect Suppression Center may also apply.",
         requires_id_verification=False,
         estimated_days=14,
     ),
@@ -56,8 +56,8 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
     "intelius.com": RemovalProcedure(
         source_name="intelius.com",
         procedure_type="web_form",
-        opt_out_url="https://www.intelius.com/opt-out",
-        instructions="Submit opt-out form. Response within 72 hours.",
+        opt_out_url="https://suppression.peopleconnect.us/login",
+        instructions="One request in PeopleConnect's shared Suppression Center covers Intelius, TruthFinder, Instant Checkmate and US Search. Verify your email, find your record by name and date of birth, select it and choose to suppress it.",
         requires_id_verification=False,
         estimated_days=7,
     ),
@@ -72,18 +72,16 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
     "truthfinder.com": RemovalProcedure(
         source_name="truthfinder.com",
         procedure_type="web_form",
-        opt_out_url="https://www.truthfinder.com/opt-out/",
-        instructions="Search for your record, submit opt-out request with record URL. "
-                     "Identity verification required (government ID). Processing takes 5-7 business days.",
-        requires_id_verification=True,
+        opt_out_url="https://suppression.peopleconnect.us/login",
+        instructions="One request in PeopleConnect's shared Suppression Center covers Intelius, TruthFinder, Instant Checkmate and US Search. Verify your email, find your record by name and date of birth, select it and choose to suppress it.",
+        requires_id_verification=False,
         estimated_days=7,
     ),
     "instantcheckmate.com": RemovalProcedure(
         source_name="instantcheckmate.com",
         procedure_type="web_form",
-        opt_out_url="https://www.instantcheckmate.com/opt-out/",
-        instructions="Submit opt-out form with full name and state. "
-                     "Verification email sent. Removal typically completes within 48 hours.",
+        opt_out_url="https://suppression.peopleconnect.us/login",
+        instructions="One request in PeopleConnect's shared Suppression Center covers Intelius, TruthFinder, Instant Checkmate and US Search. Verify your email, find your record by name and date of birth, select it and choose to suppress it.",
         requires_id_verification=False,
         estimated_days=2,
     ),
@@ -135,30 +133,24 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
     "ussearch.com": RemovalProcedure(
         source_name="ussearch.com",
         procedure_type="web_form",
-        opt_out_url="https://www.ussearch.com/opt-out",
-        instructions="Part of PeopleConnect network (same as PeopleFinder). "
-                     "May be covered by PeopleFinder removal. If not, search for your record "
-                     "and submit direct opt-out form. Verify via email.",
+        opt_out_url="https://suppression.peopleconnect.us/login",
+        instructions="One request in PeopleConnect's shared Suppression Center covers Intelius, TruthFinder, Instant Checkmate and US Search. Verify your email, find your record by name and date of birth, select it and choose to suppress it.",
         requires_id_verification=False,
         estimated_days=7,
     ),
     "peoplelooker.com": RemovalProcedure(
         source_name="peoplelooker.com",
         procedure_type="web_form",
-        opt_out_url="https://www.peoplelooker.com/opt-out",
-        instructions="Owned by BeenVerified. May be covered by BeenVerified removal. "
-                     "If not, search for your listing, submit opt-out request with email verification. "
-                     "Removal within 48-72 hours.",
+        opt_out_url="https://www.peoplelooker.com/optout",
+        instructions="Search your name, select your record and confirm the verification email PeopleLooker sends. The site sends this address on to its current opt-out search page.",
         requires_id_verification=False,
         estimated_days=3,
     ),
     "ownerly.com": RemovalProcedure(
         source_name="ownerly.com",
         procedure_type="web_form",
-        opt_out_url="https://www.ownerly.com/opt-out",
-        instructions="Owned by BeenVerified. May be covered by BeenVerified removal. "
-                     "If not, submit opt-out form with property address and email. "
-                     "Focus on property records. Verify via email.",
+        opt_out_url="https://www.ownerly.com/optout",
+        instructions="Search by name and state, select your record, enter your email and confirm the verification email. Ownerly's opt-outs are managed by BeenVerified, so a BeenVerified removal may also cover it.",
         requires_id_verification=False,
         estimated_days=5,
     ),
@@ -183,8 +175,8 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
     "advancedbackgroundchecks.com": RemovalProcedure(
         source_name="advancedbackgroundchecks.com",
         procedure_type="web_form",
-        opt_out_url="https://www.advancedbackgroundchecks.com/removal",
-        instructions="Two steps: submit name and email, follow the verification link, then complete the removal form.",
+        opt_out_url="https://www.advancedbackgroundchecks.com/opt-out",
+        instructions="Two steps: submit your name and email, follow the verification link within 24 hours, then complete the removal form.",
         requires_id_verification=False,
         estimated_days=7,
     ),

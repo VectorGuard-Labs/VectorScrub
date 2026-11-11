@@ -1166,3 +1166,241 @@ mod plan_limits {
         assert_eq!(order, want);
     }
 }
+
+// ===========================================================================
+// Public coverage figure (shown on the pricing page)
+// ===========================================================================
+
+mod public_coverage {
+    use super::*;
+
+    async fn scan_with(pool: &PgPool, c: Uuid, status: &str, days_ago: i32, coverage: Value) {
+        let job = ts::scan_job(pool, c, status).await;
+        sqlx::query("UPDATE scan_jobs SET coverage = $2, queued_at = NOW() - make_interval(days => $3) WHERE id = $1")
+            .bind(job).bind(coverage).bind(days_ago).execute(pool).await.unwrap();
+    }
+
+    fn entry(source: &str, outcome: &str) -> Value { json!({ "source": source, "outcome": outcome }) }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn with_no_scans_nothing_is_claimed(pool: PgPool) {
+        let (app, _) = app(pool);
+        let r = send(&app, "GET", "/public/coverage", &[], None).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.json()["scans"], 0);
+        assert_eq!(r.json()["sources"], json!([]));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn it_summarises_recent_scans_across_customers_without_needing_a_session(pool: PgPool) {
+        let (app, _) = app(pool.clone());
+        let (a, b) = (ts::customer(&pool, "free", false).await, ts::customer(&pool, "premium", true).await);
+        scan_with(&pool, a, "completed", 1, json!([entry("spokeo.com", "checked"), entry("whitepages.com", "blocked"), entry("peoplefinder.com", "not_supported")])).await;
+        scan_with(&pool, b, "completed", 2, json!([entry("spokeo.com", "checked"), entry("whitepages.com", "blocked"), entry("radaris.com", "checked")])).await;
+        // a failed-analysis scan still read its pages; an old scan, a running one and one with no coverage do not count
+        scan_with(&pool, a, "failed", 3, json!([entry("radaris.com", "checked")])).await;
+        scan_with(&pool, a, "completed", 45, json!([entry("whitepages.com", "checked")])).await;
+        scan_with(&pool, a, "running", 0, json!([entry("whitepages.com", "checked")])).await;
+        scan_with(&pool, a, "completed", 1, Value::Null).await;
+
+        let r = send(&app, "GET", "/public/coverage", &[], None).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.headers.get("cache-control").unwrap(), "public, max-age=300");
+        let j = r.json();
+        assert_eq!((j["scans"].clone(), j["window_days"].clone()), (json!(3), json!(30)));
+        let status: std::collections::BTreeMap<String, bool> = j["sources"].as_array().unwrap().iter()
+            .map(|s| (s["source"].as_str().unwrap().to_string(), s["readable"].as_bool().unwrap())).collect();
+        assert_eq!(status, [("peoplefinder.com", false), ("radaris.com", true), ("spokeo.com", true), ("whitepages.com", false)]
+            .iter().map(|(k, v)| (k.to_string(), *v)).collect());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_source_is_readable_when_at_least_half_of_the_scans_that_tried_it_read_it(pool: PgPool) {
+        let (app, _) = app(pool.clone());
+        let c = ts::customer(&pool, "free", false).await;
+        for outcome in ["checked", "blocked", "checked", "blocked", "blocked"] {
+            scan_with(&pool, c, "completed", 1, json!([entry("flaky.com", outcome)])).await;
+        }
+        let j = send(&app, "GET", "/public/coverage", &[], None).await.json();
+        assert_eq!(j["sources"][0]["readable"], false, "2 of 5 is not enough");
+        scan_with(&pool, c, "completed", 1, json!([entry("flaky.com", "checked")])).await;
+        let j = send(&app, "GET", "/public/coverage", &[], None).await.json();
+        assert_eq!(j["sources"][0]["readable"], true, "3 of 6 is exactly half, and half counts");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_response_identifies_no_customer_and_one_odd_row_cannot_break_it(pool: PgPool) {
+        let (app, _) = app(pool.clone());
+        let c = ts::customer(&pool, "free", false).await;
+        scan_with(&pool, c, "completed", 1, json!([entry("spokeo.com", "checked")])).await;
+        scan_with(&pool, c, "completed", 1, json!({ "not": "an array" })).await;
+        scan_with(&pool, c, "completed", 1, json!("scalar")).await;
+        scan_with(&pool, c, "completed", 1, json!([{ "outcome": "checked" }])).await; // no source name
+        let r = send(&app, "GET", "/public/coverage", &[], None).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert!(!r.body.contains(&c.to_string()), "no customer id in a public response");
+        assert_eq!(r.json()["sources"].as_array().unwrap().len(), 1);
+    }
+}
+
+// ===========================================================================
+// Opt-out page health (nightly check of brokers' public opt-out pages)
+// ===========================================================================
+
+mod optout_health {
+    use super::*;
+
+    fn check(source: &str, status: &str, http: Option<i32>) -> Value {
+        json!({ "source": source, "status": status, "http_status": http })
+    }
+
+    async fn report(app: &Router, cfg: &AppConfig, checks: Vec<Value>) -> Reply {
+        send(app, "PUT", "/internal/optout-health", &agent(cfg), Some(json!({ "checks": checks }))).await
+    }
+
+    async fn row(pool: &PgPool, source: &str) -> (String, Option<i32>, bool, i32) {
+        sqlx::query_as("SELECT status, http_status, last_reachable_at IS NOT NULL, consecutive_failures FROM optout_health WHERE source = $1")
+            .bind(source).fetch_one(pool).await.unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn only_an_agent_can_report(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let body = Some(json!({ "checks": [check("spokeo.com", "reachable", Some(200))] }));
+        assert_eq!(send(&app, "PUT", "/internal/optout-health", &[], body.clone()).await.status, StatusCode::UNAUTHORIZED);
+        let c = ts::customer(&pool, "premium", true).await;
+        assert_eq!(send(&app, "PUT", "/internal/optout-health", &bearer(&cfg, c, "premium"), body).await.status,
+            StatusCode::UNAUTHORIZED, "a customer session is not an agent key");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM optout_health").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_report_is_stored_and_anyone_can_read_it_without_a_session(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let r = report(&app, &cfg, vec![
+            check("spokeo.com", "captcha", Some(200)), check("whitepages.com", "blocked", Some(403)),
+            check("ownerly.com", "not_found", Some(404)), check("radaris.com", "reachable", Some(200)),
+            check("nuwber.com", "unavailable", None),
+        ]).await;
+        assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+
+        let page = send(&app, "GET", "/public/optout-health", &[], None).await;
+        assert_eq!(page.status, StatusCode::OK);
+        assert_eq!(page.headers.get("cache-control").unwrap(), "public, max-age=300");
+        let j = page.json();
+        let by: std::collections::BTreeMap<String, String> = j["checks"].as_array().unwrap().iter()
+            .map(|c| (c["source"].as_str().unwrap().to_string(), c["status"].as_str().unwrap().to_string())).collect();
+        assert_eq!(by["spokeo.com"], "captcha");
+        assert_eq!(by["whitepages.com"], "blocked");
+        assert_eq!(by["ownerly.com"], "not_found");
+        assert_eq!(by["radaris.com"], "reachable");
+        assert_eq!(by["nuwber.com"], "unavailable");
+        assert!(j["checks"][0]["checked_at"].as_str().unwrap().contains('T'), "RFC 3339, like every other date");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_last_time_a_page_opened_survives_later_failures_and_failures_are_counted(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        report(&app, &cfg, vec![check("radaris.com", "reachable", Some(200))]).await;
+        assert_eq!(row(&pool, "radaris.com").await, ("reachable".into(), Some(200), true, 0));
+
+        for n in 1..=3 {
+            report(&app, &cfg, vec![check("radaris.com", "not_found", Some(404))]).await;
+            assert_eq!(row(&pool, "radaris.com").await, ("not_found".into(), Some(404), true, n),
+                "still remembers it last opened; {n} failures in a row");
+        }
+        report(&app, &cfg, vec![check("radaris.com", "captcha", Some(200))]).await;
+        assert_eq!(row(&pool, "radaris.com").await.3, 0, "a page that opens (even with a CAPTCHA) resets the count");
+
+        // a source that has never opened has no last-reachable time
+        report(&app, &cfg, vec![check("dead.example", "blocked", Some(403))]).await;
+        assert_eq!(row(&pool, "dead.example").await, ("blocked".into(), Some(403), false, 1));
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM optout_health WHERE source = 'radaris.com'").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 1, "one row per source, overwritten");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_bad_report_is_refused_whole_and_stores_nothing(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        for bad in [
+            vec![check("good.com", "reachable", Some(200)), check("https://x.com/opt-out", "reachable", None)],  // a URL, not a host
+            vec![check("good.com", "reachable", Some(200)), check("", "reachable", None)],
+            vec![check("good.com", "reachable", Some(200)), check("a b.com", "reachable", None)],
+            vec![check("good.com", "reachable", Some(99))],
+            vec![check("good.com", "reachable", Some(600))],
+            (0..201).map(|i| check(&format!("s{i}.com"), "reachable", Some(200))).collect(),
+        ] {
+            let r = report(&app, &cfg, bad).await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+        }
+        // an unknown status never gets as far as the handler
+        let r = report(&app, &cfg, vec![check("good.com", "working_great", Some(200))]).await;
+        assert!(r.status == StatusCode::BAD_REQUEST || r.status == StatusCode::UNPROCESSABLE_ENTITY, "{}", r.status);
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM optout_health").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "nothing from any refused report, including its valid entries");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn with_nothing_reported_the_public_list_is_empty(pool: PgPool) {
+        let (app, _) = app(pool);
+        let r = send(&app, "GET", "/public/optout-health", &[], None).await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert_eq!(r.json()["checks"], json!([]));
+    }
+}
+
+// ===========================================================================
+// Residence (state only) for the DROP card
+// ===========================================================================
+
+mod residence {
+    use super::*;
+    use crate::models::customer::SubmitIdentityRequest;
+    use crate::services::customer as customer_svc;
+
+    async fn save(pool: &PgPool, c: Uuid, address: &str) {
+        let req = SubmitIdentityRequest {
+            full_name: "Jane Smith".into(), current_address: address.into(), previous_addresses: vec![],
+            phone_numbers: vec![], email_addresses: vec!["jane@example.com".into()], date_of_birth: None,
+        };
+        customer_svc::save_identity(pool, &master(), &req, c).await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn it_returns_only_the_state_of_the_saved_address(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let c = ts::customer(&pool, "free", false).await;
+        let who = bearer(&cfg, c, "free");
+
+        assert_eq!(send(&app, "GET", "/me/residence", &who, None).await.json()["state"], Value::Null, "no identity yet");
+
+        save(&pool, c, "742 Evergreen Terrace, Springfield, CA 90210").await;
+        let r = send(&app, "GET", "/me/residence", &who, None).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.json(), json!({ "state": "CA" }));
+        for leaked in ["Evergreen", "Springfield", "90210", "Terrace"] {
+            assert!(!r.body.contains(leaked), "the address must not appear: {}", r.body);
+        }
+
+        save(&pool, c, "1 Main St, Austin, TX 78701").await;
+        assert_eq!(send(&app, "GET", "/me/residence", &who, None).await.json()["state"], "TX");
+
+        save(&pool, c, "12 Rue de Rivoli, Paris, France").await;
+        assert_eq!(send(&app, "GET", "/me/residence", &who, None).await.json()["state"], Value::Null, "cannot tell: says so");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn it_needs_a_session_and_only_ever_reads_the_callers_own_address(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let (alice, bob) = (ts::customer(&pool, "free", false).await, ts::customer(&pool, "free", false).await);
+        save(&pool, alice, "1 Main St, Los Angeles, CA 90001").await;
+        save(&pool, bob, "1 Main St, Austin, TX 78701").await;
+        assert_eq!(send(&app, "GET", "/me/residence", &[], None).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(send(&app, "GET", "/me/residence", &bearer(&cfg, alice, "free"), None).await.json()["state"], "CA");
+        assert_eq!(send(&app, "GET", "/me/residence", &bearer(&cfg, bob, "free"), None).await.json()["state"], "TX");
+        // there is no way to name another customer
+        let r = send(&app, "GET", &format!("/me/residence?customer_id={bob}"), &bearer(&cfg, alice, "free"), None).await;
+        assert_eq!(r.json()["state"], "CA", "a query parameter changes nothing");
+    }
+}

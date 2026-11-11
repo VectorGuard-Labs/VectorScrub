@@ -16,9 +16,9 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
   {
     "name": "advancedbackgroundchecks.com",
     "method": "web_form",
-    "optOutUrl": "https://www.advancedbackgroundchecks.com/removal",
+    "optOutUrl": "https://www.advancedbackgroundchecks.com/opt-out",
     "optOutEmail": null,
-    "instructions": "Two steps: submit name and email, follow the verification link, then complete the removal form.",
+    "instructions": "Two steps: submit your name and email, follow the verification link within 24 hours, then complete the removal form.",
     "estimatedDays": 7,
     "requiresIdVerification": false
   },
@@ -52,18 +52,18 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
   {
     "name": "instantcheckmate.com",
     "method": "web_form",
-    "optOutUrl": "https://www.instantcheckmate.com/opt-out/",
+    "optOutUrl": "https://suppression.peopleconnect.us/login",
     "optOutEmail": null,
-    "instructions": "Submit opt-out form with full name and state. Verification email sent. Removal typically completes within 48 hours.",
+    "instructions": "One request in PeopleConnect's shared Suppression Center covers Intelius, TruthFinder, Instant Checkmate and US Search. Verify your email, find your record by name and date of birth, select it and choose to suppress it.",
     "estimatedDays": 2,
     "requiresIdVerification": false
   },
   {
     "name": "intelius.com",
     "method": "web_form",
-    "optOutUrl": "https://www.intelius.com/opt-out",
+    "optOutUrl": "https://suppression.peopleconnect.us/login",
     "optOutEmail": null,
-    "instructions": "Submit opt-out form. Response within 72 hours.",
+    "instructions": "One request in PeopleConnect's shared Suppression Center covers Intelius, TruthFinder, Instant Checkmate and US Search. Verify your email, find your record by name and date of birth, select it and choose to suppress it.",
     "estimatedDays": 7,
     "requiresIdVerification": false
   },
@@ -88,27 +88,27 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
   {
     "name": "ownerly.com",
     "method": "web_form",
-    "optOutUrl": "https://www.ownerly.com/opt-out",
+    "optOutUrl": "https://www.ownerly.com/optout",
     "optOutEmail": null,
-    "instructions": "Owned by BeenVerified. May be covered by BeenVerified removal. If not, submit opt-out form with property address and email. Focus on property records. Verify via email.",
+    "instructions": "Search by name and state, select your record, enter your email and confirm the verification email. Ownerly's opt-outs are managed by BeenVerified, so a BeenVerified removal may also cover it.",
     "estimatedDays": 5,
     "requiresIdVerification": false
   },
   {
     "name": "peoplefinder.com",
     "method": "web_form",
-    "optOutUrl": "https://www.peoplefinder.com/optout.php",
+    "optOutUrl": "https://www.intelius.com/privacy-center/",
     "optOutEmail": null,
-    "instructions": "Search for your record, select it, and submit opt-out.",
+    "instructions": "PeopleFinder.com is run alongside Intelius and links to Intelius's privacy center for removal requests. Start there; the PeopleConnect Suppression Center may also apply.",
     "estimatedDays": 14,
     "requiresIdVerification": false
   },
   {
     "name": "peoplelooker.com",
     "method": "web_form",
-    "optOutUrl": "https://www.peoplelooker.com/opt-out",
+    "optOutUrl": "https://www.peoplelooker.com/optout",
     "optOutEmail": null,
-    "instructions": "Owned by BeenVerified. May be covered by BeenVerified removal. If not, search for your listing, submit opt-out request with email verification. Removal within 48-72 hours.",
+    "instructions": "Search your name, select your record and confirm the verification email PeopleLooker sends. The site sends this address on to its current opt-out search page.",
     "estimatedDays": 3,
     "requiresIdVerification": false
   },
@@ -160,18 +160,18 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
   {
     "name": "truthfinder.com",
     "method": "web_form",
-    "optOutUrl": "https://www.truthfinder.com/opt-out/",
+    "optOutUrl": "https://suppression.peopleconnect.us/login",
     "optOutEmail": null,
-    "instructions": "Search for your record, submit opt-out request with record URL. Identity verification required (government ID). Processing takes 5-7 business days.",
+    "instructions": "One request in PeopleConnect's shared Suppression Center covers Intelius, TruthFinder, Instant Checkmate and US Search. Verify your email, find your record by name and date of birth, select it and choose to suppress it.",
     "estimatedDays": 7,
-    "requiresIdVerification": true
+    "requiresIdVerification": false
   },
   {
     "name": "ussearch.com",
     "method": "web_form",
-    "optOutUrl": "https://www.ussearch.com/opt-out",
+    "optOutUrl": "https://suppression.peopleconnect.us/login",
     "optOutEmail": null,
-    "instructions": "Part of PeopleConnect network (same as PeopleFinder). May be covered by PeopleFinder removal. If not, search for your record and submit direct opt-out form. Verify via email.",
+    "instructions": "One request in PeopleConnect's shared Suppression Center covers Intelius, TruthFinder, Instant Checkmate and US Search. Verify your email, find your record by name and date of birth, select it and choose to suppress it.",
     "estimatedDays": 7,
     "requiresIdVerification": false
   },
@@ -183,5 +183,109 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "instructions": "Enter listing URL and submit suppression request.",
     "estimatedDays": 3,
     "requiresIdVerification": false
+  }
+];
+
+export interface ScanSource {
+  name: string;
+  tier: "free" | "personal" | "premium";
+  manual: boolean;
+}
+
+export const SCAN_SOURCES: ScanSource[] = [
+  {
+    "name": "spokeo.com",
+    "tier": "free",
+    "manual": false
+  },
+  {
+    "name": "whitepages.com",
+    "tier": "free",
+    "manual": false
+  },
+  {
+    "name": "peoplefinder.com",
+    "tier": "free",
+    "manual": true
+  },
+  {
+    "name": "truepeoplesearch.com",
+    "tier": "free",
+    "manual": false
+  },
+  {
+    "name": "fastpeoplesearch.com",
+    "tier": "personal",
+    "manual": false
+  },
+  {
+    "name": "familytreenow.com",
+    "tier": "personal",
+    "manual": false
+  },
+  {
+    "name": "nuwber.com",
+    "tier": "personal",
+    "manual": false
+  },
+  {
+    "name": "beenverified.com",
+    "tier": "personal",
+    "manual": false
+  },
+  {
+    "name": "intelius.com",
+    "tier": "personal",
+    "manual": true
+  },
+  {
+    "name": "mylife.com",
+    "tier": "personal",
+    "manual": false
+  },
+  {
+    "name": "ussearch.com",
+    "tier": "personal",
+    "manual": false
+  },
+  {
+    "name": "peoplelooker.com",
+    "tier": "personal",
+    "manual": true
+  },
+  {
+    "name": "ownerly.com",
+    "tier": "personal",
+    "manual": true
+  },
+  {
+    "name": "instantcheckmate.com",
+    "tier": "personal",
+    "manual": true
+  },
+  {
+    "name": "radaris.com",
+    "tier": "personal",
+    "manual": false
+  },
+  {
+    "name": "truthfinder.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "thatsthem.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "smartbackgroundchecks.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "advancedbackgroundchecks.com",
+    "tier": "premium",
+    "manual": false
   }
 ];

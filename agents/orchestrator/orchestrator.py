@@ -1,6 +1,6 @@
 """
 VectorScrub AI Orchestrator
-Coordinates the agent pipelines. Three concurrent workers share this process:
+Coordinates the agent pipelines. Four concurrent workers share this process:
 
   Scan worker (Redis queue):
     1. Pull job from Redis queue
@@ -14,6 +14,9 @@ Coordinates the agent pipelines. Three concurrent workers share this process:
 
   Monitoring worker: verifies submitted removals and watches removed records for
   reappearance (see process_monitoring_jobs).
+
+  Opt-out health worker: once a day, checks that each broker's public opt-out page still
+  loads (see run_optout_health_checks). No customer data.
 
 This is the main entry point for the Python agent layer.
 """
@@ -38,6 +41,7 @@ from detection import DetectionAgent
 from discovery import DiscoveryAgent
 from monitoring.agent import MonitoringAgent
 from removal import RemovalAgent, RemovalExecutor
+from removal.health import OptOutHealthChecker
 from shared.backend_client import BackendClient, IdentityDenied, ScanJobLost
 from shared.config import get_config
 from shared.models import IdentityContext, ScanJobPayload, ScanJobStatus
@@ -550,6 +554,28 @@ class Orchestrator:
         except Exception as exc:
             log.error("fail_removal_report_failed", request_id=request_id, error_type=type(exc).__name__)
 
+    async def run_optout_health_checks(self) -> None:
+        """
+        Nightly check that each broker's public opt-out page still loads (see removal/health.py).
+        Public pages only, nothing submitted, no customer data. A failed run is logged and tried
+        again next cycle; it never affects scans, removals or monitoring.
+        """
+        if not self.cfg.optout_health_enabled:
+            log.info("optout_health_disabled")
+            return
+        log.info("optout_health_worker_started")
+        await asyncio.sleep(self.cfg.optout_health_startup_delay_seconds)
+        while True:
+            try:
+                checks = await OptOutHealthChecker().check_all()
+                await self.backend.report_optout_health(checks)
+            except asyncio.CancelledError:
+                log.info("optout_health_worker_shutting_down")
+                break
+            except Exception as exc:
+                log.error("optout_health_error", error_type=type(exc).__name__)
+            await asyncio.sleep(self.cfg.optout_health_interval_seconds)
+
     async def process_monitoring_jobs(self) -> None:
         """
         Continuous monitoring worker. Each cycle:
@@ -693,11 +719,12 @@ async def main() -> None:
     )
     orchestrator = Orchestrator()
 
-    # Run scan worker, removal worker, and monitoring worker concurrently
+    # Run the scan, removal and monitoring workers and the nightly opt-out page check concurrently
     await asyncio.gather(
         orchestrator.run_worker(),
         orchestrator.process_removal_jobs(),
         orchestrator.process_monitoring_jobs(),
+        orchestrator.run_optout_health_checks(),
     )
 
 

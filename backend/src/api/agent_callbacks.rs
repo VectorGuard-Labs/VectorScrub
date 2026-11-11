@@ -22,6 +22,7 @@ use crate::services::monitoring::{
     self as monitoring_svc, MonitoringError, MonitoringOutcome, MonitoringTarget,
     VerificationOutcome, VerificationTarget,
 };
+use crate::services::optout_health::{self, OptOutPageCheck, MAX_CHECKS_PER_REPORT};
 use crate::services::scan::StatusOutcome;
 use crate::services::{exposure as exposure_svc, scan as scan_svc};
 
@@ -390,5 +391,25 @@ pub async fn record_verification_result(
     )
     .await
     .map_err(monitoring_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OptOutHealthReport {
+    pub checks: Vec<OptOutPageCheck>,
+}
+
+/// PUT /api/v1/internal/optout-health
+/// The nightly report of which brokers' opt-out pages loaded. Public pages only: no customer
+/// data is involved, so no work item is required, just the agent key.
+pub async fn report_optout_health(
+    _auth: AgentAuth,
+    State(state): State<AppState>,
+    Json(req): Json<OptOutHealthReport>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if req.checks.len() > MAX_CHECKS_PER_REPORT || !req.checks.iter().all(OptOutPageCheck::is_valid) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid opt-out health report".into()));
+    }
+    optout_health::record_checks(&state.pool, &req.checks).await.map_err(internal_error)?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -82,6 +82,24 @@ class SourceOutcome(str, Enum):
     NOT_SUPPORTED = "not_supported"  # only searchable by an interactive form: needs a manual search
 
 
+class OptOutStatus(str, Enum):
+    """What happened when the nightly check fetched a broker's public opt-out page. Mirrors the
+    backend's `OptOutPageStatus`. "Reachable" means the page loaded for a plain HTTP request; it
+    does NOT mean an automated opt-out succeeds there."""
+    REACHABLE = "reachable"
+    CAPTCHA = "captcha"          # opens, but its form carries a CAPTCHA a person must complete
+    BLOCKED = "blocked"          # 401/403/451, or a "verify you are human" page
+    NOT_FOUND = "not_found"      # 404/410...: the registry link needs fixing
+    UNAVAILABLE = "unavailable"  # down, rate limited, redirected off-site, or unreachable
+
+
+class OptOutCheck(BaseModel):
+    """One broker's opt-out page, checked. Public information only: a site name and a status."""
+    source: str
+    status: OptOutStatus
+    http_status: Optional[int] = None
+
+
 class DiscoveryReport(BaseModel):
     """Candidates found, and what happened at every source. A scan that read 3 of 19
     sources and found nothing on the rest is not the same as one that read all 19."""

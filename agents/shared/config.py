@@ -54,6 +54,13 @@ class AgentConfig(BaseSettings):
     # Removal worker
     removal_request_delay_seconds: float = 5.0  # spacing between submissions to data sources
 
+    # Opt-out page health check: a nightly look at whether each broker's public opt-out page
+    # still loads (no customer data involved). See removal/health.py.
+    optout_health_enabled: bool = True
+    optout_health_interval_seconds: int = 86400
+    optout_health_startup_delay_seconds: int = 60     # let the other workers start first
+    optout_health_delay_seconds: float = 2.0          # politeness delay between sites
+
     # PII guard: person-name detection (spaCy) used before any text reaches an LLM
     pii_ner_model: str = "en_core_web_sm"
     # True (default): if the NER model cannot be loaded, LLM calls are blocked (fail

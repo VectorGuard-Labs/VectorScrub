@@ -29,12 +29,21 @@ class FakeBackend:
         self.scan_updates: list[dict] = []
         self.removal_updates: list[dict] = []
         self.audits: list[dict] = []
+        self.optout_reports: list[list] = []
+        self.optout_report_error: Exception | None = None
 
     def _log(self, *call):
         self.calls.append(call)
 
     def names(self):
         return [c[0] for c in self.calls]
+
+    # --- opt-out page health
+    async def report_optout_health(self, checks):
+        self._log("report_optout_health", len(checks))
+        if self.optout_report_error:
+            raise self.optout_report_error
+        self.optout_reports.append(list(checks))
 
     # --- scans
     async def claim_scan(self, job_id):

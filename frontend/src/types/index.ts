@@ -161,3 +161,14 @@ export interface BillingInfo {
   subscription: BillingSubscription | null;
   portal_url: string | null;
 }
+
+// Opt-out page health (nightly check of each broker's public opt-out page)
+export type OptOutPageStatus = "reachable" | "captcha" | "blocked" | "not_found" | "unavailable";
+
+export interface OptOutHealth {
+  source: string;
+  status: OptOutPageStatus;
+  checked_at: string;
+  /** The last time the page opened (even with a CAPTCHA); kept across later failures. */
+  last_reachable_at: string | null;
+}

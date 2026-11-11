@@ -551,12 +551,13 @@ chmod 600 .env
 python3 run_worker.py
 ```
 
-The worker connects to Redis and blocks waiting for scan jobs. It runs three concurrent loops: scan jobs, removal execution, and monitoring:
+The worker connects to Redis and blocks waiting for scan jobs. It runs four concurrent loops: scan jobs, removal execution, monitoring, and a nightly opt-out page check:
 
 ```
 {"event":"orchestrator_worker_started","queue":"vectorscrub:scan_jobs"}
 {"event":"removal_worker_started"}
 {"event":"monitoring_worker_started"}
+{"event":"optout_health_worker_started"}
 ```
 
 ### Step 7 — Start the frontend
@@ -758,6 +759,8 @@ Login and register are limited to 5 requests/minute per IP, and all customer rou
 |--------|----------|------|-------------|
 | `GET` | `/me` | JWT | Returns the authenticated customer's profile and privacy score. |
 | `POST` | `/me/identity` | JWT | Submit or update the identity profile (name, address, phones, emails). PII is encrypted immediately. |
+| `GET` | `/public/coverage` | none | Which brokers recent scans could read, across all customers: `{window_days, scans, sources:[{source, readable}]}`. A source is `readable` when at least half of the last 30 days' finished scans that tried it read it. Site names and a yes/no only; cacheable for 5 minutes. The pricing page uses it. `scans: 0` means nothing has been measured yet. |
+| `GET` | `/public/optout-health` | none | Whether each broker's public opt-out page opened at its last nightly check: `{checks:[{source, status, checked_at, last_reachable_at}]}`, `status` one of `reachable`, `captcha`, `blocked`, `not_found`, `unavailable`. **"Reachable" means the page loaded for a plain HTTP request, not that an automated opt-out works there.** Cacheable for 5 minutes. |
 | `GET` | `/me/billing` | JWT | Plans on offer (Stripe Payment Links carrying this customer's signed reference), the current subscription, and the customer-portal link. `enabled: false` when Stripe is not configured. |
 | `POST` | `/webhooks/stripe` | Stripe signature | Stripe's webhook. Authenticated by the `Stripe-Signature` header over the raw body (HMAC-SHA256, 5-minute tolerance), not by a session or CSRF token. `404` when billing is not configured, `400` for a bad signature, `5xx` on database failure so Stripe retries. |
 
@@ -807,6 +810,7 @@ All require `X-Agent-Key` (compared in constant time). Agents never receive a cu
 |--------|----------|-------------|
 | `POST` | `/internal/scan/:job_id/claim` | Claim a queued scan. Returns `{ attempt }`, or `409` if the job is not claimable (already claimed, finished, or unknown). The 24-hour scan token travels in the Redis queue payload, not in this response. |
 | `PUT` | `/internal/scan/status` | Update scan progress / heartbeat. Body includes `attempt`; a stale attempt (a worker whose job was requeued) gets `409`. The final update may carry `coverage`: `[{source, outcome}]` with `outcome` one of `checked`, `blocked`, `not_found`, `unavailable`, `unreadable`, `not_supported` (site names only, never URLs). It is stored before the final status, shown on the dashboard, and sets `sources_queued`. |
+| `PUT` | `/internal/optout-health` | Body `{checks:[{source, status, http_status}]}`: the nightly report of which brokers' public opt-out pages loaded. Public pages only, no customer data, so it needs the agent key but no work item. The whole report is refused if any entry is invalid. |
 | `POST` | `/internal/identity` | Body: `{ customer_id, job_id, identity_token }`. Releases the identity for a running scan whose token matches. |
 | `POST` | `/internal/exposures` | Record a confirmed exposure found by the detection agent. |
 | `GET` | `/internal/removal-requests` | Poll for authorized removal requests ready for execution. |
@@ -930,6 +934,16 @@ DROP is free to use directly, which creates an important product consideration: 
 - A unified privacy dashboard with a clear score and history
 
 ---
+
+### The California data broker directory
+
+The dashboard's opt-out guide includes every company in the [California Data Broker Registry](https://cppa.ca.gov/data_brokers/): 625 companies running 809 sites in the 2026 file, searchable by company or by site, each with the page where the company says to send privacy requests. The registry lists *every site a company runs*, which is also how the guide shows that, for example, ThatsThem and AnyWho are run by Spokeo, Inc.
+
+- **Import:** download the CSV from the Attorney General's site and run, from `agents/`, `python -m ca_registry.importer "/path/to/California Data Broker Registry 2026.csv"`. It writes `frontend/src/lib/ca-brokers.generated.ts` (tests in `tests/test_ca_registry.py`).
+- **What is kept:** company name, DBA, sites, privacy-request page(s), whether it is FCRA-regulated or based outside the US, and its self-reported 2024 deletion-request figures. **What is never kept:** contact emails, phone numbers and street addresses (several are individuals'), or anything that names a person. Every link must be an http(s) link to a real hostname.
+- **Self-reported, not audited.** The deletion figures are the companies' own reports and are very uneven: a few companies account for most requests, and some deny nearly all of theirs. The guide shows a rate only for companies with at least 20 requests.
+- **Not a scan list.** VectorScrub does not scan these sites; most are not people-search sites. They are a directory for manual requests.
+- **Not an email list.** The registry's contact email is the company's general contact for the regulator, not a channel for consumer requests (only about half are privacy-type addresses at the company's own domain), so it is not used to send deletion requests.
 
 ## Legal and Operational Risk
 

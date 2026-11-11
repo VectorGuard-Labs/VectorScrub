@@ -157,6 +157,25 @@ pub async fn has_identity(pool: &PgPool, customer_id: Uuid) -> Result<bool> {
         .await?)
 }
 
+/// The US state of the customer's saved address (two letters), or None when there is no
+/// address on file or its state cannot be told. Decrypts ONLY the address and returns ONLY the
+/// state, to the signed-in owner; nothing is stored. It is not an identity release: the
+/// address never leaves this function.
+pub async fn residence_state(
+    pool: &PgPool,
+    master: &MasterKey,
+    customer_id: Uuid,
+) -> Result<Option<&'static str>> {
+    let address_enc: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT address_enc FROM identity_profiles WHERE customer_id = $1")
+            .bind(customer_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(address_enc) = address_enc else { return Ok(None) };
+    let key = derive_customer_key(master, customer_id);
+    Ok(crate::services::residence::state_from_address(&decrypt_str(&key, &address_enc)?))
+}
+
 /// Load and decrypt an identity profile. Only services/identity_access.rs should call
 /// this on behalf of the agent layer: it enforces scoping and writes the audit record.
 /// The returned CleartextIdentity is zeroized on drop.

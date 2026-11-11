@@ -1,14 +1,32 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Shield, LogOut, ExternalLink, Mail, Info } from "lucide-react";
-import { listExposures, listScans, logout } from "@/lib/api";
+import { getOptOutHealth, listExposures, listScans, logout } from "@/lib/api";
+import { formatDate } from "@/lib/utils";
 import { BROKER_OPT_OUTS, type BrokerOptOut } from "@/lib/brokers.generated";
-import type { SourceOutcome } from "@/types";
+import CaRegistrySearch, { type RegistryData } from "@/components/CaRegistrySearch";
+import { ownersBySite } from "@/lib/caBrokerSearch";
+import type { OptOutHealth, OptOutPageStatus, SourceOutcome } from "@/types";
 
 // California's own free deletion service for residents. It is run by the state, not by us.
 const DROP_URL = "https://consumer.drop.privacy.ca.gov/";
+
+// A check older than this is shown as stale rather than as current.
+const STALE_AFTER_DAYS = 3;
+
+const PAGE_STATUS: Record<OptOutPageStatus, { text: string; style: string }> = {
+  reachable: { text: "Page opens", style: "text-green-400 border-green-800 bg-green-950" },
+  captcha: { text: "Page opens, form has a CAPTCHA", style: "text-yellow-300 border-yellow-800 bg-yellow-950" },
+  blocked: { text: "Blocked our check", style: "text-orange-300 border-orange-800 bg-orange-950" },
+  not_found: { text: "Link not working", style: "text-red-300 border-red-800 bg-red-950" },
+  unavailable: { text: "Could not check", style: "text-orange-300 border-orange-800 bg-orange-950" },
+};
+
+function isStale(h: OptOutHealth): boolean {
+  return Date.now() - new Date(h.checked_at).getTime() > STALE_AFTER_DAYS * 86_400_000;
+}
 
 const OUTCOME_LABEL: Record<SourceOutcome, { text: string; style: string }> = {
   checked: { text: "Checked in last scan", style: "text-green-400 border-green-800 bg-green-950" },
@@ -23,14 +41,23 @@ export default function OptOutsPage() {
   const router = useRouter();
   const [outcomes, setOutcomes] = useState<Record<string, SourceOutcome>>({});
   const [listed, setListed] = useState<Set<string>>(new Set());
+  const [health, setHealth] = useState<Record<string, OptOutHealth>>({});
+  const [registry, setRegistry] = useState<RegistryData | null>(null);
+  const [registryFailed, setRegistryFailed] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [scans, exposures] = await Promise.all([listScans(), listExposures()]);
+        // The page check is a nice-to-have: the guide works without it.
+        const [scans, exposures, checks] = await Promise.all([
+          listScans(),
+          listExposures(),
+          getOptOutHealth().catch(() => [] as OptOutHealth[]),
+        ]);
         if (cancelled) return;
+        setHealth(Object.fromEntries(checks.map((c) => [c.source, c])));
         const latest = [...scans.jobs]
           .filter((j) => j.status === "completed" || j.status === "failed")
           .sort((a, b) => new Date(b.queued_at).getTime() - new Date(a.queued_at).getTime())[0];
@@ -48,6 +75,23 @@ export default function OptOutsPage() {
       cancelled = true;
     };
   }, []);
+
+  // The California registry is a large file, so it is fetched after the page is up.
+  useEffect(() => {
+    let cancelled = false;
+    import("@/lib/ca-brokers.generated")
+      .then((m) => {
+        if (!cancelled) setRegistry({ brokers: m.CA_BROKERS, source: m.CA_BROKERS_SOURCE });
+      })
+      .catch(() => {
+        if (!cancelled) setRegistryFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const owners = useMemo(() => (registry ? ownersBySite(registry.brokers) : null), [registry]);
 
   function handleSignOut() {
     void logout().finally(() => router.push("/"));
@@ -116,8 +160,10 @@ export default function OptOutsPage() {
         <div className="flex items-start gap-2 text-gray-500 text-xs mb-4">
           <Info className="w-4 h-4 flex-shrink-0 mt-0.5" aria-hidden="true" />
           <span>
-            Links and steps are kept up to date as best we can, but sites change their pages. If a link does
-            not work, search for the site&apos;s name plus &quot;opt out&quot;.
+            Every night we check that each site&apos;s opt-out page still opens. That only tells you the link is
+            alive: it does not mean an automated opt-out works there, and some sites treat our check
+            differently from a person in a browser. If a link does not work, search for the site&apos;s name
+            plus &quot;opt out&quot;.
           </span>
         </div>
 
@@ -127,6 +173,9 @@ export default function OptOutsPage() {
           <ul className="space-y-3">
             {brokers.map((b) => {
               const outcome = outcomes[b.name];
+              const page = health[b.name];
+              const company = owners?.get(b.name);
+              const siblings = company ? company.sites.filter((s) => s !== b.name) : [];
               return (
                 <li key={b.name} className="bg-gray-900 border border-gray-800 rounded-xl p-5">
                   <div className="flex flex-wrap items-center gap-2 mb-1">
@@ -142,7 +191,36 @@ export default function OptOutsPage() {
                       </span>
                     )}
                   </div>
+                  {page && (
+                    <p className="flex flex-wrap items-center gap-2 text-xs mb-1">
+                      {isStale(page) ? (
+                        <span className="px-2 py-0.5 rounded-full border text-gray-400 border-gray-700 bg-gray-800">
+                          Not checked recently
+                        </span>
+                      ) : (
+                        <span className={`px-2 py-0.5 rounded-full border ${PAGE_STATUS[page.status].style}`}>
+                          {PAGE_STATUS[page.status].text}
+                        </span>
+                      )}
+                      <span className="text-gray-500">
+                        Checked {formatDate(page.checked_at)}
+                        {page.status !== "reachable" && page.status !== "captcha" && page.last_reachable_at
+                          ? ` · last opened ${formatDate(page.last_reachable_at)}`
+                          : ""}
+                      </span>
+                    </p>
+                  )}
                   <p className="text-gray-400 text-sm">{b.instructions}</p>
+                  {company && (
+                    <p className="text-gray-500 text-xs mt-1">
+                      Run by {company.name}
+                      {siblings.length > 0
+                        ? `, which also runs ${siblings.slice(0, 4).join(", ")}${
+                            siblings.length > 4 ? ` and ${siblings.length - 4} more` : ""
+                          }.`
+                        : "."}
+                    </p>
+                  )}
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-sm">
                     {b.method === "email" && b.optOutEmail ? (
                       <a
@@ -173,6 +251,12 @@ export default function OptOutsPage() {
             })}
           </ul>
         )}
+
+        <CaRegistrySearch
+          data={registry}
+          failed={registryFailed}
+          ourSites={new Set(BROKER_OPT_OUTS.map((b) => b.name))}
+        />
       </main>
     </div>
   );
