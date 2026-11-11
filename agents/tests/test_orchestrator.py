@@ -19,7 +19,10 @@ import orchestrator.orchestrator as orch_mod
 from detection import DetectionReport
 from orchestrator.orchestrator import Orchestrator
 from shared.backend_client import IdentityDenied, ScanJobLost
-from shared.models import DetectionResult, ExposureSeverity, PiiCategory, ScanJobPayload
+from shared.models import (
+    DetectionResult, DiscoveryReport, DiscoveryResult, ExposureSeverity, PiiCategory, ScanJobPayload,
+    SourceOutcome,
+)
 from tests.fakes import FakeBackend
 
 CUSTOMER = str(uuid.uuid4())
@@ -30,6 +33,19 @@ def payload(job_id=None) -> ScanJobPayload:
         job_id=job_id or uuid.uuid4(), customer_id=uuid.UUID(CUSTOMER),
         identity_token="scoped-token-for-this-job", tier="premium",
     )
+
+
+def discovery_report() -> DiscoveryReport:
+    """5 sources: 2 read, 3 not (blocked, moved, down)."""
+    found = [
+        DiscoveryResult(source_name=n, source_url=f"https://www.{n}/x", raw_text_snippet="text", confidence=0.9)
+        for n in ("spokeo.com", "radaris.com")
+    ]
+    return DiscoveryReport(candidates=found, outcomes={
+        "spokeo.com": SourceOutcome.CHECKED, "radaris.com": SourceOutcome.CHECKED,
+        "whitepages.com": SourceOutcome.BLOCKED, "peoplefinder.com": SourceOutcome.NOT_FOUND,
+        "nuwber.com": SourceOutcome.UNAVAILABLE,
+    })
 
 
 def detection() -> DetectionResult:
@@ -49,7 +65,7 @@ def orch(monkeypatch):
 
     class Discovery:
         def __init__(self, tier): pass
-        async def run(self, identity): return ["candidate-1", "candidate-2"]
+        async def run_report(self, identity): return discovery_report()
 
     class Detection:
         report = DetectionReport(confirmed=[detection()], checked=2, failed=0)
@@ -83,6 +99,26 @@ async def test_the_happy_path_claims_then_fetches_scoped_identity_then_completes
     assert (final["status"], final["attempt"], final["exposures_found"]) == ("completed", 4, 1)
 
 
+async def test_a_completed_scan_reports_which_sources_could_not_be_read(orch):
+    """3 of 5 sources refused or failed: the scan must say so instead of looking like a clean sweep."""
+    await orch.process_job(payload())
+    final = orch.backend.scan_updates[-1]
+    assert final["status"] == "completed"
+    assert (final["sources_completed"], final["sources_failed"]) == (2, 3)
+    assert final["coverage"] == [
+        {"source": "spokeo.com", "outcome": "checked"}, {"source": "radaris.com", "outcome": "checked"},
+        {"source": "whitepages.com", "outcome": "blocked"}, {"source": "peoplefinder.com", "outcome": "not_found"},
+        {"source": "nuwber.com", "outcome": "unavailable"},
+    ]
+
+
+async def test_coverage_carries_only_site_names_and_outcomes(orch):
+    await orch.process_job(payload())
+    for entry in orch.backend.scan_updates[-1]["coverage"]:
+        assert set(entry) == {"source", "outcome"}
+        assert "/" not in entry["source"] and "http" not in entry["source"], "a hostname, never a URL (URLs embed names)"
+
+
 async def test_a_scan_where_pages_could_not_be_analyzed_is_failed_not_reported_clean(orch, monkeypatch):
     """An LLM outage used to produce COMPLETED / 0 exposures, i.e. a perfect privacy score."""
     class AllFailed:
@@ -95,7 +131,9 @@ async def test_a_scan_where_pages_could_not_be_analyzed_is_failed_not_reported_c
 
     final = orch.backend.scan_updates[-1]
     assert final["status"] == "failed" and final["attempt"] == 3
-    assert (final["sources_failed"], final["sources_completed"], final["exposures_found"]) == (5, 0, 0)
+    # 3 sources were never readable, and all 5 candidate pages that were read failed analysis
+    assert (final["sources_failed"], final["sources_completed"], final["exposures_found"]) == (8, 0, 0)
+    assert len(final["coverage"]) == 5, "a failed scan still says what it could and could not read"
     assert "run the scan again" in final["error_message"] and "5 of 5" in final["error_message"]
     assert "completed" not in [u["status"] for u in orch.backend.scan_updates]
 
@@ -111,7 +149,8 @@ async def test_a_partly_analyzed_scan_keeps_what_it_found_but_is_still_failed(or
     assert "record_exposure" in orch.backend.names(), "real findings are not thrown away"
     final = orch.backend.scan_updates[-1]
     assert final["status"] == "failed"
-    assert (final["sources_completed"], final["sources_failed"], final["exposures_found"]) == (3, 1, 1)
+    # 2 of 5 sources were read; one of those pages then failed analysis. 3 were never readable.
+    assert (final["sources_completed"], final["sources_failed"], final["exposures_found"]) == (1, 4, 1)
 
 
 async def test_a_scan_with_nothing_to_analyze_still_completes_clean(orch, monkeypatch):
@@ -122,13 +161,15 @@ async def test_a_scan_with_nothing_to_analyze_still_completes_clean(orch, monkey
     monkeypatch.setattr(orch_mod, "DetectionAgent", NoCandidates)
     await orch.process_job(payload())
     final = orch.backend.scan_updates[-1]
-    assert (final["status"], final["sources_failed"], final["exposures_found"]) == ("completed", 0, 0)
+    # nothing to analyze is a completed scan, but the 3 sources that could not be read are
+    # still reported, so "0 exposures" is never presented as "all 5 sources are clear"
+    assert (final["status"], final["sources_failed"], final["exposures_found"]) == ("completed", 3, 0)
 
 
 async def test_a_failing_scan_reports_failed_with_the_attempt_and_a_message_that_leaks_nothing(orch, monkeypatch):
     class Boom:
         def __init__(self, tier): pass
-        async def run(self, identity):
+        async def run_report(self, identity):
             raise RuntimeError("GET https://www.spokeo.com/Jane-Smith/Austin failed: password=hunter2")
 
     monkeypatch.setattr(orch_mod, "DiscoveryAgent", Boom)
@@ -159,9 +200,9 @@ async def test_an_identity_refusal_fails_the_scan_cleanly(orch):
 async def test_heartbeats_are_sent_with_the_attempt_while_work_is_slow(orch, monkeypatch):
     class Slow:
         def __init__(self, tier): pass
-        async def run(self, identity):
+        async def run_report(self, identity):
             await asyncio.sleep(0.4)
-            return []
+            return DiscoveryReport()
 
     monkeypatch.setattr(orch_mod, "DiscoveryAgent", Slow)
     orch.backend.claim_result = 7
@@ -178,11 +219,11 @@ async def test_when_the_backend_says_the_job_is_lost_the_worker_stops_working(or
 
     class Hang:
         def __init__(self, tier): pass
-        async def run(self, identity):
+        async def run_report(self, identity):
             started.append(1)
             await asyncio.sleep(30)   # would run for 30s if not stopped
             finished.append(1)
-            return []
+            return DiscoveryReport()
 
     monkeypatch.setattr(orch_mod, "DiscoveryAgent", Hang)
     orch.backend.update_errors = [ScanJobLost("job")]  # the first heartbeat is refused
@@ -196,9 +237,9 @@ async def test_when_the_backend_says_the_job_is_lost_the_worker_stops_working(or
 async def test_transient_heartbeat_failures_do_not_kill_the_scan(orch, monkeypatch):
     class Slow:
         def __init__(self, tier): pass
-        async def run(self, identity):
+        async def run_report(self, identity):
             await asyncio.sleep(0.3)
-            return []
+            return DiscoveryReport()
 
     monkeypatch.setattr(orch_mod, "DiscoveryAgent", Slow)
     orch.backend.update_errors = [httpx.ConnectError("blip"), httpx.ConnectError("blip")]
@@ -209,7 +250,7 @@ async def test_transient_heartbeat_failures_do_not_kill_the_scan(orch, monkeypat
 async def test_shutting_down_mid_scan_leaves_the_job_for_recovery(orch, monkeypatch):
     class Hang:
         def __init__(self, tier): pass
-        async def run(self, identity):
+        async def run_report(self, identity):
             await asyncio.sleep(30)
 
     monkeypatch.setattr(orch_mod, "DiscoveryAgent", Hang)

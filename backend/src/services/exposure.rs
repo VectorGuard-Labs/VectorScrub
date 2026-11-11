@@ -107,7 +107,9 @@ pub async fn get_exposure_summary(pool: &PgPool, customer_id: Uuid) -> Result<Ex
     };
 
     let last_scan_at = sqlx::query_scalar::<_, Option<OffsetDateTime>>(
-        "SELECT MAX(queued_at) FROM scan_jobs WHERE customer_id = $1 AND status = 'completed'",
+        // When the scan FINISHED (queued_at only for rows from before completion was recorded).
+        "SELECT MAX(COALESCE(completed_at, queued_at)) FROM scan_jobs \
+         WHERE customer_id = $1 AND status = 'completed'",
     )
     .bind(customer_id)
     .fetch_one(pool)

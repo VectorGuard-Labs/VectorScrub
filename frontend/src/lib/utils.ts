@@ -46,6 +46,24 @@ export function formatDate(iso: string | null | undefined): string {
   });
 }
 
+/** A date with the time, in the viewer's own time zone: "Nov 11, 2026, 12:09 PM". */
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+
+  const date = new Date(iso);
+  if (isNaN(date.getTime())) {
+    return "—";
+  }
+
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 export function piiCategoryLabel(cat: string): string {
   const labels: Record<string, string> = {
     full_name: "Full Name",

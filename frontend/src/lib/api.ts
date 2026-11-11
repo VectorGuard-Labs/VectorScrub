@@ -4,6 +4,7 @@
  */
 import type {
   AuthResponse,
+  BillingInfo,
   CustomerProfile,
   Exposure,
   ExposureSummary,
@@ -114,6 +115,12 @@ export async function logout(): Promise<void> {
 export async function getProfile(): Promise<CustomerProfile> {
   const res = await csrfFetch(`${BASE}/me`, { headers: jsonHeaders() });
   return handleResponse<CustomerProfile>(res);
+}
+
+// Billing
+export async function getBilling(): Promise<BillingInfo> {
+  const res = await csrfFetch(`${BASE}/me/billing`, { headers: jsonHeaders() });
+  return handleResponse<BillingInfo>(res);
 }
 
 // Identity

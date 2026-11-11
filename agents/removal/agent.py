@@ -16,7 +16,9 @@ from shared.models import DetectionResult, RemovalProcedure
 log = structlog.get_logger(__name__)
 
 # Opt-out procedure registry.
-# In production this grows to 600+ entries covering the DROP ecosystem
+# Brokers with a verified opt-out procedure. California's DROP is deliberately NOT here: it
+# is a free service residents use themselves (the dashboard links to it), and no consumer-side
+# submission API has been verified.
 # and individual site procedures. Stored in DB for hot-reloading.
 OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
     "spokeo.com": RemovalProcedure(
@@ -185,16 +187,6 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
         instructions="Two steps: submit name and email, follow the verification link, then complete the removal form.",
         requires_id_verification=False,
         estimated_days=7,
-    ),
-    # California DROP platform (batch submission for 600+ brokers)
-    "ca-drop": RemovalProcedure(
-        source_name="California DROP Platform",
-        procedure_type="drop_api",
-        opt_out_url="https://privacy.ca.gov/data-deletion/",
-        instructions="Submit via California's official DELETE Request and Opt-Out Platform. "
-                     "Eligible California residents only. Covers 600+ registered data brokers.",
-        requires_id_verification=True,
-        estimated_days=45,
     ),
 }
 

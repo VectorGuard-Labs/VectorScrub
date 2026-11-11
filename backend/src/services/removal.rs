@@ -5,6 +5,10 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+/// How many opt-out submissions a Free account may make in total. Requests that failed (our
+/// side, a CAPTCHA, a changed form) do not count: the customer got nothing from them.
+pub const FREE_REMOVAL_LIMIT: i64 = 3;
+
 /// Creates a removal request for a specific exposure with status=authorized.
 /// Also creates the first audit log entry.
 /// Fails with `RemovalError::AlreadyInFlight` if a request for this exposure is already
@@ -17,6 +21,17 @@ pub async fn authorize_removal(
     exposure_id: Uuid,
 ) -> Result<RemovalRequest> {
     let mut tx = pool.begin().await.context("begin transaction")?;
+
+    // Lock the customer's row so two simultaneous authorizations cannot both pass the Free
+    // limit check below.
+    let tier: Option<String> = sqlx::query_scalar(
+        "SELECT subscription_tier::text FROM customers WHERE id = $1 FOR UPDATE",
+    )
+    .bind(customer_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("lock customer")?;
+    let tier = tier.ok_or(RemovalError::NotFound)?;
 
     // Only an in-flight request blocks a new authorization. Requests that ended in
     // failed / rejected / unverifiable / reappeared / verified_removed are terminal,
@@ -35,6 +50,19 @@ pub async fn authorize_removal(
 
     if existing.is_some() {
         return Err(RemovalError::AlreadyInFlight.into());
+    }
+
+    if tier == "free" {
+        let used: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM removal_requests WHERE customer_id = $1 AND status <> 'failed'",
+        )
+        .bind(customer_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("count removal requests")?;
+        if used >= FREE_REMOVAL_LIMIT {
+            return Err(RemovalError::FreeLimitReached.into());
+        }
     }
 
     // Get exposure details for denormalization
@@ -126,17 +154,20 @@ pub async fn list_removal_requests(
     Ok(requests)
 }
 
-/// Returns all removal requests with a specific status.
-/// Used by agents to poll for pending work.
+/// Returns removal requests with a specific status, at most 100.
+/// Used by agents to poll for pending work. Premium customers' requests come first, then
+/// Personal, then Free, oldest first within each (this is the "priority" in Premium).
 pub async fn list_removal_requests_by_status(
     pool: &PgPool,
     status: RemovalStatus,
 ) -> Result<Vec<RemovalRequest>> {
     let requests = sqlx::query_as(
         r#"
-        SELECT * FROM removal_requests
-        WHERE status = $1
-        ORDER BY created_at ASC
+        SELECT r.* FROM removal_requests r
+        JOIN customers c ON c.id = r.customer_id
+        WHERE r.status = $1
+        ORDER BY CASE c.subscription_tier WHEN 'premium' THEN 0 WHEN 'personal' THEN 1 ELSE 2 END,
+                 r.created_at ASC
         LIMIT 100
         "#,
     )
@@ -173,6 +204,8 @@ pub enum RemovalError {
     NotFound,
     #[error("a removal request for this exposure is already in flight")]
     AlreadyInFlight,
+    #[error("the Free plan's opt-out limit has been reached")]
+    FreeLimitReached,
     #[error("illegal removal status transition: {from:?} -> {to:?}")]
     IllegalTransition { from: RemovalStatus, to: RemovalStatus },
 }

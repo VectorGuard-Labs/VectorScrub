@@ -8,6 +8,7 @@ use crate::middleware::rate_limiter;
 
 mod agent_callbacks;
 pub mod auth;
+pub mod billing;
 pub mod client_ip;
 mod csrf;
 mod customers;
@@ -46,6 +47,10 @@ pub fn router(state: AppState) -> Router {
             // Customer profile & identity
             .route("/me", get(customers::get_profile))
             .route("/me/identity", post(customers::submit_identity))
+            // Billing: plans on offer and current subscription
+            .route("/me/billing", get(billing::get_billing))
+            // Stripe calls this; authenticated by its signature, not a session (see handler)
+            .route("/webhooks/stripe", post(billing::stripe_webhook))
             // Scans
             .route("/scans", post(scans::initiate))
             .route("/scans", get(scans::list))

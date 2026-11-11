@@ -106,7 +106,7 @@ SMTP_PASSWORD=<your-smtp-password>
 SMTP_FROM_EMAIL=noreply@yourdomain.com
 SMTP_USE_TLS=true
 
-# Optional: California DROP API
+# California DROP API (UNUSED: no customer flow reads these; safe to omit)
 DROP_API_URL=https://privacy.ca.gov/api/v1
 DROP_API_KEY=<your-drop-key>
 DROP_API_SECRET=<your-drop-secret>

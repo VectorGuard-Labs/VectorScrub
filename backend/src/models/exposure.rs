@@ -47,8 +47,11 @@ pub struct Exposure {
     /// Confidence score from the detection agent (0.0 - 1.0)
     pub confidence: f32,
     pub is_active: bool,
+    #[serde(with = "time::serde::rfc3339")]
     pub discovered_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub last_verified_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub removed_at: Option<OffsetDateTime>,
 }
 
@@ -65,5 +68,6 @@ pub struct ExposureSummary {
     pub low_count: i64,
     pub privacy_score: f32,
     pub sources_affected: Vec<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_scan_at: Option<OffsetDateTime>,
 }

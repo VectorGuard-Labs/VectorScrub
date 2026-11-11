@@ -100,7 +100,7 @@ A detection agent analyzes each discovery candidate using a large language model
 Remaining limits: a person whose name is spelled exactly like an allowed structural word would pass through that word alone; and the vocabulary list is curated for English-language pages, so non-English structural words are dropped (safe, but the model loses that signal).
 
 ### 3. Automated Removal Request Submission
-For each confirmed exposure, VectorScrub identifies the correct opt-out procedure for that specific data source — web form, email submission, or the California DROP API. After explicit customer authorization, VectorScrub automatically submits removal requests using Playwright browser automation for web forms, capturing screenshots as evidence and extracting confirmation references.
+For each confirmed exposure, VectorScrub identifies the correct opt-out procedure for that specific data source — web form or email submission. After explicit customer authorization, VectorScrub automatically submits removal requests using Playwright browser automation for web forms, capturing screenshots as evidence and extracting confirmation references.
 
 ### 4. Removal Tracking and Verification
 Every removal request is tracked through its full lifecycle: authorized → submitted → (acknowledged) → verified removed. VectorScrub distinguishes between these states clearly so customers always know the true status of their records — not just that a request was sent, but whether removal was actually confirmed. All actions are logged to an immutable, append-only audit trail enforced at the database level.
@@ -138,7 +138,7 @@ VectorScrub encrypts all customer identity data with AES-256-GCM using a unique 
 The Privacy Score tracks over time, so customers can see the concrete impact of removals and understand whether their exposure footprint is growing or shrinking.
 
 ### Support for California DROP
-California residents can take advantage of the state's official Delete Request and Opt-Out Platform (DROP), which covers 600+ registered data brokers in a single submission. VectorScrub integrates DROP as one removal pathway alongside its own direct opt-out coverage.
+California residents can use the state's official Delete Request and Opt-Out Platform (DROP), a free service that covers the registered data brokers in a single submission. VectorScrub does **not** submit to DROP for you; the dashboard's opt-out guide links residents to the state's site so they can do it themselves.
 
 ---
 
@@ -177,8 +177,8 @@ Customer Identity Profile (encrypted)
            │  customer authorizes via dashboard
            ▼
   ┌─────────────────────┐
-  │  Removal Executor   │  Submits via Playwright (web forms),
-  │                     │  email, or DROP API; captures evidence
+  │  Removal Executor   │  Submits via Playwright (web forms)
+  │                     │  or email; captures evidence
   └────────┬────────────┘
            │  verification + monitoring (migration 0006)
            ▼
@@ -272,14 +272,25 @@ Security is the core architectural constraint, not an afterthought. Every design
 
 | Plan     | Price/month | Key Features |
 |----------|-------------|--------------|
-| **Free**     | $0     | Initial exposure scan (4 sources), privacy score, exposure report |
-| **Personal** | $8.99  | 15 sources, automated removal requests, continuous monitoring (monthly re-check), monthly rescan, alerts |
-| **Premium**  | $14.99 | Everything in Personal + expanded source coverage (19 sources: TruthFinder, ThatsThem, SmartBackgroundChecks and AdvancedBackgroundChecks on top of Personal's 15), priority removal, weekly rescan and weekly reappearance re-check, evidence collection |
+| **Free**     | $0     | One scan every 7 days (4 sources), up to 3 automated opt-outs, manual opt-out guide, privacy score |
+| **Early Access** (tier `personal`) | $4.99, monthly only | 15 sources, unlimited automated opt-outs for the listings found, progress tracking, monthly rescan and reappearance re-check, alerts. Founding members keep their price (see *Price changes* below) |
+| **Premium** (not on sale) | $14.99 | Not sold at present: no price or payment link is configured, and it is hidden from the site. Its extra four sources are currently all blocked, so it would add little. Everything in Early Access + expanded source coverage (19 sources: TruthFinder, ThatsThem, SmartBackgroundChecks and AdvancedBackgroundChecks on top of Personal's 15), priority removal, weekly rescan and weekly reappearance re-check, evidence collection |
 
 All plans are per person. A Family tier ($24.99, up to 4 members) existed in earlier versions and was removed; migration `0005_remove_family_tier.sql` moved any existing Family customers to Premium.
 
-Free accounts are limited to one scan per 24 hours and are never rescanned or monitored automatically. Paid accounts can initiate multiple scans per day and have access to a wider range of data sources depending on tier.
+Free accounts are limited to one scan every 7 days, up to 3 automated opt-out requests (requests that fail do not count), and are never rescanned or monitored automatically. The paid plan has no opt-out limit and gets automatic rescans and reappearance checks (Early Access monthly, Premium weekly if it is ever sold). Premium also scans 4 more brokers (19, not 15) and its opt-out requests are handed to the agents before Personal and Free ones. Many brokers block automated requests, so scan coverage is reported per source and the dashboard has a manual opt-out guide generated from the same registry the agent uses.
 
+
+### Billing (Stripe)
+
+Plans are sold through Stripe Payment Links and managed in Stripe's Customer Portal. The backend never sees card details.
+
+- **Buying.** The billing page (`/dashboard/billing`) links to the Payment Link for each plan, adding the customer's id (HMAC-signed, so it cannot be edited to credit another account) and email. Annual plans are the monthly price x 10, billed yearly.
+- **Upgrading.** Only a Stripe webhook changes a plan. `checkout.session.completed` ties the subscription to the account; `customer.subscription.created|updated|deleted` carry its status and price. Each is stored as a snapshot in `stripe_subscriptions` and the plan is **recomputed** from the customer's entitled subscriptions (`active`, `trialing`, `past_due`), so duplicate, out-of-order and retried events converge on the same result. Paid plans switch monitoring on; Free switches it off.
+- **Cancelling.** The customer cancels in the portal; the subscription stays active until the paid period ends, and Stripe's `customer.subscription.deleted` then drops the account to Free. A subscription whose payments finally fail is cancelled by Stripe and drops the same way.
+- **Accounts without a subscription** (for example one set to Premium by hand for testing) are never touched by the webhook.
+- **Setup.** Fill the `STRIPE_*` block in the root `.env` (see `.env.example`), add a webhook endpoint in Stripe pointing at `https://<your-api>/api/v1/webhooks/stripe` for the events `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated` and `customer.subscription.deleted`, and put its signing secret in `STRIPE_WEBHOOK_SECRET`. For local development: `stripe listen --forward-to localhost:8080/api/v1/webhooks/stripe` prints a temporary signing secret to use.
+- **Not implemented:** refunds and disputes (handle them in Stripe; cancelling the subscription is what removes the plan), proration display, invoices in the app, tax.
 ---
 
 ## Project Structure
@@ -536,14 +547,16 @@ playwright install chromium
 #   ANTHROPIC_API_KEY=<your key>     # or OPENAI_API_KEY with DEFAULT_LLM_PROVIDER=openai
 chmod 600 .env
 
-python -m orchestrator.orchestrator
+# Run from agents/, NOT the repo root: the root .env is refused.
+python3 run_worker.py
 ```
 
-The worker connects to Redis and blocks waiting for scan jobs. It now runs two concurrent loops: one for scan jobs, one for removal execution:
+The worker connects to Redis and blocks waiting for scan jobs. It runs three concurrent loops: scan jobs, removal execution, and monitoring:
 
 ```
 {"event":"orchestrator_worker_started","queue":"vectorscrub:scan_jobs"}
 {"event":"removal_worker_started"}
+{"event":"monitoring_worker_started"}
 ```
 
 ### Step 7 — Start the frontend
@@ -653,8 +666,8 @@ cargo build --release
 cd agents
 source .venv/bin/activate
 
-# Run the orchestrator worker (runs both scan and removal workers)
-python -m orchestrator.orchestrator
+# Run the worker (scan, removal and monitoring loops)
+python3 run_worker.py
 
 # Run individual agents in isolation for testing
 python -c "
@@ -745,6 +758,8 @@ Login and register are limited to 5 requests/minute per IP, and all customer rou
 |--------|----------|------|-------------|
 | `GET` | `/me` | JWT | Returns the authenticated customer's profile and privacy score. |
 | `POST` | `/me/identity` | JWT | Submit or update the identity profile (name, address, phones, emails). PII is encrypted immediately. |
+| `GET` | `/me/billing` | JWT | Plans on offer (Stripe Payment Links carrying this customer's signed reference), the current subscription, and the customer-portal link. `enabled: false` when Stripe is not configured. |
+| `POST` | `/webhooks/stripe` | Stripe signature | Stripe's webhook. Authenticated by the `Stripe-Signature` header over the raw body (HMAC-SHA256, 5-minute tolerance), not by a session or CSRF token. `404` when billing is not configured, `400` for a bad signature, `5xx` on database failure so Stripe retries. |
 
 ### Scans
 
@@ -791,7 +806,7 @@ All require `X-Agent-Key` (compared in constant time). Agents never receive a cu
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/internal/scan/:job_id/claim` | Claim a queued scan. Returns `{ attempt }`, or `409` if the job is not claimable (already claimed, finished, or unknown). The 24-hour scan token travels in the Redis queue payload, not in this response. |
-| `PUT` | `/internal/scan/status` | Update scan progress / heartbeat. Body includes `attempt`; a stale attempt (a worker whose job was requeued) gets `409`. |
+| `PUT` | `/internal/scan/status` | Update scan progress / heartbeat. Body includes `attempt`; a stale attempt (a worker whose job was requeued) gets `409`. The final update may carry `coverage`: `[{source, outcome}]` with `outcome` one of `checked`, `blocked`, `not_found`, `unavailable`, `unreadable`, `not_supported` (site names only, never URLs). It is stored before the final status, shown on the dashboard, and sets `sources_queued`. |
 | `POST` | `/internal/identity` | Body: `{ customer_id, job_id, identity_token }`. Releases the identity for a running scan whose token matches. |
 | `POST` | `/internal/exposures` | Record a confirmed exposure found by the detection agent. |
 | `GET` | `/internal/removal-requests` | Poll for authorized removal requests ready for execution. |
@@ -904,7 +919,7 @@ Known limits of the monitoring implementation are listed under [Legal and Operat
 
 California's [Delete Request and Opt-Out Platform (DROP)](https://privacy.ca.gov/data-deletion/) launched in January 2026. It allows eligible California residents to submit a single deletion request to more than 600 registered data brokers simultaneously. Data brokers began processing DROP requests on August 1, 2026.
 
-VectorScrub's Phase 2 roadmap includes DROP integration as a first-class removal pathway for California residents — handling the identity verification flow, submitting requests through the official platform, and tracking responses alongside VectorScrub's own direct opt-out coverage.
+VectorScrub does **not** integrate with DROP. An earlier version of this document, and some code, described a DROP submission pathway. No consumer-side submission API was ever verified (the API California publishes is for data brokers to download deletion lists), so the registry entry was removed and `submit_drop_api` in `removal/executor.py` is marked unverified and is not reachable from any customer flow. The dashboard's opt-out guide instead links California residents to the official site.
 
 DROP is free to use directly, which creates an important product consideration: VectorScrub must deliver meaningful ongoing value beyond what DROP provides in a single submission. That value comes from:
 
@@ -913,7 +928,6 @@ DROP is free to use directly, which creates an important product consideration: 
 - Multi-state coverage (not just California)
 - Sources that are exempt from DROP or require individual opt-outs
 - A unified privacy dashboard with a clear score and history
-- Per-person accounts, so each family member gets their own profile, score, and removal history
 
 ---
 
@@ -1059,6 +1073,10 @@ There is no automated retention or erasure job. The earlier `data_retention.rs` 
 
 ---
 
+### Price changes and the founding-member price lock
+
+The sold price is the *first* id in `STRIPE_PRICE_PERSONAL_MONTHLY`; earlier ids after it (comma-separated) are prices existing members still pay. To raise the price: create the new Stripe price and Payment Link, then set `STRIPE_PRICE_PERSONAL_MONTHLY=<new>,<old>` and replace the link. Existing subscriptions stay on the old price in Stripe and keep their plan here, new customers pay the new price. Premium and annual plans are simply left unset until they are worth selling; a plan with no link is not offered.
+
 ## Competitive Landscape
 
 | Service | Price/month | Brokers Covered | AI Capability | Security Posture |
@@ -1066,7 +1084,7 @@ There is no automated retention or erasure job. The earlier `data_retention.rs` 
 | Incogni | $7.99 | 420+ | Basic automation | Standard |
 | Optery | $3.99–$24.99 | 635+ | Screenshots, some AI | Standard |
 | DeleteMe | ~$9.00 | 750+ | Managed human-assisted | Standard |
-| **VectorScrub** | **$8.99–$14.99** | **Growing** | **Multi-agent AI pipeline** | **AES-256-GCM, zero raw PII to LLMs, append-only audit log** |
+| **VectorScrub** | **$4.99 (early access)** | **Growing** | **Multi-agent AI pipeline** | **AES-256-GCM, zero raw PII to LLMs, append-only audit log** |
 
 VectorScrub's differentiation is not the number of sites covered — it is the quality of the AI reasoning, the transparency of the removal evidence, and the security posture around customer data.
 

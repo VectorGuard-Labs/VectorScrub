@@ -41,30 +41,37 @@ pub async fn authorize(
     auth: AuthenticatedCustomer,
     Path(exposure_id): Path<Uuid>,
     State(state): State<AppState>,
-) -> Result<Json<AuthorizeRemovalResponse>, StatusCode> {
+) -> Result<Json<AuthorizeRemovalResponse>, (StatusCode, String)> {
     // Verify exposure belongs to customer
     let exposure = crate::services::exposure::get_exposure(&state.pool, exposure_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(super::error::internal_error)?
+        .ok_or((StatusCode::NOT_FOUND, "Exposure not found".to_string()))?;
 
     if exposure.customer_id != auth.id {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, "Not your exposure".to_string()));
     }
 
     if !exposure.is_active {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err((StatusCode::BAD_REQUEST, "This exposure is no longer active".to_string()));
     }
 
     let request = removal::authorize_removal(&state.pool, auth.id, exposure_id)
         .await
         .map_err(|e| match e.downcast_ref::<removal::RemovalError>() {
-            Some(removal::RemovalError::AlreadyInFlight) => StatusCode::CONFLICT,
-            Some(removal::RemovalError::NotFound) => StatusCode::NOT_FOUND,
-            _ => {
-                tracing::error!(error = ?e, "Failed to authorize removal");
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Some(removal::RemovalError::AlreadyInFlight) => (
+                StatusCode::CONFLICT,
+                "A removal request for this exposure is already in progress".to_string(),
+            ),
+            Some(removal::RemovalError::NotFound) => (StatusCode::NOT_FOUND, "Exposure not found".to_string()),
+            Some(removal::RemovalError::FreeLimitReached) => (
+                StatusCode::FORBIDDEN,
+                format!(
+                    "Free accounts can submit up to {} opt-out requests. Upgrade to Personal to continue.",
+                    removal::FREE_REMOVAL_LIMIT
+                ),
+            ),
+            _ => super::error::internal_error(format!("{e:?}")),
         })?;
 
     audit::AuditEntry::builder(audit::actions::EXPOSURE_AUTHORIZE_REMOVAL, audit::resources::EXPOSURE)
@@ -189,7 +196,7 @@ pub async fn update_status(
     .map_err(|e| match e.downcast_ref::<removal::RemovalError>() {
         Some(removal::RemovalError::NotFound) => StatusCode::NOT_FOUND,
         Some(removal::RemovalError::IllegalTransition { .. }) => StatusCode::CONFLICT,
-        Some(removal::RemovalError::AlreadyInFlight) | None => {
+        Some(removal::RemovalError::AlreadyInFlight | removal::RemovalError::FreeLimitReached) | None => {
             tracing::error!(error = %e, "Failed to update removal status");
             StatusCode::INTERNAL_SERVER_ERROR
         }

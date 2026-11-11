@@ -16,7 +16,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from shared.circuit_breaker import CircuitBreakerConfig, CircuitOpenError, get_circuit_breaker
 from shared.config import get_config
-from shared.models import DiscoveryResult, IdentityContext
+from shared.models import DiscoveryReport, DiscoveryResult, IdentityContext, SourceOutcome
 from shared.page_text import MIN_PAGE_TEXT_CHARS, extract_text, looks_blocked, surname_of, window_around_surname
 from shared.safe_fetch import FetchBlocked, ResponseTooLarge, safe_get
 
@@ -36,6 +36,12 @@ class SourceUnhealthy(Exception):
 
 log = structlog.get_logger(__name__)
 
+# Sources marked "manual" show results only through an interactive search (a form, then a
+# sign-up flow); there is no address with a name in it that returns a listing, so they cannot
+# be checked automatically. As of Nov 2026: their own help pages describe searching by form, and
+# the address patterns that were configured for them returned 404 (Ownerly is a property-records
+# site, not a people search). They are not fetched and are reported to the customer as needing
+# a manual search, instead of being counted as checked or as failures.
 # Supported data broker sources
 # FREE tier: 4 brokers (acquisition tier)
 # PERSONAL: those 4 plus 11 more (15 total)
@@ -60,6 +66,7 @@ DISCOVERY_SOURCES = [
         "name": "peoplefinder.com",
         "url": "https://www.peoplefinder.com/search/?q={name}",
         "tier": "free",
+        "manual": True,
     },
     {
         "name": "truepeoplesearch.com",
@@ -91,6 +98,7 @@ DISCOVERY_SOURCES = [
         "name": "intelius.com",
         "url": "https://www.intelius.com/people-search/",
         "tier": "personal",
+        "manual": True,
     },
     {
         "name": "mylife.com",
@@ -106,16 +114,19 @@ DISCOVERY_SOURCES = [
         "name": "peoplelooker.com",
         "url": "https://www.peoplelooker.com/results?fn={first}&ln={last}",
         "tier": "personal",
+        "manual": True,
     },
     {
         "name": "ownerly.com",
         "url": "https://www.ownerly.com/people/{name_slug}",
         "tier": "personal",
+        "manual": True,
     },
     {
         "name": "instantcheckmate.com",
         "url": "https://www.instantcheckmate.com/people/{name_slug}/",
         "tier": "personal",
+        "manual": True,
     },
     {
         "name": "radaris.com",
@@ -150,6 +161,21 @@ DISCOVERY_SOURCES = [
 TIER_ORDER = {"free": 0, "personal": 1, "premium": 2}
 
 
+# HTTP statuses, grouped by what they mean for the customer. 429 and 5xx never get this far
+# (they raise SourceUnhealthy first); any other status is treated as "unavailable".
+BLOCKED_STATUSES = frozenset({401, 403, 451})
+NOT_FOUND_STATUSES = frozenset({400, 404, 405, 410})
+
+
+def outcome_for_status(status: int) -> SourceOutcome:
+    """What a non-200 answer means: the site refuses us, the address is wrong, or it is down."""
+    if status in BLOCKED_STATUSES:
+        return SourceOutcome.BLOCKED
+    if status in NOT_FOUND_STATUSES:
+        return SourceOutcome.NOT_FOUND
+    return SourceOutcome.UNAVAILABLE
+
+
 class DiscoveryAgent:
     """
     Searches supported data brokers for a customer's personal information.
@@ -158,6 +184,8 @@ class DiscoveryAgent:
 
     def __init__(self, tier: str = "free") -> None:
         self.tier = tier
+        # What happened at each source during this run, filled in by _fetch_source.
+        self._outcomes: dict[str, SourceOutcome] = {}
         self.cfg = get_config()
         self._tier_level = TIER_ORDER.get(tier, 0)
 
@@ -224,30 +252,42 @@ class DiscoveryAgent:
             resp = await breaker.execute_async(get)
         except CircuitOpenError:
             log.info("discovery_skipped_circuit_open", source=source_name)
+            self._outcomes[source_name] = SourceOutcome.UNAVAILABLE
             return []
         except SourceUnhealthy as exc:
             log.warning("discovery_source_unhealthy", source=source_name, status=exc.args[0])
+            self._outcomes[source_name] = SourceOutcome.UNAVAILABLE
             return []
         except FetchBlocked as exc:
             log.warning("discovery_fetch_blocked", source=source_name, reason=exc.reason)
+            self._outcomes[source_name] = SourceOutcome.UNAVAILABLE
             return []
         except ResponseTooLarge:
             log.warning("discovery_response_too_large", source=source_name)
+            self._outcomes[source_name] = SourceOutcome.UNREADABLE
             return []
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             # Type only: transport error text can embed the URL, and the URL embeds the name.
             log.warning("discovery_fetch_failed", source=source_name, error_type=type(exc).__name__)
+            self._outcomes[source_name] = SourceOutcome.UNAVAILABLE
             return []
 
         if resp.status != 200:
             log.debug("discovery_non_200", source=source_name, status=resp.status)
+            self._outcomes[source_name] = outcome_for_status(resp.status)
             return []
 
         # Visible text, not raw HTML, so markup and scripts do not count as matches.
         page_text = extract_text(resp.text)
         if len(page_text) < MIN_PAGE_TEXT_CHARS or looks_blocked(page_text):
             log.debug("discovery_unusable_page", source=source_name, length=len(page_text))
+            # A CAPTCHA / "verify you are human" page is a refusal; an empty shell is not.
+            self._outcomes[source_name] = (
+                SourceOutcome.BLOCKED if looks_blocked(page_text) else SourceOutcome.UNREADABLE
+            )
             return []
+        # From here the page was read, whether or not it lists the customer.
+        self._outcomes[source_name] = SourceOutcome.CHECKED
         text = page_text.lower()
         results = []
 
@@ -286,11 +326,24 @@ class DiscoveryAgent:
         Run discovery across all sources for this tier.
         Returns a list of candidate DiscoveryResults for the Detection Agent.
         """
-        search_targets = self._build_search_urls(identity)
+        return (await self.run_report(identity)).candidates
+
+    async def run_report(self, identity: IdentityContext) -> DiscoveryReport:
+        """
+        Like `run`, and also reports what happened at every source, so a scan that could
+        only read a few sites is not mistaken for one that read them all.
+        """
+        self._outcomes = {}
+        all_targets = self._build_search_urls(identity)
+        manual = {src["name"] for src in self._sources_for_tier() if src.get("manual")}
+        search_targets = [t for t in all_targets if t[0] not in manual]
+        for name in manual:
+            self._outcomes[name] = SourceOutcome.NOT_SUPPORTED
         log.info(
             "discovery_started",
             customer_id=str(identity.customer_id),
-            source_count=len(search_targets),
+            source_count=len(all_targets),
+            fetchable=len(search_targets),
         )
 
         all_results: list[DiscoveryResult] = []
@@ -304,15 +357,25 @@ class DiscoveryAgent:
             tasks = [fetch_with_sem(client, name, url) for name, url in search_targets]
             batches = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for batch in batches:
+        for (name, _), batch in zip(search_targets, batches):
             if isinstance(batch, Exception):
                 log.error("discovery_source_error", error_type=type(batch).__name__)
+                self._outcomes[name] = SourceOutcome.UNAVAILABLE
                 continue
             all_results.extend(batch)
+
+        # Every source gets an entry, in the order searched; one that recorded nothing is
+        # treated as not checked rather than silently dropped.
+        outcomes = {
+            name: self._outcomes.get(name, SourceOutcome.UNAVAILABLE) for name, _ in all_targets
+        }
+        report = DiscoveryReport(candidates=all_results, outcomes=outcomes)
 
         log.info(
             "discovery_completed",
             customer_id=str(identity.customer_id),
             candidates_found=len(all_results),
+            sources_checked=report.checked,
+            sources_total=report.total,
         )
-        return all_results
+        return report

@@ -48,17 +48,21 @@ Hardening conventions:
 - Client IP (audit and rate limiting share `api/client_ip.rs`) is the TCP peer unless `TRUST_PROXY_HEADERS=true`, then the `X-Forwarded-For` entry `TRUSTED_PROXY_HOPS` places from the right. Never the leftmost entry: it is client-controlled.
 - Password hashing uses the `*_async` functions in `services/auth.rs` (blocking pool, concurrency-capped), never Argon2 directly in a handler. Account emails compare case-insensitively (`lower(email)`).
 - Both `audit_log` and `removal_audit_log` are guarded by triggers that reject UPDATE/DELETE/TRUNCATE (`audit_log` allows only pseudonymization).
+- Scan coverage is reported per source (`checked | blocked | not_found | unavailable | unreadable | not_supported`) and shown to the customer; a scan must never read as a clean sweep of sites it could not read. Sources flagged `manual` in `discovery/agent.py` have no name-addressable search and are not fetched. Do not add code that defeats bot protection (CAPTCHA solving, disguised browsers, proxy rotation).
+- California DROP is not integrated (no verified consumer-side API). Do not advertise it as a feature; the dashboard links residents to the state's site. Pricing copy must match what is implemented: Free = 3 automated opt-outs (`FREE_REMOVAL_LIMIT`), paid plans unlimited, Premium requests ordered first for the agents.
+- `frontend/src/lib/brokers.generated.ts` is generated from `OPT_OUT_REGISTRY` (`python -m removal.frontend_export` from `agents/`); a test fails when it is stale.
 - There is no HSM/KMS, no automated data retention, and no Rust circuit breaker. Do not document them as existing.
-- Tests and CI: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cd agents && python -m pytest`, frontend typecheck and build. After changing a `sqlx::query!` macro run `infra/scripts/sqlx_prepare.sh` and commit `backend/.sqlx/`. Keep `backend/Cargo.lock` tracked.
+- Tests and CI: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cd agents && python -m pytest`, frontend typecheck and build. After changing a `sqlx::query!` macro run `infra/scripts/sqlx_prepare.sh` and commit `backend/.sqlx/`. Keep `backend/Cargo.lock` tracked. Point `TEST_REDIS_URL` at a scratch database (default `/14`), never the dev one: a test deletes the scan queue key.
+- Billing (Stripe, `services/billing.rs`): only a signature-verified webhook changes `subscription_tier`; the browser returning from checkout changes nothing. A plan is recomputed from the customer's entitled `stripe_subscriptions` rows, never applied as an upgrade/downgrade delta, so duplicate and out-of-order events are safe. Cancelling drops to Free at period end (`customer.subscription.deleted`). The `client_reference_id` in checkout links is HMAC-signed. `STRIPE_WEBHOOK_SECRET` is backend-only (in `BACKEND_ONLY_SECRETS`). `stripe_subscriptions` stores no personal data; do not store checkout payloads. Accounts with no Stripe subscription are never touched by the webhook.
 
 ## Subscription Tiers
 All plans are per person. There is no Family tier (removed in migration 0005).
 
 | Tier     | Price/mo | Key Features                                                      |
 |----------|----------|-------------------------------------------------------------------|
-| Free     | $0       | One scan/24h, exposure report only, no monitoring                 |
-| Personal | $8.99    | Automated removal, continuous monitoring (monthly re-check)       |
-| Premium  | $14.99   | Expanded sources, weekly rescan and re-check, evidence            |
+| Free     | $0       | One scan/7d, 3 automated opt-outs, manual opt-out guide, no monitoring |
+| Personal (sold as "Early Access") | $4.99, monthly only | Unlimited automated opt-outs, monitoring (monthly re-check); founding price locked via legacy price ids |
+| Premium  | not on sale | 19 sources (Personal 15), weekly rescan and re-check, requests processed first. Hidden: no price/link configured. Its 4 extra sources are all blocked today |
 
 ## Running Locally
 See README.md for setup instructions.

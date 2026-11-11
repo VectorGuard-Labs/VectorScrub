@@ -9,4 +9,5 @@ pub mod monitoring;
 pub mod notification;
 pub mod privacy_score;
 pub mod removal;
+pub mod billing;
 pub mod scan;

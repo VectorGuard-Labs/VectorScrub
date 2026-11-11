@@ -71,6 +71,36 @@ class DiscoveryResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class SourceOutcome(str, Enum):
+    """What happened when discovery tried to read one source. Mirrors the backend's
+    `CoverageOutcome`; the values are what the dashboard shows the customer."""
+    CHECKED = "checked"          # the page was read (whether it lists the customer is separate)
+    BLOCKED = "blocked"          # the site refused automated access (401/403, CAPTCHA page)
+    NOT_FOUND = "not_found"      # the search address no longer works (404/410...)
+    UNAVAILABLE = "unavailable"  # down, rate limited, circuit open, or unreachable
+    UNREADABLE = "unreadable"    # loaded, but showed no readable results (e.g. built by JavaScript)
+    NOT_SUPPORTED = "not_supported"  # only searchable by an interactive form: needs a manual search
+
+
+class DiscoveryReport(BaseModel):
+    """Candidates found, and what happened at every source. A scan that read 3 of 19
+    sources and found nothing on the rest is not the same as one that read all 19."""
+    candidates: list[DiscoveryResult] = Field(default_factory=list)
+    outcomes: dict[str, SourceOutcome] = Field(default_factory=dict)
+
+    @property
+    def checked(self) -> int:
+        return sum(1 for o in self.outcomes.values() if o is SourceOutcome.CHECKED)
+
+    @property
+    def total(self) -> int:
+        return len(self.outcomes)
+
+    def coverage(self) -> list[dict[str, str]]:
+        """The wire form sent to the backend: public site names and outcomes, nothing else."""
+        return [{"source": name, "outcome": outcome.value} for name, outcome in self.outcomes.items()]
+
+
 class DetectionResult(BaseModel):
     """Confirmed PII exposure after detection agent analysis."""
     source_name: str

@@ -25,8 +25,11 @@ pub struct Customer {
     pub privacy_score: Option<f32>,
     pub is_verified: bool,
     pub is_active: bool,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_scan_at: Option<OffsetDateTime>,
 }
 
@@ -43,7 +46,9 @@ pub struct IdentityProfile {
     pub phone_numbers_enc: Vec<u8>,
     pub email_addresses_enc: Vec<u8>,
     pub date_of_birth_enc: Option<Vec<u8>>,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -96,7 +101,9 @@ pub struct CustomerProfile {
     pub subscription_tier: SubscriptionTier,
     pub privacy_score: Option<f32>,
     pub is_verified: bool,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_scan_at: Option<OffsetDateTime>,
 }
 

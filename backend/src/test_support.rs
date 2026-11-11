@@ -172,6 +172,7 @@ pub fn test_config() -> crate::services::config::AppConfig {
         scan_stale_after_secs: 600,
         scan_redispatch_after_secs: 600,
         scan_max_attempts: 3,
+        stripe: None,
     }
 }
 

@@ -167,7 +167,9 @@ class Orchestrator:
 
             # Phase 1a: Discovery
             discovery_agent = DiscoveryAgent(tier=payload.tier)
-            candidates = await discovery_agent.run(identity)
+            discovery = await discovery_agent.run_report(identity)
+            candidates = discovery.candidates
+            unchecked = discovery.total - discovery.checked
 
             # Phase 1b: Detection
             detection_agent = DetectionAgent()
@@ -194,13 +196,16 @@ class Orchestrator:
                     checked=report.checked,
                     failed=report.failed,
                     confirmed=len(confirmed_exposures),
+                    sources_unchecked=unchecked,
                 )
                 await self.backend.update_scan_status(
                     job_id,
                     ScanJobStatus.FAILED,
                     attempt=attempt,
-                    sources_completed=report.checked - report.failed,
-                    sources_failed=report.failed,
+                    # Sources whose pages were read and analyzed; the rest could not be.
+                    sources_completed=max(discovery.checked - report.failed, 0),
+                    sources_failed=unchecked + report.failed,
+                    coverage=discovery.coverage(),
                     exposures_found=len(confirmed_exposures),
                     error_message=(
                         f"The scan was incomplete: {report.failed} of {report.checked} possible "
@@ -216,14 +221,17 @@ class Orchestrator:
                 candidates=len(candidates),
                 confirmed=len(confirmed_exposures),
                 removal_procedures_found=sources_with_procedures,
+                sources_checked=discovery.checked,
+                sources_unchecked=unchecked,
             )
 
             await self.backend.update_scan_status(
                 job_id,
                 ScanJobStatus.COMPLETED,
                 attempt=attempt,
-                sources_completed=report.checked,
-                sources_failed=0,
+                sources_completed=discovery.checked,
+                sources_failed=unchecked,
+                coverage=discovery.coverage(),
                 exposures_found=len(confirmed_exposures),
             )
 

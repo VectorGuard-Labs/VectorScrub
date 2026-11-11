@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::crypto::MasterKey;
 use crate::models::customer::SubscriptionTier;
-use crate::models::scan_job::{ScanJob, ScanJobPayload, ScanJobStatus};
+use crate::models::scan_job::{ScanJob, ScanJobPayload, ScanJobStatus, SourceCoverage};
 use crate::services::{exposure as exposure_svc, identity_access};
 
 pub const SCAN_QUEUE_KEY: &str = "vectorscrub:scan_jobs";
@@ -39,10 +39,10 @@ pub async fn initiate_scan(
     customer_id: Uuid,
     tier: &SubscriptionTier,
 ) -> Result<ScanJob, ScanError> {
-    // Per-tier scan limit. Development: 1 minute for testing, production: 24 hours.
+    // Per-tier scan limit. Development: 1 minute for testing, production: 7 days.
     // A scan that failed (for example the analysis service was down) does not count: the
     // customer got nothing from it and must be able to run it again.
-    let rate_limit_interval = if cfg!(debug_assertions) { "1 minute" } else { "24 hours" };
+    let rate_limit_interval = if cfg!(debug_assertions) { "1 minute" } else { "7 days" };
     let recent_scan: Option<(OffsetDateTime,)> = sqlx::query_as(&format!(
         "SELECT queued_at FROM scan_jobs WHERE customer_id = $1 AND status <> 'failed' \
          AND queued_at > NOW() - INTERVAL '{rate_limit_interval}' ORDER BY queued_at DESC LIMIT 1"
@@ -55,7 +55,7 @@ pub async fn initiate_scan(
         return Err(ScanError::RateLimited(if cfg!(debug_assertions) {
             "Free accounts can run one scan per minute (dev mode)"
         } else {
-            "Free accounts can run one scan per 24 hours"
+            "Free accounts can run one scan every 7 days"
         }));
     }
 
@@ -71,6 +71,14 @@ pub async fn initiate_scan(
     .bind(customer_id)
     .fetch_one(pool)
     .await?;
+
+    // Any scan, manual or scheduled, restarts the clock the rescan scheduler counts from.
+    // Before this only the scheduler set it, so a customer who scanned by hand was scanned
+    // again straight away, and `/me` never showed a last scan.
+    sqlx::query("UPDATE customers SET last_scan_at = NOW() WHERE id = $1")
+        .bind(customer_id)
+        .execute(pool)
+        .await?;
 
     if let Err(e) = dispatch_job(pool, redis, master, job.id, customer_id, &tier_name(tier)).await {
         tracing::error!(job_id = %job.id, error = %e,
@@ -178,6 +186,29 @@ pub enum StatusOutcome {
     /// The job is not running under this attempt (finished, requeued, or taken over by
     /// another worker). The caller must stop working on it.
     Stale,
+}
+
+/// Store which sources the scan could and could not read. Applies only under the same
+/// conditions as a status update (job running, same attempt), so a worker that lost the job
+/// cannot overwrite the new attempt's report. Written BEFORE the final status, so a customer
+/// who sees "completed" always sees its coverage too.
+pub async fn record_coverage(
+    pool: &PgPool,
+    job_id: Uuid,
+    attempt: Option<i32>,
+    coverage: &[SourceCoverage],
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE scan_jobs SET coverage = $2, sources_queued = $3 \
+         WHERE id = $1 AND status = 'running' AND ($4::int IS NULL OR attempts = $4)",
+    )
+    .bind(job_id)
+    .bind(serde_json::to_value(coverage)?)
+    .bind(i32::try_from(coverage.len())?)
+    .bind(attempt)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Progress / completion report from the worker holding the job. Applies only if the

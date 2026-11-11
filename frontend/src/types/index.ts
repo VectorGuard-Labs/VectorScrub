@@ -72,6 +72,20 @@ export interface ExposureSummary {
   last_scan_at: string | null;
 }
 
+export type SourceOutcome =
+  | "checked"
+  | "blocked"
+  | "not_found"
+  | "unavailable"
+  | "unreadable"
+  | "not_supported";
+
+/** What happened when a scan tried to read one source. `source` is a site name, never a URL. */
+export interface SourceCoverage {
+  source: string;
+  outcome: SourceOutcome;
+}
+
 export interface ScanJob {
   id: string;
   customer_id: string;
@@ -81,6 +95,8 @@ export interface ScanJob {
   sources_failed: number;
   exposures_found: number;
   error_message: string | null;
+  /** Per-source outcomes; null for scans that ran before coverage was recorded. */
+  coverage: SourceCoverage[] | null;
   queued_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -117,4 +133,31 @@ export interface RemovalAuditEntry {
   actor: string;
   details: Record<string, unknown>;
   recorded_at: string;
+}
+
+// Billing
+export type BillingIntervalName = "month" | "year";
+
+export interface BillingPlan {
+  tier: "personal" | "premium";
+  interval: BillingIntervalName;
+  /** Stripe Payment Link with this customer's signed reference already attached. */
+  checkout_url: string;
+}
+
+export interface BillingSubscription {
+  tier: "personal" | "premium";
+  interval: BillingIntervalName;
+  status: string;
+  /** True once the customer has cancelled; the plan stays until current_period_end. */
+  cancel_at_period_end: boolean;
+  current_period_end: string | null;
+}
+
+export interface BillingInfo {
+  /** False when the server has no Stripe configuration. */
+  enabled: boolean;
+  plans: BillingPlan[];
+  subscription: BillingSubscription | null;
+  portal_url: string | null;
 }

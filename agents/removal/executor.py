@@ -666,6 +666,12 @@ This request was submitted via VectorScrub Privacy Protection Platform
         self, procedure: RemovalProcedure, identity: IdentityContext
     ) -> dict:
         """
+        UNVERIFIED, and not reachable from any customer flow (there is no registry entry that
+        uses it). The endpoint and credentials model below were never checked against a real
+        consumer-side DROP API; California's published DROP API is for data brokers to download
+        deletion lists. Kept for its tests only; do not wire it up without confirming with the
+        California Privacy Protection Agency that such an API exists.
+
         Submits removal request to California DROP (Delete Request and Opt-Out Platform) API.
 
         The DROP platform allows California residents to submit deletion requests

@@ -16,7 +16,7 @@ use crate::db::AppState;
 use crate::middleware::auth_extractor::AgentAuth;
 use crate::models::customer::CleartextIdentity;
 use crate::models::exposure::{ExposureSeverity, PiiCategory};
-use crate::models::scan_job::ScanJobStatus;
+use crate::models::scan_job::{ScanJobStatus, SourceCoverage, MAX_COVERAGE_ENTRIES};
 use crate::services::identity_access::{self, AccessError};
 use crate::services::monitoring::{
     self as monitoring_svc, MonitoringError, MonitoringOutcome, MonitoringTarget,
@@ -58,6 +58,9 @@ pub struct ScanStatusUpdate {
     pub exposures_found: Option<i32>,
     #[validate(length(max = 1000))]
     pub error_message: Option<String>,
+    /// Per-source outcomes of the discovery step (see `SourceCoverage`). Sent with the final
+    /// status. Names are checked below; an unknown outcome is refused by deserialization.
+    pub coverage: Option<Vec<SourceCoverage>>,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -91,6 +94,16 @@ pub async fn update_scan_status(
     // Workers may report progress, success, or failure. Queued/cancelled are not theirs to set.
     if !matches!(req.status, ScanJobStatus::Running | ScanJobStatus::Completed | ScanJobStatus::Failed) {
         return Err((StatusCode::BAD_REQUEST, "Status must be running, completed, or failed".into()));
+    }
+
+    if let Some(coverage) = &req.coverage {
+        if coverage.len() > MAX_COVERAGE_ENTRIES || !coverage.iter().all(SourceCoverage::is_valid) {
+            return Err((StatusCode::BAD_REQUEST, "Invalid coverage report".into()));
+        }
+        // Before the status, so "completed" never reaches the customer without its coverage.
+        scan_svc::record_coverage(&state.pool, req.job_id, req.attempt, coverage)
+            .await
+            .map_err(internal_error)?;
     }
 
     let outcome = scan_svc::update_scan_status(

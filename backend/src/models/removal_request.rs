@@ -69,11 +69,17 @@ pub struct RemovalRequest {
     pub confirmation_ref: Option<String>,
     /// Evidence URL or screenshot hash proving removal
     pub evidence_hash: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     pub customer_authorized_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub submitted_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub verified_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub next_check_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -87,6 +93,7 @@ pub struct RemovalAuditEntry {
     pub action: String,
     pub actor: String,
     pub details: serde_json::Value,
+    #[serde(with = "time::serde::rfc3339")]
     pub recorded_at: OffsetDateTime,
 }
 

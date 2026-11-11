@@ -225,6 +225,10 @@ pub mod actions {
 
     // Removals
     pub const EXPOSURE_AUTHORIZE_REMOVAL: &str = "exposure.authorize_removal";
+
+    // Billing
+    /// A Stripe event changed the customer's plan (upgrade, downgrade, or cancellation).
+    pub const BILLING_PLAN_CHANGED: &str = "billing.plan_changed";
 }
 
 /// Resource types

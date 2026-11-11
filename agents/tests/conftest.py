@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Hermetic: a developer shell often exports DATABASE_URL and friends, which the agents
 # deliberately refuse to run with (shared.config.assert_no_backend_secrets).
-for _name in ("MASTER_ENCRYPTION_KEY", "JWT_SECRET", "DATABASE_URL", "POSTGRES_PASSWORD"):
+for _name in ("MASTER_ENCRYPTION_KEY", "JWT_SECRET", "DATABASE_URL", "POSTGRES_PASSWORD", "STRIPE_WEBHOOK_SECRET"):
     os.environ.pop(_name, None)
 
 os.environ.update(

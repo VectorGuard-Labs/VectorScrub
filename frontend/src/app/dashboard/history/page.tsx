@@ -239,6 +239,12 @@ export default function HistoryPage() {
             Removals
           </button>
           <button
+            onClick={() => router.push("/dashboard/billing")}
+            className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
+          >
+            Billing
+          </button>
+          <button
             onClick={handleSignOut}
             className="flex items-center gap-1.5 text-gray-400 hover:text-white text-sm transition-colors"
             aria-label="Sign out"

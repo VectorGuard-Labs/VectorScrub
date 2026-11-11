@@ -97,10 +97,13 @@ class BackendClient:
         sources_failed: int | None = None,
         exposures_found: int | None = None,
         error_message: str | None = None,
+        coverage: list[dict[str, str]] | None = None,
     ) -> None:
         """
         Report progress (`running`, which also counts as a heartbeat), completion, or failure.
-        Raises ScanJobLost if the backend says this worker no longer holds the job.
+        `coverage` is the per-source outcome list (public site names and outcomes only), sent
+        with the final status. Raises ScanJobLost if the backend says this worker no longer
+        holds the job.
         """
         payload = {
             "job_id": job_id,
@@ -110,6 +113,7 @@ class BackendClient:
             "sources_failed": sources_failed,
             "exposures_found": exposures_found,
             "error_message": error_message,
+            "coverage": coverage,
         }
         async with self._client() as client:
             resp = await client.put(

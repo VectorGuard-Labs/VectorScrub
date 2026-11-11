@@ -35,6 +35,131 @@ pub struct AppConfig {
     pub scan_stale_after_secs: i64,
     pub scan_redispatch_after_secs: i64,
     pub scan_max_attempts: i32,
+    /// Stripe billing. `None` (no `STRIPE_WEBHOOK_SECRET`) leaves billing switched off: the
+    /// webhook answers 404 and no plan is ever changed by it.
+    pub stripe: Option<StripeConfig>,
+}
+
+/// A paid plan. Ordered, so the highest of a customer's subscriptions is `max()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PaidTier {
+    Personal,
+    Premium,
+}
+
+impl PaidTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaidTier::Personal => "personal",
+            PaidTier::Premium => "premium",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BillingInterval {
+    Month,
+    Year,
+}
+
+impl BillingInterval {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BillingInterval::Month => "month",
+            BillingInterval::Year => "year",
+        }
+    }
+}
+
+/// One purchasable plan: which Stripe price it is, and the Stripe Payment Link that sells it.
+#[derive(Debug, Clone)]
+pub struct StripePlan {
+    pub tier: PaidTier,
+    pub interval: BillingInterval,
+    /// The price currently sold for this plan (the first id listed in `STRIPE_PRICE_*`).
+    pub price_id: String,
+    /// Earlier prices of this plan, still honoured for people who subscribed at them (the
+    /// ids after the first). This is the "price lock": raising the price creates a new Stripe
+    /// price, and existing members stay on the old one and keep their plan.
+    pub legacy_price_ids: Vec<String>,
+    /// The Payment Link selling `price_id`.
+    pub link: Option<String>,
+}
+
+impl StripePlan {
+    /// Whether a subscription at this Stripe price entitles the customer to this plan.
+    pub fn sells(&self, price_id: &str) -> bool {
+        self.price_id == price_id || self.legacy_price_ids.iter().any(|p| p == price_id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StripeConfig {
+    /// Signing secret of the webhook endpoint (`whsec_...`). Verifies that a webhook really
+    /// came from Stripe, and keys the signature on the customer reference in checkout links.
+    pub webhook_secret: String,
+    pub plans: Vec<StripePlan>,
+    /// Stripe Customer Portal login link, where customers cancel, switch plan or change card.
+    pub portal_url: Option<String>,
+}
+
+impl StripeConfig {
+    /// Read the Stripe settings. Messages name the variable, never its value.
+    fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Result<Option<Self>> {
+        let nonblank = |key: &str| get(key).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        let Some(webhook_secret) = nonblank("STRIPE_WEBHOOK_SECRET") else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            webhook_secret.len() >= 16,
+            "STRIPE_WEBHOOK_SECRET looks too short to be a Stripe signing secret (whsec_...)"
+        );
+
+        let mut plans: Vec<StripePlan> = Vec::new();
+        for (tier, tier_name) in [(PaidTier::Personal, "PERSONAL"), (PaidTier::Premium, "PREMIUM")] {
+            for (interval, interval_name) in
+                [(BillingInterval::Month, "MONTHLY"), (BillingInterval::Year, "ANNUAL")]
+            {
+                let price_key = format!("STRIPE_PRICE_{tier_name}_{interval_name}");
+                let link_key = format!("STRIPE_LINK_{tier_name}_{interval_name}");
+                let Some(raw_prices) = nonblank(&price_key) else { continue };
+                // "price_current" or "price_current,price_older,...": see StripePlan.
+                let mut ids = raw_prices.split(',').map(str::trim).filter(|v| !v.is_empty());
+                let Some(price_id) = ids.next().map(String::from) else { continue };
+                let legacy_price_ids: Vec<String> = ids.map(String::from).collect();
+                for id in std::iter::once(&price_id).chain(&legacy_price_ids) {
+                    anyhow::ensure!(
+                        id.starts_with("price_"),
+                        "{price_key} must list Stripe price ids (price_...), separated by commas"
+                    );
+                    anyhow::ensure!(
+                        !plans.iter().any(|p| p.sells(id)),
+                        "{price_key} repeats a price id already used by another plan"
+                    );
+                }
+                anyhow::ensure!(
+                    !legacy_price_ids.contains(&price_id)
+                        && legacy_price_ids.iter().enumerate().all(|(i, id)| !legacy_price_ids[..i].contains(id)),
+                    "{price_key} lists the same price id twice"
+                );
+                let link = nonblank(&link_key);
+                if let Some(l) = &link {
+                    anyhow::ensure!(l.starts_with("https://"), "{link_key} must be an https:// link");
+                }
+                plans.push(StripePlan { tier, interval, price_id, legacy_price_ids, link });
+            }
+        }
+        anyhow::ensure!(
+            !plans.is_empty(),
+            "STRIPE_WEBHOOK_SECRET is set but no STRIPE_PRICE_* variable is: the webhook could not tell which plan was bought"
+        );
+
+        let portal_url = nonblank("STRIPE_PORTAL_URL");
+        if let Some(u) = &portal_url {
+            anyhow::ensure!(u.starts_with("https://"), "STRIPE_PORTAL_URL must be an https:// link");
+        }
+        Ok(Some(Self { webhook_secret, plans, portal_url }))
+    }
 }
 
 /// Secrets shorter than this are rejected at startup. 32 bytes matches the strength of
@@ -181,6 +306,7 @@ impl AppConfig {
             scan_stale_after_secs: env_parse(&get, "SCAN_STALE_AFTER_SECS", 600)?,
             scan_redispatch_after_secs: env_parse(&get, "SCAN_REDISPATCH_AFTER_SECS", 600)?,
             scan_max_attempts: env_parse(&get, "SCAN_MAX_ATTEMPTS", 3)?,
+            stripe: StripeConfig::from_lookup(&get)?,
         })
     }
 
@@ -371,5 +497,96 @@ mod tests {
     #[test]
     fn development_keeps_its_localhost_default() {
         assert_eq!(load(&good()).unwrap().allowed_origins, vec!["http://localhost:3000".to_string()]);
+    }
+
+    // ---- Stripe ---------------------------------------------------------------------
+
+    fn with_stripe() -> HashMap<&'static str, String> {
+        let mut v = good();
+        v.insert("STRIPE_WEBHOOK_SECRET", "whsec_0123456789abcdef".into());
+        v.insert("STRIPE_PRICE_PERSONAL_MONTHLY", "price_pm".into());
+        v.insert("STRIPE_PRICE_PERSONAL_ANNUAL", "price_py".into());
+        v.insert("STRIPE_PRICE_PREMIUM_MONTHLY", "price_rm".into());
+        v.insert("STRIPE_PRICE_PREMIUM_ANNUAL", "price_ry".into());
+        v.insert("STRIPE_LINK_PERSONAL_MONTHLY", "https://buy.stripe.com/pm".into());
+        v
+    }
+
+    #[test]
+    fn billing_is_off_unless_a_webhook_secret_is_set() {
+        assert!(load(&good()).unwrap().stripe.is_none());
+        let mut v = good();
+        v.insert("STRIPE_WEBHOOK_SECRET", "   ".into());
+        assert!(load(&v).unwrap().stripe.is_none(), "blank counts as unset");
+    }
+
+    #[test]
+    fn all_four_plans_are_read_with_their_tier_and_interval() {
+        let s = load(&with_stripe()).unwrap().stripe.unwrap();
+        assert_eq!(s.plans.len(), 4);
+        let find = |id: &str| s.plans.iter().find(|p| p.sells(id)).unwrap();
+        assert_eq!((find("price_pm").tier, find("price_pm").interval), (PaidTier::Personal, BillingInterval::Month));
+        assert_eq!((find("price_py").tier, find("price_py").interval), (PaidTier::Personal, BillingInterval::Year));
+        assert_eq!((find("price_rm").tier, find("price_rm").interval), (PaidTier::Premium, BillingInterval::Month));
+        assert_eq!((find("price_ry").tier, find("price_ry").interval), (PaidTier::Premium, BillingInterval::Year));
+        assert!(find("price_pm").link.is_some() && find("price_py").link.is_none());
+        assert!(PaidTier::Premium > PaidTier::Personal);
+    }
+
+    #[test]
+    fn bad_stripe_settings_fail_at_startup_naming_the_variable_not_the_value() {
+        let cases: [(&str, &str); 6] = [
+            ("STRIPE_WEBHOOK_SECRET", "zq9-tiny"),
+            ("STRIPE_PRICE_PREMIUM_MONTHLY", "prod_wrong_kind_of_id"),
+            ("STRIPE_PRICE_PREMIUM_ANNUAL", "price_pm"), // repeats another plan's price
+            ("STRIPE_LINK_PERSONAL_MONTHLY", "http://buy.stripe.com/insecure"),
+            ("STRIPE_LINK_PREMIUM_MONTHLY", "ftp://x"),
+            ("STRIPE_PORTAL_URL", "http://billing.stripe.com/p/login/x"),
+        ];
+        for (key, bad) in cases {
+            let mut v = with_stripe();
+            v.insert(key, bad.into());
+            let err = load(&v).unwrap_err().to_string();
+            assert!(err.contains(key), "{key}: {err}");
+            assert!(!err.contains(bad), "the value must not appear: {err}");
+        }
+    }
+
+    #[test]
+    fn older_prices_listed_after_the_current_one_are_still_honoured() {
+        let mut v = with_stripe();
+        v.insert("STRIPE_PRICE_PERSONAL_MONTHLY", " price_new , price_old1,price_old2 ".into());
+        let s = load(&v).unwrap().stripe.unwrap();
+        let plan = s.plans.iter().find(|p| p.price_id == "price_new").expect("the first id is the one sold");
+        assert_eq!(plan.legacy_price_ids, vec!["price_old1".to_string(), "price_old2".to_string()]);
+        assert!(plan.sells("price_new") && plan.sells("price_old1") && plan.sells("price_old2"));
+        assert!(!plan.sells("price_rm"), "another plan's price is not this plan's");
+        assert_eq!((plan.tier, plan.interval), (PaidTier::Personal, BillingInterval::Month));
+    }
+
+    #[test]
+    fn a_price_cannot_belong_to_two_plans_or_be_listed_twice() {
+        for (key, bad) in [
+            ("STRIPE_PRICE_PERSONAL_MONTHLY", "price_pm,price_rm"),        // another plan's current price
+            ("STRIPE_PRICE_PERSONAL_MONTHLY", "price_pm,price_ry"),        // another plan's price
+            ("STRIPE_PRICE_PERSONAL_MONTHLY", "price_pm,price_pm"),        // twice in one list
+            ("STRIPE_PRICE_PERSONAL_MONTHLY", "price_pm,price_x,price_x"),
+            ("STRIPE_PRICE_PERSONAL_MONTHLY", "price_pm,not_a_price"),     // every id must be a price id
+        ] {
+            let mut v = with_stripe();
+            v.insert(key, bad.into());
+            let err = load(&v).unwrap_err().to_string();
+            // names a STRIPE_PRICE_* variable (the one parsed second, when the clash is found)
+            assert!(err.contains("STRIPE_PRICE_") && !err.contains(bad), "{bad}: {err}");
+            assert!(err.contains("repeats") || err.contains("twice") || err.contains("must list"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_webhook_secret_without_any_price_is_refused() {
+        let mut v = good();
+        v.insert("STRIPE_WEBHOOK_SECRET", "whsec_0123456789abcdef".into());
+        let err = load(&v).unwrap_err().to_string();
+        assert!(err.contains("STRIPE_PRICE"), "{err}");
     }
 }

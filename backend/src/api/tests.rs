@@ -768,3 +768,401 @@ async fn a_customer_cannot_read_another_customers_scan(pool: PgPool) {
     let none = send(&app, "GET", &format!("/scans/{job}"), &[], None).await;
     assert_eq!(none.status, StatusCode::UNAUTHORIZED);
 }
+
+// ===========================================================================
+// Stripe billing
+// ===========================================================================
+
+mod billing {
+    use super::*;
+    use crate::services::config::{BillingInterval, PaidTier, StripeConfig, StripePlan};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    const SECRET: &str = "whsec_http_test_signing_secret";
+
+    fn stripe_cfg() -> AppConfig {
+        let mut c = relaxed();
+        c.stripe = Some(StripeConfig {
+            webhook_secret: SECRET.into(),
+            plans: vec![StripePlan {
+                tier: PaidTier::Premium,
+                interval: BillingInterval::Month,
+                price_id: "price_premium_m".into(),
+                legacy_price_ids: vec![],
+                link: Some("https://buy.stripe.com/test_rm".into()),
+            }],
+            portal_url: None,
+        });
+        c
+    }
+
+    /// POST a raw body (the signature covers the exact bytes, so no JSON re-encoding).
+    async fn post_raw(app: &Router, body: &str, signature: Option<String>, cookies: Option<&str>) -> Reply {
+        let mut req = Request::builder().method("POST").uri("/webhooks/stripe");
+        if let Some(s) = signature {
+            req = req.header("stripe-signature", s);
+        }
+        if let Some(c) = cookies {
+            req = req.header("cookie", c);
+        }
+        let mut req = req.header("content-type", "application/json").body(Body::from(body.to_string())).unwrap();
+        req.extensions_mut().insert(ConnectInfo("203.0.113.9:4000".parse::<SocketAddr>().unwrap()));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let (status, headers) = (resp.status(), resp.headers().clone());
+        let body = String::from_utf8_lossy(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).to_string();
+        Reply { status, headers, body }
+    }
+
+    fn signed(body: &str) -> String {
+        let t = time::OffsetDateTime::now_utc().unix_timestamp();
+        let mut mac = Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
+        mac.update(format!("{t}.{body}").as_bytes());
+        format!("t={t},v1={}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    async fn tier_of(pool: &PgPool, c: Uuid) -> String {
+        sqlx::query_scalar("SELECT subscription_tier::text FROM customers WHERE id = $1")
+            .bind(c).fetch_one(pool).await.unwrap()
+    }
+
+    fn checkout_body(customer: Uuid) -> String {
+        json!({"id":"evt_c","type":"checkout.session.completed","created":100,"data":{"object":{
+            "mode":"subscription","customer":"cus_1","subscription":"sub_1",
+            "client_reference_id": crate::services::billing::client_reference_id(SECRET, customer)
+        }}}).to_string()
+    }
+    fn subscription_body(status: &str, created: i64) -> String {
+        json!({"id":"evt_s","type":"customer.subscription.updated","created":created,"data":{"object":{
+            "id":"sub_1","customer":"cus_1","status":status,
+            "items":{"data":[{"price":{"id":"price_premium_m"}}]}
+        }}}).to_string()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_webhook_does_not_exist_until_stripe_is_configured(pool: PgPool) {
+        let (app, _) = app(pool);
+        let body = "{}";
+        assert_eq!(post_raw(&app, body, Some(signed(body)), None).await.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn unsigned_badly_signed_and_tampered_webhooks_change_nothing(pool: PgPool) {
+        let (app, _) = app_with(pool.clone(), stripe_cfg(), &redis_url());
+        let c = ts::customer(&pool, "free", false).await;
+        let body = checkout_body(c);
+        let sub = subscription_body("active", 101);
+
+        assert_eq!(post_raw(&app, &body, None, None).await.status, StatusCode::BAD_REQUEST, "no signature");
+        assert_eq!(post_raw(&app, &body, Some("t=1,v1=00".into()), None).await.status, StatusCode::BAD_REQUEST);
+        // a valid signature for a different body
+        assert_eq!(post_raw(&app, &sub, Some(signed(&body)), None).await.status, StatusCode::BAD_REQUEST, "tampered");
+        assert_eq!(tier_of(&pool, c).await, "free");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_signed_purchase_upgrades_and_a_signed_deletion_downgrades_without_a_csrf_token(pool: PgPool) {
+        let (app, cfg) = app_with(pool.clone(), stripe_cfg(), &redis_url());
+        let c = ts::customer(&pool, "free", false).await;
+
+        for body in [checkout_body(c), subscription_body("active", 101)] {
+            let r = post_raw(&app, &body, Some(signed(&body)), None).await;
+            assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+            assert_eq!(r.json()["received"], true);
+        }
+        assert_eq!(tier_of(&pool, c).await, "premium");
+
+        // the customer's own billing page reflects it
+        let page = send(&app, "GET", "/me/billing", &bearer(&cfg, c, "premium"), None).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+        assert_eq!(page.json()["subscription"]["tier"], "premium");
+        assert_eq!(page.json()["plans"].as_array().unwrap().len(), 1);
+
+        let gone = json!({"id":"evt_d","type":"customer.subscription.deleted","created":200,"data":{"object":{
+            "id":"sub_1","customer":"cus_1","status":"canceled","items":{"data":[{"price":{"id":"price_premium_m"}}]}
+        }}}).to_string();
+        assert_eq!(post_raw(&app, &gone, Some(signed(&gone)), None).await.status, StatusCode::OK);
+        assert_eq!(tier_of(&pool, c).await, "free");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_browser_cannot_upgrade_itself(pool: PgPool) {
+        // The only route that changes a plan is the signed webhook: a signed-in customer
+        // posting the same payload without Stripe's signature gets nowhere.
+        let (app, cfg) = app_with(pool.clone(), stripe_cfg(), &redis_url());
+        let c = ts::customer(&pool, "free", false).await;
+        let t = auth_svc::issue_token(c, "free", &cfg.jwt_secret).unwrap();
+        for body in [checkout_body(c), subscription_body("active", 101)] {
+            let r = post_raw(&app, &body, None, Some(&format!("vs_session={t}"))).await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(tier_of(&pool, c).await, "free");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_billing_page_needs_a_session(pool: PgPool) {
+        let (app, _) = app_with(pool, stripe_cfg(), &redis_url());
+        assert_eq!(send(&app, "GET", "/me/billing", &[], None).await.status, StatusCode::UNAUTHORIZED);
+    }
+}
+
+// ===========================================================================
+// Dates reach the browser as RFC 3339 strings
+// ===========================================================================
+
+/// `time::OffsetDateTime` serializes as a numeric array unless told otherwise, which the
+/// frontend's `new Date(...)` cannot read: every date on the dashboard showed as "—".
+#[sqlx::test(migrations = "./migrations")]
+async fn every_date_in_a_response_is_an_rfc3339_string(pool: PgPool) {
+    use time::format_description::well_known::Rfc3339;
+    let (app, cfg) = app(pool.clone());
+    let c = ts::customer(&pool, "free", false).await;
+    sqlx::query("UPDATE customers SET last_scan_at = NOW() WHERE id = $1").bind(c).execute(&pool).await.unwrap();
+    ts::exposure(&pool, c, true, None).await;
+    let removed = ts::exposure(&pool, c, false, Some(3)).await;
+    ts::removal_request(&pool, c, removed, "submitted", Some(2)).await;
+    let who = bearer(&cfg, c, "free");
+
+    let is_date = |v: &Value| v.as_str().map(|s| time::OffsetDateTime::parse(s, &Rfc3339).is_ok()).unwrap_or(false);
+
+    let me = send(&app, "GET", "/me", &who, None).await.json();
+    assert!(is_date(&me["created_at"]) && is_date(&me["last_scan_at"]), "{me}");
+
+    let scans = send(&app, "GET", "/scans", &who, None).await.json();
+    assert!(!scans["jobs"].as_array().unwrap().is_empty());
+    for job in scans["jobs"].as_array().unwrap() {
+        assert!(is_date(&job["queued_at"]), "{job}");
+        assert!(job["started_at"].is_null() || is_date(&job["started_at"]), "{job}");
+    }
+
+    let exposures = send(&app, "GET", "/exposures", &who, None).await.json();
+    for e in exposures["exposures"].as_array().unwrap() {
+        assert!(is_date(&e["discovered_at"]) && is_date(&e["last_verified_at"]), "{e}");
+        assert!(e["removed_at"].is_null() || is_date(&e["removed_at"]), "{e}");
+    }
+
+    let summary = send(&app, "GET", "/exposures/summary", &who, None).await.json();
+    assert!(is_date(&summary["summary"]["last_scan_at"]), "{summary}");
+
+    let removals = send(&app, "GET", "/removal-requests", &who, None).await.json();
+    let reqs = removals["requests"].as_array().unwrap();
+    assert!(!reqs.is_empty());
+    for r in reqs {
+        assert!(is_date(&r["customer_authorized_at"]) && is_date(&r["created_at"]), "{r}");
+        assert!(r["next_check_at"].is_null() || is_date(&r["next_check_at"]), "{r}");
+    }
+}
+
+// ===========================================================================
+// Scan coverage: which sources could be read
+// ===========================================================================
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_coverage_a_worker_reports_reaches_the_customer_with_the_completed_scan(pool: PgPool) {
+    let (app, cfg) = app(pool.clone());
+    let c = ts::customer(&pool, "premium", false).await;
+    let job = ts::scan_job(&pool, c, "queued").await;
+    send(&app, "POST", &format!("/internal/scan/{job}/claim"), &agent(&cfg), None).await;
+
+    let report = json!([
+        { "source": "spokeo.com", "outcome": "checked" },
+        { "source": "whitepages.com", "outcome": "blocked" },
+        { "source": "peoplefinder.com", "outcome": "not_found" },
+        { "source": "radaris.com", "outcome": "unreadable" },
+        { "source": "nuwber.com", "outcome": "unavailable" },
+        { "source": "intelius.com", "outcome": "not_supported" },
+    ]);
+    let done = send(&app, "PUT", "/internal/scan/status", &agent(&cfg), Some(json!({
+        "job_id": job, "status": "completed", "attempt": 1,
+        "sources_completed": 1, "sources_failed": 4, "exposures_found": 1, "coverage": report
+    }))).await;
+    assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
+
+    let seen = send(&app, "GET", &format!("/scans/{job}"), &bearer(&cfg, c, "premium"), None).await.json();
+    assert_eq!(seen["job"]["status"], "completed");
+    assert_eq!(seen["job"]["coverage"], report);
+    assert_eq!(seen["job"]["sources_queued"], 6);
+    assert_eq!((seen["job"]["sources_completed"].clone(), seen["job"]["sources_failed"].clone()), (json!(1), json!(4)));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_malformed_coverage_report_is_refused_and_a_stale_worker_cannot_overwrite_it(pool: PgPool) {
+    let (app, cfg) = app(pool.clone());
+    let c = ts::customer(&pool, "free", false).await;
+    let job = ts::scan_job(&pool, c, "queued").await;
+    send(&app, "POST", &format!("/internal/scan/{job}/claim"), &agent(&cfg), None).await;
+    let put = |coverage: Value, attempt: i32| json!({ "job_id": job, "status": "completed", "attempt": attempt, "coverage": coverage });
+
+    for bad in [
+        json!([{ "source": "x.com", "outcome": "mystery" }]),                       // unknown outcome
+        json!([{ "source": "https://x.com/Jane-Smith", "outcome": "checked" }]),    // a URL, not a hostname
+        json!([{ "source": "", "outcome": "checked" }]),
+        json!([{ "source": "a b.com", "outcome": "checked" }]),
+        json!((0..101).map(|i| json!({ "source": format!("s{i}.com"), "outcome": "checked" })).collect::<Vec<_>>()),
+    ] {
+        let r = send(&app, "PUT", "/internal/scan/status", &agent(&cfg), Some(put(bad.clone(), 1))).await;
+        assert!(r.status == StatusCode::BAD_REQUEST || r.status == StatusCode::UNPROCESSABLE_ENTITY, "{bad}: {}", r.status);
+    }
+    let still: String = sqlx::query_scalar("SELECT status::text FROM scan_jobs WHERE id = $1").bind(job).fetch_one(&pool).await.unwrap();
+    assert_eq!(still, "running", "a refused report changes nothing");
+
+    // a worker from an older attempt is fenced out of the coverage as well as the status
+    let stale = send(&app, "PUT", "/internal/scan/status", &agent(&cfg),
+        Some(put(json!([{ "source": "x.com", "outcome": "checked" }]), 2))).await;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    let stored: Option<Value> = sqlx::query_scalar("SELECT coverage FROM scan_jobs WHERE id = $1").bind(job).fetch_one(&pool).await.unwrap();
+    assert!(stored.is_none(), "nothing stored by the stale worker");
+
+    // and coverage is optional: older workers and failed scans send none
+    let ok = send(&app, "PUT", "/internal/scan/status", &agent(&cfg),
+        Some(json!({ "job_id": job, "status": "completed", "attempt": 1 }))).await;
+    assert_eq!(ok.status, StatusCode::NO_CONTENT);
+}
+
+// ===========================================================================
+// "Last scan"
+// ===========================================================================
+
+#[sqlx::test(migrations = "./migrations")]
+async fn starting_a_scan_by_hand_restarts_the_clock_the_rescan_scheduler_counts_from(pool: PgPool) {
+    // Redis unreachable on purpose: the job is still created and recovery dispatches it later.
+    let (app, cfg) = app_with(pool.clone(), relaxed(), "redis://127.0.0.1:1/0");
+    let c = ts::customer(&pool, "premium", true).await;
+    ts::identity(&pool, &master(), c, "Jane Smith").await;
+    let before: Option<time::OffsetDateTime> = sqlx::query_scalar("SELECT last_scan_at FROM customers WHERE id = $1").bind(c).fetch_one(&pool).await.unwrap();
+    assert!(before.is_none());
+
+    let r = send(&app, "POST", "/scans", &bearer(&cfg, c, "premium"), None).await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{}", r.body);
+
+    let after: Option<time::OffsetDateTime> = sqlx::query_scalar("SELECT last_scan_at FROM customers WHERE id = $1").bind(c).fetch_one(&pool).await.unwrap();
+    let stamp = after.expect("a manual scan records when the customer was last scanned");
+    assert!((time::OffsetDateTime::now_utc() - stamp).whole_seconds().abs() < 60);
+
+    // so the scheduler does not scan them again straight away
+    let due: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM customers WHERE id = $1 AND subscription_tier = 'premium' \
+         AND (last_scan_at IS NULL OR last_scan_at < NOW() - INTERVAL '7 days')",
+    ).bind(c).fetch_one(&pool).await.unwrap();
+    assert_eq!(due, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn the_last_scan_shown_is_when_the_scan_finished_not_when_it_was_queued(pool: PgPool) {
+    use time::format_description::well_known::Rfc3339;
+    let (app, cfg) = app(pool.clone());
+    let c = ts::customer(&pool, "free", false).await;
+    let job = ts::scan_job(&pool, c, "completed").await;
+    sqlx::query("UPDATE scan_jobs SET queued_at = NOW() - interval '2 days', completed_at = NOW() - interval '1 hour' WHERE id = $1")
+        .bind(job).execute(&pool).await.unwrap();
+    // a newer scan that did not complete does not count as the last known scan
+    let failed = ts::scan_job(&pool, c, "failed").await;
+    sqlx::query("UPDATE scan_jobs SET queued_at = NOW(), completed_at = NOW() WHERE id = $1").bind(failed).execute(&pool).await.unwrap();
+
+    let summary = send(&app, "GET", "/exposures/summary", &bearer(&cfg, c, "free"), None).await.json();
+    let shown = time::OffsetDateTime::parse(summary["summary"]["last_scan_at"].as_str().unwrap(), &Rfc3339).unwrap();
+    let age = (time::OffsetDateTime::now_utc() - shown).whole_minutes();
+    assert!((55..=65).contains(&age), "about 1 hour ago (finished), not 2 days ago (queued): {age} minutes");
+}
+
+// ===========================================================================
+// Plan differences that the pricing page promises
+// ===========================================================================
+
+mod plan_limits {
+    use super::*;
+
+    async fn authorize(app: &Router, cfg: &AppConfig, c: Uuid, tier: &str, exposure: Uuid) -> Reply {
+        send(app, "POST", &format!("/removal-requests/{exposure}/authorize"), &bearer(cfg, c, tier), None).await
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_free_account_gets_three_opt_outs_then_is_asked_to_upgrade(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let c = ts::customer(&pool, "free", false).await;
+        for n in 1..=3 {
+            let e = ts::exposure(&pool, c, true, None).await;
+            let r = authorize(&app, &cfg, c, "free", e).await;
+            assert_eq!(r.status, StatusCode::OK, "opt-out {n}: {}", r.body);
+        }
+        let e4 = ts::exposure(&pool, c, true, None).await;
+        let r = authorize(&app, &cfg, c, "free", e4).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN);
+        // (plain text here; middleware::apply turns it into {"message": ...} in the running app)
+        assert!(r.body.contains("Upgrade to Personal") && r.body.contains("3 opt-out"), "{}", r.body);
+        let made: i64 = sqlx::query_scalar("SELECT count(*) FROM removal_requests WHERE customer_id = $1").bind(c).fetch_one(&pool).await.unwrap();
+        assert_eq!(made, 3, "the refused one was not created");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_failed_opt_out_does_not_use_up_the_free_allowance(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let c = ts::customer(&pool, "free", false).await;
+        for _ in 0..3 {
+            let e = ts::exposure(&pool, c, true, None).await;
+            ts::removal_request(&pool, c, e, "failed", None).await;
+        }
+        let e = ts::exposure(&pool, c, true, None).await;
+        assert_eq!(authorize(&app, &cfg, c, "free", e).await.status, StatusCode::OK, "failed requests do not count");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn paid_accounts_have_no_opt_out_limit_and_other_accounts_do_not_share_one(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let (paid, other_free) = (ts::customer(&pool, "personal", true).await, ts::customer(&pool, "free", false).await);
+        for _ in 0..5 {
+            let e = ts::exposure(&pool, paid, true, None).await;
+            assert_eq!(authorize(&app, &cfg, paid, "personal", e).await.status, StatusCode::OK);
+        }
+        let e = ts::exposure(&pool, other_free, true, None).await;
+        assert_eq!(authorize(&app, &cfg, other_free, "free", e).await.status, StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn simultaneous_requests_cannot_slip_past_the_free_limit(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let c = ts::customer(&pool, "free", false).await;
+        let mut exposures = vec![];
+        for _ in 0..6 {
+            exposures.push(ts::exposure(&pool, c, true, None).await);
+        }
+        let replies = futures_util_join(&app, &cfg, c, &exposures).await;
+        let ok = replies.iter().filter(|s| **s == StatusCode::OK).count();
+        assert_eq!(ok, 3, "exactly the allowance, however the requests interleave: {replies:?}");
+    }
+
+    async fn futures_util_join(app: &Router, cfg: &AppConfig, c: Uuid, exposures: &[Uuid]) -> Vec<StatusCode> {
+        let mut handles = vec![];
+        for e in exposures {
+            let (app, cfg, e) = (app.clone(), cfg.clone(), *e);
+            handles.push(tokio::spawn(async move { authorize(&app, &cfg, c, "free", e).await.status }));
+        }
+        let mut out = vec![];
+        for h in handles {
+            out.push(h.await.unwrap());
+        }
+        out
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn premium_requests_are_handed_to_the_agents_before_older_personal_and_free_ones(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let mut ids = vec![];
+        // created oldest first: free, personal, premium
+        for tier in ["free", "personal", "premium"] {
+            let c = ts::customer(&pool, tier, tier != "free").await;
+            let e = ts::exposure(&pool, c, true, None).await;
+            ids.push((tier, ts::removal_request(&pool, c, e, "authorized", None).await));
+            sqlx::query("UPDATE removal_requests SET created_at = NOW() - make_interval(secs => $2) WHERE id = $1")
+                .bind(ids.last().unwrap().1).bind(match tier { "free" => 300.0_f64, "personal" => 200.0, _ => 100.0 })
+                .execute(&pool).await.unwrap();
+        }
+        let r = send(&app, "GET", "/internal/removal-requests?status=authorized", &agent(&cfg), None).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        let order: Vec<String> = r.json()["requests"].as_array().unwrap().iter()
+            .map(|x| x["id"].as_str().unwrap().to_string()).collect();
+        let want: Vec<String> = ["premium", "personal", "free"].iter()
+            .map(|t| ids.iter().find(|(tier, _)| tier == t).unwrap().1.to_string()).collect();
+        assert_eq!(order, want);
+    }
+}

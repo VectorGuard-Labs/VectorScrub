@@ -24,10 +24,12 @@ import {
   privacyScoreLabel,
   severityColor,
   formatDate,
+  formatDateTime,
   piiCategoryLabel,
 } from "@/lib/utils";
-import type { CustomerProfile, ExposureSummary, Exposure } from "@/types";
+import type { CustomerProfile, ExposureSummary, Exposure, ScanJob } from "@/types";
 import PrivacyScoreChart from "@/components/PrivacyScoreChart";
+import ScanCoverage, { coverageSummary } from "@/components/ScanCoverage";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -37,20 +39,33 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanMessage, setScanMessage] = useState("");
+  // The most recent scan that finished, for the source-coverage panel.
+  const [latestFinished, setLatestFinished] = useState<ScanJob | null>(null);
   const [error, setError] = useState("");
+  // Display only (spinner). Logic uses the ref below, never this state.
   const [isPolling, setIsPolling] = useState(false);
-  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  // The interval handle doubles as "are we polling". It is a ref, not state, because the
+  // interval callback would otherwise keep reading the value from the render that created it.
+  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
+
     // No client-side token check: the session is an HttpOnly cookie the page cannot see.
     // If it is missing or expired the first API call answers 401 and the API client sends
     // the user to /login.
     loadData();
 
+    // If a scan is already queued or running (page opened or refreshed mid-scan), resume polling.
+    void checkScanStatus();
+
     // Cleanup polling interval on unmount
     return () => {
+      mountedRef.current = false;
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
       }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -82,29 +97,36 @@ export default function DashboardPage() {
         (job) => job.status === "queued" || job.status === "running"
       );
 
+      if (!mountedRef.current) return;
+
+      const newestFirst = [...jobs].sort(
+        (a, b) => new Date(b.queued_at).getTime() - new Date(a.queued_at).getTime()
+      );
+      setLatestFinished(
+        newestFirst.find((j) => j.status === "completed" || j.status === "failed") ?? null
+      );
+
       if (runningScan) {
-        // Scan is still running, keep polling
+        // Scan is still running: show it and make sure we keep polling.
         setScanMessage("Scan job queued. Your AI agents are working.");
-        setIsPolling(true);
-      } else {
-        // No running scans, check if we just completed one
-        const recentCompletedScan = jobs.find(
-          (job) => job.status === "completed" || job.status === "failed"
-        );
+        ensurePolling();
+      } else if (pollingIntervalRef.current) {
+        // We were polling and nothing is running any more: the scan just finished.
+        // Refresh the data, stop polling, and report the most recent scan's outcome.
+        stopPolling();
+        await loadData();
 
-        if (recentCompletedScan && isPolling) {
-          // Scan just completed, refresh data and stop polling
-          await loadData();
-          stopPolling();
+        const latest = newestFirst[0];
 
-          if (recentCompletedScan.status === "completed") {
-            setScanMessage(`Scan completed! Found ${recentCompletedScan.exposures_found} exposures.`);
-          } else {
-            setScanMessage("Scan failed. Please try again.");
-          }
-        } else if (!isPolling) {
-          // No running scans and we weren't polling, stop
-          stopPolling();
+        if (latest?.status === "completed") {
+          const n = latest.exposures_found;
+          setScanMessage(
+            `Scan completed. Found ${n} ${n === 1 ? "exposure" : "exposures"}. ${coverageSummary(latest)}`.trim()
+          );
+        } else if (latest?.status === "failed") {
+          setScanMessage("Scan failed. Please try again.");
+        } else {
+          setScanMessage("");
         }
       }
     } catch (err) {
@@ -112,19 +134,19 @@ export default function DashboardPage() {
     }
   }
 
-  function startPolling() {
-    // Clear any existing interval
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-    }
-
+  function ensurePolling() {
+    // Idempotent: one interval at a time, checked every 3 seconds.
+    if (pollingIntervalRef.current) return;
     setIsPolling(true);
+    pollingIntervalRef.current = setInterval(() => {
+      void checkScanStatus();
+    }, 3000);
+  }
 
-    // Check immediately
-    checkScanStatus();
-
-    // Then check every 3 seconds
-    pollingIntervalRef.current = setInterval(checkScanStatus, 3000);
+  function startPolling() {
+    ensurePolling();
+    // Check immediately rather than waiting for the first tick.
+    void checkScanStatus();
   }
 
   function stopPolling() {
@@ -171,6 +193,15 @@ export default function DashboardPage() {
     ? privacyScoreLabel(summary.privacy_score)
     : { label: "—", color: "text-gray-500" };
 
+  // How much of the source list the last scan could actually read; the score only reflects
+  // those sources.
+  const scoreBasis = (() => {
+    const cov = latestFinished?.coverage;
+    if (!cov || cov.length === 0) return null;
+    const checked = cov.filter((c) => c.outcome === "checked").length;
+    return { checked, total: cov.length, partial: checked < cov.length };
+  })();
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -208,6 +239,18 @@ export default function DashboardPage() {
           >
             History
           </button>
+          <button
+            onClick={() => router.push("/dashboard/optouts")}
+            className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
+          >
+            Opt-out guide
+          </button>
+          <button
+            onClick={() => router.push("/dashboard/billing")}
+            className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
+          >
+            Billing
+          </button>
           <span className="text-gray-500 text-sm hidden sm:block">
             {profile?.email}
           </span>
@@ -240,7 +283,7 @@ export default function DashboardPage() {
             </h1>
             <p className="text-gray-400 text-sm">
               {summary?.last_scan_at
-                ? `Last scan: ${formatDate(summary.last_scan_at)}`
+                ? `Last scan: ${formatDateTime(summary.last_scan_at)}`
                 : "No scans yet — run your first scan below."}
             </p>
           </div>
@@ -266,6 +309,8 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {latestFinished && <ScanCoverage job={latestFinished} />}
+
         {/* Summary cards */}
         {summary && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-10">
@@ -277,6 +322,18 @@ export default function DashboardPage() {
               <div className={`text-xs mt-1 ${scoreInfo.color}`}>
                 {scoreInfo.label}
               </div>
+              {scoreBasis && (
+                <div
+                  className={`text-xs mt-1 ${scoreBasis.partial ? "text-orange-300" : "text-gray-500"}`}
+                  title={
+                    scoreBasis.partial
+                      ? "Some sites could not be checked, so your real exposure may be higher than this score shows."
+                      : "Every source was checked."
+                  }
+                >
+                  Based on {scoreBasis.checked} of {scoreBasis.total} sources
+                </div>
+              )}
             </div>
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
               <div className="text-3xl font-bold text-white mb-1">

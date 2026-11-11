@@ -44,46 +44,35 @@ const plans = [
   {
     name: "Free",
     price: "$0",
-    description: "Acquisition tier",
+    description: "See where you are listed",
+    badge: null as string | null,
+    note: null as string | null,
     features: [
-      "4 data brokers",
-      "Limited initial scan",
-      "Limited opt-out submissions",
+      "Scan up to 4 brokers, once every 7 days",
+      "Up to 3 automated opt-out requests",
+      "Step-by-step guide for opting out by hand",
       "One identity",
     ],
     cta: "Get Started",
     highlight: false,
   },
   {
-    name: "Personal",
-    price: "$8.99",
+    name: "Early Access",
+    price: "$4.99",
     per: "/month",
-    description: "Main subscription",
+    description: "Opt out of the listings we find",
+    badge: "Early access",
+    note: "Founding members keep this price for as long as they stay subscribed, even when it goes up for new members. Cancel any time.",
     features: [
-      "All 15 individual brokers",
-      "Automated removal tracking",
-      "Monthly rescans",
-      "Reappearance alerts",
+      "Scan 15 brokers",
+      "Unlimited automated opt-out requests for the listings we find",
+      "Opt-out progress tracking",
+      "Monthly rescans and reappearance checks",
+      "Alerts when removed information reappears",
       "One identity",
     ],
-    cta: "Start Personal",
+    cta: "Start Early Access",
     highlight: true,
-  },
-  {
-    name: "Premium",
-    price: "$14.99",
-    per: "/month",
-    description: "Best protection",
-    features: [
-      "All 15 brokers + California DROP",
-      "Weekly rescans",
-      "Priority removal tracking",
-      "Historical privacy-score trends",
-      "More frequent exposure alerts",
-      "One identity",
-    ],
-    cta: "Start Premium",
-    highlight: false,
   },
 ];
 
@@ -190,7 +179,7 @@ export default function LandingPage() {
           <p className="text-gray-400 text-center mb-16 max-w-xl mx-auto">
             Start free. Upgrade when you&apos;re ready to start removing.
           </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-3xl mx-auto">
             {plans.map((plan) => (
               <div
                 key={plan.name}
@@ -200,9 +189,9 @@ export default function LandingPage() {
                     : "border-gray-700 bg-gray-800/40"
                 }`}
               >
-                {plan.highlight && (
+                {plan.badge && (
                   <div className="text-xs text-teal-400 font-semibold uppercase tracking-wider mb-3">
-                    Most Popular
+                    {plan.badge}
                   </div>
                 )}
                 <div className="text-white font-bold text-xl mb-1">
@@ -216,7 +205,9 @@ export default function LandingPage() {
                     <span className="text-gray-500 text-sm pb-1">{plan.per}</span>
                   )}
                 </div>
-                <p className="text-gray-400 text-sm mb-6">{plan.description}</p>
+                <p className="text-gray-400 text-sm mb-2">{plan.description}</p>
+                {plan.note && <p className="text-teal-300/80 text-xs mb-6">{plan.note}</p>}
+                {!plan.note && <div className="mb-4" />}
                 <ul className="space-y-2 mb-8 flex-1">
                   {plan.features.map((f) => (
                     <li key={f} className="flex items-start gap-2 text-sm text-gray-300">
@@ -238,6 +229,12 @@ export default function LandingPage() {
               </div>
             ))}
           </div>
+          <p className="text-gray-500 text-sm text-center mt-10 max-w-3xl mx-auto">
+            Many data brokers block automated tools. Your dashboard shows exactly which sites we could and
+            could not check, and for the ones we cannot reach, our guide walks you through opting out by
+            hand. Finding nothing on a site we could not check does not mean you are not listed there.
+            California residents can also use the state&apos;s free DROP service, which our guide links to.
+          </p>
         </div>
       </section>
 

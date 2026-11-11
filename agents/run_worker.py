@@ -1,12 +1,11 @@
 """
 Entry point for the VectorScrub agent worker.
-Run from the VectorScrub project root:
-
-    python3 agents/run_worker.py
-
-Or from inside the agents/ directory:
+Run from inside the agents/ directory:
 
     python3 run_worker.py
+
+Do NOT run it from the repo root: settings load ".env" from the current directory, so the
+root .env (which holds backend-only secrets) would be read and the agents refuse to start.
 """
 import asyncio
 import sys

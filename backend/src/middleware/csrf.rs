@@ -48,11 +48,14 @@ pub async fn csrf_middleware(request: Request, next: Next) -> Response {
     // - Safe methods (GET, HEAD, OPTIONS)
     // - Login/register endpoints (they don't have tokens yet)
     // - Internal agent endpoints (use API key auth instead)
+    // - Webhooks from other services (Stripe has no cookies; the payload is authenticated by
+    //   its signature instead)
     if method == "GET"
         || method == "HEAD"
         || method == "OPTIONS"
         || path.starts_with("/api/v1/auth/")
         || path.starts_with("/api/v1/internal/")
+        || path.starts_with("/api/v1/webhooks/")
     {
         return next.run(request).await;
     }
@@ -118,6 +121,7 @@ mod tests {
             .route("/api/v1/me", get(|| async { "ok" }))
             .route("/api/v1/auth/login", post(|| async { "ok" }))
             .route("/api/v1/internal/scan/status", post(|| async { "ok" }))
+            .route("/api/v1/webhooks/stripe", post(|| async { "ok" }))
             .layer(from_fn(csrf_middleware))
     }
 
@@ -203,6 +207,7 @@ mod tests {
         assert_eq!(send("GET", "/api/v1/me", None, None).await, StatusCode::OK);
         assert_eq!(send("POST", "/api/v1/auth/login", None, None).await, StatusCode::OK, "no token exists yet at login");
         assert_eq!(send("POST", "/api/v1/internal/scan/status", None, None).await, StatusCode::OK, "agents use the agent key instead");
+        assert_eq!(send("POST", "/api/v1/webhooks/stripe", None, None).await, StatusCode::OK, "Stripe has no cookie; it signs the payload instead");
     }
 
     #[test]
