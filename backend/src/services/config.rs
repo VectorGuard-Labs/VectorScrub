@@ -38,6 +38,14 @@ pub struct AppConfig {
     /// Stripe billing. `None` (no `STRIPE_WEBHOOK_SECRET`) leaves billing switched off: the
     /// webhook answers 404 and no plan is ever changed by it.
     pub stripe: Option<StripeConfig>,
+    /// Deletion requests sent to companies on the customer's behalf. OFF unless this is set:
+    /// the endpoints answer 404 and nothing is queued. The authorization wording needs a privacy
+    /// lawyer's review before it is turned on for real customers.
+    pub deletion_requests_enabled: bool,
+    /// Stop accepting new accounts once this many exist (`MAX_ACCOUNTS`). Unset means no limit.
+    /// Used to keep a pilot small. The check is not atomic, so a burst of simultaneous
+    /// registrations can overshoot by a few.
+    pub max_accounts: Option<i64>,
 }
 
 /// A paid plan. Ordered, so the highest of a customer's subscriptions is `max()`.
@@ -307,6 +315,11 @@ impl AppConfig {
             scan_redispatch_after_secs: env_parse(&get, "SCAN_REDISPATCH_AFTER_SECS", 600)?,
             scan_max_attempts: env_parse(&get, "SCAN_MAX_ATTEMPTS", 3)?,
             stripe: StripeConfig::from_lookup(&get)?,
+            deletion_requests_enabled: env_parse(&get, "DELETION_REQUESTS_ENABLED", false)?,
+            max_accounts: match get("MAX_ACCOUNTS").filter(|v| !v.trim().is_empty()) {
+                Some(v) => Some(v.trim().parse::<i64>().ok().filter(|n| *n >= 0).context("MAX_ACCOUNTS must be a whole number, 0 or more")?),
+                None => None,
+            },
         })
     }
 
@@ -354,6 +367,20 @@ mod tests {
         assert_eq!((c.rate_limit_auth_per_minute, c.rate_limit_auth_burst), (5, 5));
         assert_eq!(c.scan_max_attempts, 3);
         assert!(!c.is_production());
+    }
+
+    #[test]
+    fn the_account_cap_is_optional_and_must_be_a_number() {
+        assert_eq!(load(&good()).unwrap().max_accounts, None, "no cap by default");
+        let mut v = good();
+        v.insert("MAX_ACCOUNTS", "".into());
+        assert_eq!(load(&v).unwrap().max_accounts, None, "blank means no cap");
+        v.insert("MAX_ACCOUNTS", " 25 ".into());
+        assert_eq!(load(&v).unwrap().max_accounts, Some(25));
+        for bad in ["many", "-1", "2.5"] {
+            v.insert("MAX_ACCOUNTS", bad.into());
+            assert!(load(&v).is_err(), "{bad}");
+        }
     }
 
     #[test]

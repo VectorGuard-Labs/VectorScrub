@@ -24,7 +24,7 @@ use crate::services::monitoring::{
 };
 use crate::services::optout_health::{self, OptOutPageCheck, MAX_CHECKS_PER_REPORT};
 use crate::services::scan::StatusOutcome;
-use crate::services::{exposure as exposure_svc, scan as scan_svc};
+use crate::services::{exposure as exposure_svc, scan as scan_svc, url_vault};
 
 // ---------------------------------------------------------------------------
 // Scans: claim -> progress/heartbeat -> complete | fail
@@ -155,12 +155,14 @@ pub async fn record_exposure(
         ));
     }
 
+    // The link can contain the person's name: store it sealed with their key.
+    let sealed_url = url_vault::seal(&master(&state)?, req.customer_id, &req.source_url).map_err(internal_error)?;
     exposure_svc::record_exposure(
         &state.pool,
         req.customer_id,
         req.scan_job_id,
         &req.source_name,
-        &req.source_url,
+        &sealed_url,
         req.pii_category,
         req.severity,
         &req.pii_summary,
@@ -342,9 +344,10 @@ pub async fn exposures_due_for_monitoring(
     State(state): State<AppState>,
     Query(q): Query<BatchQuery>,
 ) -> Result<Json<DueExposuresResponse>, (StatusCode, String)> {
-    let exposures = monitoring_svc::list_exposures_due_for_monitoring(&state.pool, q.limit())
+    let mut exposures = monitoring_svc::list_exposures_due_for_monitoring(&state.pool, q.limit())
         .await
         .map_err(db_error)?;
+    url_vault::open_all(&master(&state)?, &mut exposures).map_err(internal_error)?;
     Ok(Json(DueExposuresResponse { exposures }))
 }
 
@@ -369,9 +372,10 @@ pub async fn removals_due_for_verification(
     State(state): State<AppState>,
     Query(q): Query<BatchQuery>,
 ) -> Result<Json<DueVerificationsResponse>, (StatusCode, String)> {
-    let requests = monitoring_svc::list_removals_due_for_verification(&state.pool, q.limit())
+    let mut requests = monitoring_svc::list_removals_due_for_verification(&state.pool, q.limit())
         .await
         .map_err(db_error)?;
+    url_vault::open_all(&master(&state)?, &mut requests).map_err(internal_error)?;
     Ok(Json(DueVerificationsResponse { requests }))
 }
 

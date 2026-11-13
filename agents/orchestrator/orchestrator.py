@@ -1,6 +1,6 @@
 """
 VectorScrub AI Orchestrator
-Coordinates the agent pipelines. Four concurrent workers share this process:
+Coordinates the agent pipelines. Up to six concurrent workers share this process:
 
   Scan worker (Redis queue):
     1. Pull job from Redis queue
@@ -17,6 +17,9 @@ Coordinates the agent pipelines. Four concurrent workers share this process:
 
   Opt-out health worker: once a day, checks that each broker's public opt-out page still
   loads (see run_optout_health_checks). No customer data.
+
+  Registry health worker: once a day, checks that the privacy-request page each California
+  registry company names still opens (see run_ca_rights_health_checks). No customer data.
 
 This is the main entry point for the Python agent layer.
 """
@@ -41,10 +44,12 @@ from detection import DetectionAgent
 from discovery import DiscoveryAgent
 from monitoring.agent import MonitoringAgent
 from removal import RemovalAgent, RemovalExecutor
+from ca_registry.health import CaRightsHealthChecker, chunks
+from deletion.sender import DeletionSender
 from removal.health import OptOutHealthChecker
 from shared.backend_client import BackendClient, IdentityDenied, ScanJobLost
 from shared.config import get_config
-from shared.models import IdentityContext, ScanJobPayload, ScanJobStatus
+from shared.models import IdentityContext, QueuedDeletion, ScanJobPayload, ScanJobStatus
 
 log = structlog.get_logger(__name__)
 
@@ -576,6 +581,87 @@ class Orchestrator:
                 log.error("optout_health_error", error_type=type(exc).__name__)
             await asyncio.sleep(self.cfg.optout_health_interval_seconds)
 
+    async def run_ca_rights_health_checks(self) -> None:
+        """
+        Daily check that the privacy-request page each California-registry company names still
+        opens (see ca_registry/health.py). Public pages only; one request per company. The report
+        goes in batches the backend accepts; a failure is logged and tried again next cycle.
+        """
+        if not self.cfg.ca_rights_health_enabled:
+            log.info("ca_rights_health_disabled")
+            return
+        log.info("ca_rights_health_worker_started")
+        await asyncio.sleep(self.cfg.ca_rights_health_startup_delay_seconds)
+        while True:
+            try:
+                checks = await CaRightsHealthChecker().check_all()
+                for batch in chunks(checks):
+                    await self.backend.report_optout_health(batch)
+            except asyncio.CancelledError:
+                log.info("ca_rights_health_worker_shutting_down")
+                break
+            except Exception as exc:
+                log.error("ca_rights_health_error", error_type=type(exc).__name__)
+            await asyncio.sleep(self.cfg.ca_rights_health_interval_seconds)
+
+    async def process_deletion_requests(self) -> None:
+        """
+        Emails the deletion requests customers have authorized (see deletion/). Off unless
+        DELETION_REQUESTS_SEND_ENABLED is set. For each queued request: claim it (exactly one
+        worker gets it), fetch only the details the customer agreed to share, send one email,
+        report how it ended. A request is never retried once claimed: if anything is uncertain
+        it ends as failed, because a company must not receive the same request twice.
+        """
+        if not self.cfg.deletion_requests_send_enabled:
+            log.info("deletion_sending_disabled")
+            return
+        log.info("deletion_worker_started")
+        sender = DeletionSender()
+        while True:
+            try:
+                await self._run_deletion_cycle(sender)
+            except asyncio.CancelledError:
+                log.info("deletion_worker_shutting_down")
+                break
+            except Exception as exc:
+                log.error("deletion_loop_error", error_type=type(exc).__name__)
+            await asyncio.sleep(self.cfg.deletion_poll_seconds)
+
+    async def _run_deletion_cycle(self, sender: DeletionSender) -> int:
+        """One pass over the queue. Returns how many requests were handled."""
+        handled = 0
+        for raw in await self.backend.list_deletion_requests():
+            try:
+                request = QueuedDeletion(**raw)
+            except Exception as exc:
+                # Cannot even read it, so it is not claimed or sent. Type only: a payload can carry names.
+                log.error("deletion_request_unreadable", error_type=type(exc).__name__)
+                continue
+            if not await self.backend.claim_deletion_request(str(request.id)):
+                continue  # another worker has it
+
+            sent, message_id, error = False, None, None
+            try:
+                identity = self._identity_context(
+                    str(request.customer_id), await self.backend.fetch_deletion_identity(str(request.id))
+                )
+                sent, message_id, error = await sender.send(request, identity)
+            except IdentityDenied:
+                error = "The details for this request were not available, so nothing was sent."
+            except Exception as exc:
+                log.error("deletion_send_crashed", channel=request.channel_id, error_type=type(exc).__name__)
+                error = f"Sending did not complete ({type(exc).__name__})."
+            await self._report_deletion(request, sent, message_id, error)
+            handled += 1
+            await asyncio.sleep(self.cfg.deletion_send_delay_seconds)
+        return handled
+
+    @retry_transient
+    async def _report_deletion(self, request: QueuedDeletion, sent: bool, message_id: str | None, error: str | None) -> None:
+        """Say how it ended. Retried hard: a sent email that is never recorded looks like a lost one."""
+        if not await self.backend.report_deletion_result(str(request.id), sent, message_id, error):
+            log.warning("deletion_result_not_applied", channel=request.channel_id)
+
     async def process_monitoring_jobs(self) -> None:
         """
         Continuous monitoring worker. Each cycle:
@@ -725,6 +811,8 @@ async def main() -> None:
         orchestrator.process_removal_jobs(),
         orchestrator.process_monitoring_jobs(),
         orchestrator.run_optout_health_checks(),
+        orchestrator.run_ca_rights_health_checks(),
+        orchestrator.process_deletion_requests(),
     )
 
 

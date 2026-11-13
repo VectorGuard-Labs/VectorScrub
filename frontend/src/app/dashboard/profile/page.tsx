@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { User, MapPin, Phone, Mail, Calendar, Plus, X } from "lucide-react";
 import { csrfFetch } from "@/lib/csrf";
 import { errorMessage } from "@/lib/api";
+import DeleteAccount from "@/components/DeleteAccount";
 
 export default function ProfilePage() {
   const router = useRouter();
@@ -347,6 +348,8 @@ export default function ProfilePage() {
             <li>• Master encryption key is stored separately from the database</li>
           </ul>
         </div>
+
+        <DeleteAccount />
       </div>
     </div>
   );

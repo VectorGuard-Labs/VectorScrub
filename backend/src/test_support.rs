@@ -173,6 +173,8 @@ pub fn test_config() -> crate::services::config::AppConfig {
         scan_redispatch_after_secs: 600,
         scan_max_attempts: 3,
         stripe: None,
+        deletion_requests_enabled: false,
+        max_accounts: None,
     }
 }
 

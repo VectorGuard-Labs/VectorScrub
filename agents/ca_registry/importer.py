@@ -17,7 +17,18 @@ so a reordered export still imports and a missing column fails loudly by name.
 
 Usage, from agents/:
     python -m ca_registry.importer "/path/to/California Data Broker Registry 2026.csv"
-Writes frontend/src/lib/ca-brokers.generated.ts.
+        Imports the file and prints what changed since the data now in the repo.
+    python -m ca_registry.importer --check "/path/to/new file.csv"
+        Writes nothing. Prints the same summary and exits 1 if the file differs from what is in
+        the repo, 0 if it is identical. Use it to find out whether a re-import is needed.
+
+Writes frontend/src/lib/ca-brokers.generated.ts (the guide's directory) and
+agents/ca_registry/rights_pages.json (the pages the nightly check visits).
+
+WHEN TO RE-IMPORT. The registry is re-filed every year (brokers must register each January) and
+companies can update their entries in between. Download the current CSV from the California
+Attorney General's / CPPA data broker registry page, run `--check` to see what changed, then
+import and commit both generated files. The guide shows the import date, so stale data is visible.
 """
 from __future__ import annotations
 
@@ -31,6 +42,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 OUTPUT = Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "ca-brokers.generated.ts"
+PAGES_OUTPUT = Path(__file__).resolve().parent / "rights_pages.json"
 
 SOURCE_LABEL = "California Data Broker Registry 2026 (California Privacy Protection Agency)"
 
@@ -265,24 +277,143 @@ def render(brokers: list[CaBroker], imported_on: str) -> str:
     )
 
 
-def import_file(csv_path: Path, out_path: Path = OUTPUT, imported_on: str | None = None) -> list[CaBroker]:
+def rights_pages(brokers: list[CaBroker]) -> list[dict[str, str]]:
+    """The one page per company the nightly check visits: its first privacy-request link,
+    keyed by registry id. Public company pages only."""
+    return [{"id": b.id, "url": b.rights[0]} for b in brokers if b.rights]
+
+
+def render_pages(brokers: list[CaBroker]) -> str:
+    lines = ",\n".join("  " + json.dumps(p, separators=(",", ":")) for p in rights_pages(brokers))
+    return f"[\n{lines}\n]\n"
+
+
+# ---------------------------------------------------------------------------
+# Comparing a new file with what is committed
+# ---------------------------------------------------------------------------
+
+def read_committed(path: Path | None = None) -> tuple[list[dict], str | None]:
+    """The brokers (as dicts) and the import date in the committed TypeScript file, or ([], None)
+    if there is none yet."""
+    path = OUTPUT if path is None else path
+    if not path.exists():
+        return [], None
+    text = path.read_text(encoding="utf-8")
+    try:
+        body = text.split("export const CA_BROKERS: CaBroker[] = [", 1)[1].rsplit("];", 1)[0]
+        brokers = [json.loads(line.strip().rstrip(",")) for line in body.splitlines() if line.strip()]
+        meta = re.search(r'"importedOn":"?(\d{4}-\d{2}-\d{2})', text.replace(" ", ""))
+    except (IndexError, ValueError):
+        return [], None
+    return brokers, meta.group(1) if meta else None
+
+
+@dataclass
+class RegistryDiff:
+    added: list[str]
+    removed: list[str]
+    sites_changed: list[str]
+    rights_changed: list[str]
+    deletion_changed: int
+    unchanged: int
+
+    @property
+    def identical(self) -> bool:
+        return not (self.added or self.removed or self.sites_changed or self.rights_changed or self.deletion_changed)
+
+
+def diff_registries(old: list[dict], new: list[CaBroker]) -> RegistryDiff:
+    """What differs, by registry id. Company names are used only to describe the change."""
+    old_by = {b["id"]: b for b in old}
+    new_by = {b.id: asdict(b) for b in new}
+    added = sorted(new_by[i]["name"] for i in new_by.keys() - old_by.keys())
+    removed = sorted(old_by[i]["name"] for i in old_by.keys() - new_by.keys())
+    sites = rights = deletion = same = 0
+    sites_names: list[str] = []
+    rights_names: list[str] = []
+    for i in new_by.keys() & old_by.keys():
+        o, n = old_by[i], new_by[i]
+        changed = False
+        if o["sites"] != n["sites"]:
+            sites_names.append(n["name"])
+            changed = True
+        if o["rights"] != n["rights"]:
+            rights_names.append(n["name"])
+            changed = True
+        if o["deletion"] != n["deletion"]:
+            deletion += 1
+            changed = True
+        if o["name"] != n["name"] or o["dba"] != n["dba"] or o["fcra"] != n["fcra"] or o["us"] != n["us"]:
+            changed = True
+        same += 0 if changed else 1
+    return RegistryDiff(added, removed, sorted(sites_names), sorted(rights_names), deletion, same)
+
+
+def format_diff(d: RegistryDiff, committed_on: str | None, today: date | None = None) -> str:
+    today = today or date.today()
+    lines = []
+    if committed_on:
+        try:
+            age = (today - date.fromisoformat(committed_on)).days
+            lines.append(f"data in the repo was imported {committed_on} ({age} day{'' if age == 1 else 's'} ago)")
+        except ValueError:
+            lines.append(f"data in the repo was imported {committed_on}")
+    else:
+        lines.append("no data in the repo yet")
+    if d.identical:
+        lines.append(f"no changes: all {d.unchanged} companies are identical")
+        return "\n".join(lines)
+    lines.append(f"{d.unchanged} companies unchanged")
+    def part(label: str, names: list[str]) -> None:
+        if names:
+            shown = ", ".join(names[:8]) + (f" and {len(names) - 8} more" if len(names) > 8 else "")
+            lines.append(f"{len(names)} {label}: {shown}")
+    part("added", d.added)
+    part("removed", d.removed)
+    part("with different sites", d.sites_changed)
+    part("with different privacy-request pages", d.rights_changed)
+    if d.deletion_changed:
+        lines.append(f"{d.deletion_changed} with updated deletion figures")
+    return "\n".join(lines)
+
+
+def import_file(
+    csv_path: Path,
+    out_path: Path | None = None,
+    imported_on: str | None = None,
+    pages_path: Path | None = None,
+) -> list[CaBroker]:
+    # Resolved here, not as default arguments: defaults are fixed when the module loads, which
+    # would send a caller that changed OUTPUT (a test, a different checkout) to the old place.
+    out_path = OUTPUT if out_path is None else out_path
+    pages_path = PAGES_OUTPUT if pages_path is None else pages_path
     brokers = parse_registry(csv_path.read_bytes().decode("utf-8-sig", errors="replace"))
     out_path.write_text(render(brokers, imported_on or date.today().isoformat()), encoding="utf-8")
+    pages_path.write_text(render_pages(brokers), encoding="utf-8")
     return brokers
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
+    args = argv[1:]
+    check = "--check" in args
+    paths = [a for a in args if a != "--check"]
+    if len(paths) != 1:
         print(__doc__)
         return 2
     try:
-        brokers = import_file(Path(argv[1]))
+        new = parse_registry(Path(paths[0]).read_bytes().decode("utf-8-sig", errors="replace"))
     except (OSError, RegistryFormatError) as exc:
         print(f"import failed: {exc}")
         return 1
-    sites = {s for b in brokers for s in b.sites}
-    print(f"wrote {OUTPUT} : {len(brokers)} companies, {len(sites)} sites, "
-          f"{sum(1 for b in brokers if b.rights)} with a rights page")
+    old, committed_on = read_committed()
+    diff = diff_registries(old, new)
+    print(format_diff(diff, committed_on))
+    if check:
+        return 0 if diff.identical else 1
+    import_file(Path(paths[0]))
+    sites = {s for b in new for s in b.sites}
+    print(f"wrote {OUTPUT.name} and {PAGES_OUTPUT.name}: {len(new)} companies, {len(sites)} sites, "
+          f"{len(rights_pages(new))} privacy-request pages")
     return 0
 
 

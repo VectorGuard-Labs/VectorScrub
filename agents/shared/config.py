@@ -61,6 +61,23 @@ class AgentConfig(BaseSettings):
     optout_health_startup_delay_seconds: int = 60     # let the other workers start first
     optout_health_delay_seconds: float = 2.0          # politeness delay between sites
 
+    # Nightly check of the pages the California registry's companies name for privacy requests
+    # (ca_registry/health.py). One request per company, a few at a time, never twice to one site
+    # at once.
+    ca_rights_health_enabled: bool = True
+    ca_rights_health_interval_seconds: int = 86400
+    ca_rights_health_startup_delay_seconds: int = 300
+    ca_rights_health_concurrency: int = 4
+    ca_rights_health_delay_seconds: float = 0.25      # pause after each request, per worker
+
+    # Deletion requests emailed to companies on a customer's behalf (deletion/). OFF by default:
+    # the worker does not even start unless this is set, and the backend must also have
+    # DELETION_REQUESTS_ENABLED. SMTP must be configured. The authorization wording needs a
+    # privacy lawyer's review before either is switched on for real customers.
+    deletion_requests_send_enabled: bool = False
+    deletion_poll_seconds: int = 300
+    deletion_send_delay_seconds: float = 30.0         # spacing between emails, so no burst
+
     # PII guard: person-name detection (spaCy) used before any text reaches an LLM
     pii_ner_model: str = "en_core_web_sm"
     # True (default): if the NER model cannot be loaded, LLM calls are blocked (fail

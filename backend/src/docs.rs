@@ -1,7 +1,7 @@
 use utoipa::OpenApi;
 
-use crate::api::auth::{AuthResponse, LoginRequest};
-use crate::services::optout_health::{OptOutPageStatus, PublicOptOutHealth};
+use crate::api::auth::{AuthResponse, DeleteAccountRequest, LoginRequest};
+use crate::services::optout_health::{OptOutPageStatus, PageKind, PublicOptOutHealth};
 use crate::services::scan::{PublicCoverage, PublicSourceStatus};
 use crate::services::billing::{BillingView, PlanView, SubscriptionView};
 use crate::models::customer::{CreateAccountRequest, CustomerProfile, SubscriptionTier};
@@ -25,6 +25,7 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile, Subscriptio
         crate::api::auth::register,
         crate::api::auth::login,
         crate::api::auth::logout,
+        crate::api::auth::delete_account,
         crate::api::billing::get_billing,
         crate::api::billing::stripe_webhook,
         crate::api::public::coverage,
@@ -34,6 +35,7 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile, Subscriptio
         schemas(
             CreateAccountRequest,
             LoginRequest,
+            DeleteAccountRequest,
             AuthResponse,
             CustomerProfile,
             SubscriptionTier,
@@ -45,6 +47,7 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile, Subscriptio
             crate::api::public::OptOutHealthResponse,
             PublicOptOutHealth,
             OptOutPageStatus,
+            PageKind,
         )
     ),
     tags(

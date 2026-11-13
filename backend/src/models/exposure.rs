@@ -36,7 +36,10 @@ pub enum ExposureSeverity {
 pub struct Exposure {
     pub id: Uuid,
     pub customer_id: Uuid,
-    pub scan_job_id: Uuid,
+    /// None for a listing the customer added themselves.
+    pub scan_job_id: Option<Uuid>,
+    /// "scan" (found by our scan) or "customer" (added by the customer).
+    pub origin: String,
     /// The data source where PII was found (e.g., "spokeo.com")
     pub source_name: String,
     pub source_url: String,

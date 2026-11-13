@@ -6,6 +6,9 @@ export interface PublicCoverage {
   /** How many recent scans the figures come from. 0 means nothing has been measured yet. */
   scans: number;
   sources: { source: string; readable: boolean }[];
+  /** Sites where our own check has verified at least one removal (scan-found listings only). */
+  verified_sources: string[];
+  verified_removals: number;
 }
 
 export type PlanTier = "free" | "personal" | "premium";
@@ -58,6 +61,27 @@ export async function fetchPublicCoverage(): Promise<PublicCoverage | null> {
         (s): s is { source: string; readable: boolean } =>
           !!s && typeof s.source === "string" && typeof s.readable === "boolean"
       ),
+      verified_sources: Array.isArray(b.verified_sources) ? b.verified_sources.filter((v): v is string => typeof v === "string") : [],
+      verified_removals: typeof b.verified_removals === "number" ? b.verified_removals : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Browser-side fetch of the same public figure (same-origin, through the app's /api proxy). */
+export async function getPublicCoverageClient(): Promise<PublicCoverage | null> {
+  try {
+    const res = await fetch("/api/v1/public/coverage", { credentials: "same-origin" });
+    if (!res.ok) return null;
+    const b = (await res.json()) as Partial<PublicCoverage>;
+    if (typeof b.scans !== "number" || !Array.isArray(b.sources)) return null;
+    return {
+      window_days: typeof b.window_days === "number" ? b.window_days : 30,
+      scans: b.scans,
+      sources: b.sources,
+      verified_sources: Array.isArray(b.verified_sources) ? b.verified_sources : [],
+      verified_removals: typeof b.verified_removals === "number" ? b.verified_removals : 0,
     };
   } catch {
     return null;

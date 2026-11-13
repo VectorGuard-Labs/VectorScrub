@@ -115,6 +115,8 @@ class _Fetch:
     # The request ended up on a different page than the one asked for (e.g. a removed profile
     # redirecting to the homepage). Such a page says nothing about the original record.
     moved: bool = False
+    # Lowercased path finally served; only used to tell a canonical redirect from a generic one.
+    final_path: str = ""
 
 
 class MonitoringAgent:
@@ -206,7 +208,11 @@ class MonitoringAgent:
             return PageState.ABSENT, 1.0
         if fetched.kind == "error":
             return PageState.UNKNOWN, 0.0
-        if fetched.moved:
+        surname = surname_of(identity.full_name)
+        # A redirect is tolerated only when the page we landed on still names the customer
+        # (a broker canonicalising a search URL to the person's results page). A redirect to a
+        # homepage or a generic page says nothing about the record.
+        if fetched.moved and not (surname and surname.lower() in fetched.final_path):
             log.info("page_redirected_elsewhere", source=source_name)
             return PageState.UNKNOWN, 0.0
 
@@ -221,7 +227,6 @@ class MonitoringAgent:
             log.info("page_is_client_rendered", source=source_name)
             return PageState.UNKNOWN, 0.0
 
-        surname = surname_of(identity.full_name)
         if not surname:
             log.warning("no_surname_for_check", source=source_name)
             return PageState.UNKNOWN, 0.0
@@ -305,7 +310,7 @@ class MonitoringAgent:
             return _Fetch("error")
 
         if resp.status == 200:
-            return _Fetch("ok", resp.text, moved=resp.moved)
+            return _Fetch("ok", resp.text, moved=resp.moved, final_path=resp.final_path)
         if resp.status in (404, 410):
             return _Fetch("gone")
         log.warning("fetch_failed", host=host, status_code=resp.status)

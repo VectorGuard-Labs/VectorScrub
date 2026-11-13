@@ -54,7 +54,7 @@ pub async fn authorize_removal(
 
     if tier == "free" {
         let used: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM removal_requests WHERE customer_id = $1 AND status <> 'failed'",
+            "SELECT count(*) FROM removal_requests WHERE customer_id = $1 AND status <> 'failed' AND procedure_used <> 'manual'",
         )
         .bind(customer_id)
         .fetch_one(&mut *tx)
@@ -141,9 +141,28 @@ pub async fn list_removal_requests(
 ) -> Result<Vec<RemovalRequest>> {
     let requests = sqlx::query_as(
         r#"
-        SELECT * FROM removal_requests
-        WHERE customer_id = $1
-        ORDER BY created_at DESC
+        SELECT r.*,
+               (SELECT left(a.details->>'error', 300) FROM removal_audit_log a
+                 WHERE a.removal_request_id = r.id AND a.action = 'failed'
+                 ORDER BY a.recorded_at DESC LIMIT 1) AS failure_reason,
+               lc.result AS last_check_result,
+               lc.recorded_at AS last_check_at
+        FROM removal_requests r
+        LEFT JOIN LATERAL (
+            SELECT CASE a.action
+                       WHEN 'verified_removed' THEN 'removed'
+                       WHEN 'still_present' THEN 'still_present'
+                       WHEN 'still_present_after_timeout' THEN 'still_present'
+                       ELSE 'inconclusive' END AS result,
+                   a.recorded_at
+            FROM removal_audit_log a
+            WHERE a.removal_request_id = r.id
+              AND a.action IN ('verified_removed', 'still_present', 'still_present_after_timeout',
+                               'verification_inconclusive', 'unverifiable_after_timeout')
+            ORDER BY a.recorded_at DESC LIMIT 1
+        ) lc ON true
+        WHERE r.customer_id = $1
+        ORDER BY r.created_at DESC
         "#,
     )
     .bind(customer_id)
@@ -152,6 +171,191 @@ pub async fn list_removal_requests(
     .context("list removal requests")?;
 
     Ok(requests)
+}
+
+/// Days after the opt-out was submitted (by the customer's own account) that the listing is first
+/// re-checked. Brokers differ a lot in how long they take, so this is the first of several
+/// scheduled checks (see `monitoring::VERIFICATION_SCHEDULE_DAYS`), not a promise of a result.
+pub const MANUAL_FIRST_CHECK_DAYS: i64 = 3;
+
+/// How far back a by-hand submission may be dated.
+const MANUAL_MAX_BACKDATE_DAYS: i64 = 60;
+
+/// What the site did about email confirmation, as the customer reports it. "I have not clicked
+/// the link yet" is deliberately not a value: the opt-out is not submitted until they do, so
+/// there is nothing to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailConfirmation {
+    /// The site emailed a link and the customer clicked it.
+    Confirmed,
+    /// The site asked for no email confirmation.
+    NotRequired,
+}
+
+impl EmailConfirmation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::NotRequired => "not_required",
+        }
+    }
+}
+
+/// The customer's account of a by-hand opt-out.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ManualReport {
+    pub email_confirmation: EmailConfirmation,
+    /// The day they submitted it (UTC date); today when absent.
+    #[serde(default, with = "manual_date::option")]
+    pub submitted_on: Option<time::Date>,
+    /// Optional: the exact profile link they opted out. Brokers often reject a search-results link
+    /// and want one profile; that same profile page is also the better page to re-check. Must be on
+    /// the same site. The API handler validates and seals it before it reaches the service.
+    #[serde(default)]
+    pub listing_url: Option<String>,
+}
+
+/// A replacement listing link, already validated (`listing::site_of`) and sealed for the customer.
+pub struct NewListingLink {
+    pub site: String,
+    pub sealed: String,
+}
+
+/// True when `site` (from `listing::site_of`) is the stored source or one of its subdomains.
+pub fn same_site(site: &str, source_name: &str) -> bool {
+    let source = source_name.trim_start_matches("www.").to_ascii_lowercase();
+    site == source || site.ends_with(&format!(".{source}"))
+}
+
+time::serde::format_description!(manual_date, Date, "[year]-[month]-[day]");
+
+/// The customer says they completed, by hand, an opt-out that our automation could not (the site
+/// blocks automated browsers). The request moves from `failed` to `submitted` with its first
+/// re-check scheduled, and from there it is the same as any other submitted request: the
+/// monitoring worker re-fetches the listing, and ONLY evidence that it is gone moves it to
+/// `verified_removed`. This records a claim; it proves nothing. A customer who did not do it
+/// ends up `rejected`/`unverifiable` after the verification timeout like anyone else.
+///
+/// Refused unless the request failed, belongs to this customer, its listing is still active,
+/// and no other request for that listing is in progress.
+pub async fn mark_done_by_hand(
+    pool: &PgPool,
+    customer_id: Uuid,
+    request_id: Uuid,
+    report: ManualReport,
+    new_link: Option<NewListingLink>,
+) -> Result<RemovalRequest> {
+    let today = OffsetDateTime::now_utc().date();
+    let submitted_on = report.submitted_on.unwrap_or(today);
+    if submitted_on > today || (today - submitted_on).whole_days() > MANUAL_MAX_BACKDATE_DAYS {
+        return Err(RemovalError::BadReport.into());
+    }
+
+    let mut tx = pool.begin().await.context("begin transaction")?;
+
+    let row: Option<(RemovalStatus, Uuid, String)> = sqlx::query_as(
+        "SELECT status, exposure_id, source_name FROM removal_requests WHERE id = $1 AND customer_id = $2 FOR UPDATE",
+    )
+    .bind(request_id)
+    .bind(customer_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("read removal request")?;
+    let (status, exposure_id, source_name) = row.ok_or(RemovalError::NotFound)?;
+    if let Some(link) = &new_link {
+        if !same_site(&link.site, &source_name) {
+            return Err(RemovalError::OtherSiteLink.into());
+        }
+    }
+
+    if status != RemovalStatus::Failed {
+        return Err(RemovalError::IllegalTransition { from: status, to: RemovalStatus::Submitted }.into());
+    }
+
+    let active: Option<bool> = sqlx::query_scalar("SELECT is_active FROM exposures WHERE id = $1 AND customer_id = $2")
+        .bind(exposure_id)
+        .bind(customer_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("read exposure")?;
+    if active != Some(true) {
+        return Err(RemovalError::NotActionable.into());
+    }
+
+    let in_flight: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM removal_requests \
+         WHERE exposure_id = $1 AND id <> $2 AND status IN ('authorized', 'submitted', 'acknowledged'))",
+    )
+    .bind(exposure_id)
+    .bind(request_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("check for a request in progress")?;
+    if in_flight {
+        return Err(RemovalError::AlreadyInFlight.into());
+    }
+
+    if let Some(link) = &new_link {
+        // Re-check (and later monitor) the exact page they opted out, on both rows.
+        sqlx::query("UPDATE exposures SET source_url = $2 WHERE id = $1 AND customer_id = $3")
+            .bind(exposure_id)
+            .bind(&link.sealed)
+            .bind(customer_id)
+            .execute(&mut *tx)
+            .await
+            .context("update listing link")?;
+        sqlx::query("UPDATE removal_requests SET source_url = $2 WHERE id = $1")
+            .bind(request_id)
+            .bind(&link.sealed)
+            .execute(&mut *tx)
+            .await
+            .context("update listing link")?;
+    }
+
+    let request: RemovalRequest = sqlx::query_as(
+        r#"
+        UPDATE removal_requests
+        SET status = 'submitted',
+            procedure_used = 'manual',
+            submitted_at = $3::date::timestamptz,
+            next_check_at = GREATEST($3::date + $2::int, CURRENT_DATE)::timestamptz + interval '1 hour',
+            manual_reported_at = NOW(),
+            manual_email_confirmation = $4,
+            manual_submitted_on = $3,
+            submission_claimed_at = NULL,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(request_id)
+    .bind(MANUAL_FIRST_CHECK_DAYS as i32)
+    .bind(submitted_on)
+    .bind(report.email_confirmation.as_str())
+    .fetch_one(&mut *tx)
+    .await
+    .context("mark removal as done by hand")?;
+
+    tx.commit().await.context("commit")?;
+
+    record_audit_entry(
+        pool,
+        request_id,
+        customer_id,
+        "submitted_manually".to_string(),
+        "customer".to_string(),
+        serde_json::json!({
+            "reported_by": "customer",
+            "email_confirmation": report.email_confirmation.as_str(),
+            "submitted_on": submitted_on.to_string(),
+            "first_check_in_days": MANUAL_FIRST_CHECK_DAYS,
+            "listing_link_updated": new_link.is_some(),
+        }),
+    )
+    .await
+    .context("record the customer's report")?;
+    Ok(request)
 }
 
 /// Returns removal requests with a specific status, at most 100.
@@ -206,8 +410,103 @@ pub enum RemovalError {
     AlreadyInFlight,
     #[error("the Free plan's opt-out limit has been reached")]
     FreeLimitReached,
+    #[error("this listing is no longer active, so there is nothing to remove")]
+    NotActionable,
     #[error("illegal removal status transition: {from:?} -> {to:?}")]
     IllegalTransition { from: RemovalStatus, to: RemovalStatus },
+    #[error("the submission date is in the future or too long ago")]
+    BadReport,
+    #[error("the listing link is on a different site")]
+    OtherSiteLink,
+    #[error("assistance can only be requested for a request that needs manual action")]
+    AssistanceNotApplicable,
+    #[error("too many open assistance requests")]
+    TooManyAssistanceRequests,
+}
+
+/// Replace the link we re-check for a request that is still open (manual action required, or
+/// submitted and awaiting verification), for example when the customer opted out a specific
+/// profile rather than the search page our scan found. Same site only; the new link is already
+/// validated and sealed. Updates the exposure too, so later reappearance checks use it.
+pub async fn update_listing_link(pool: &PgPool, customer_id: Uuid, request_id: Uuid, link: NewListingLink) -> Result<RemovalRequest> {
+    let mut tx = pool.begin().await.context("begin transaction")?;
+    let row: Option<(RemovalStatus, Uuid, String)> = sqlx::query_as(
+        "SELECT status, exposure_id, source_name FROM removal_requests WHERE id = $1 AND customer_id = $2 FOR UPDATE",
+    )
+    .bind(request_id)
+    .bind(customer_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("read removal request")?;
+    let (status, exposure_id, source_name) = row.ok_or(RemovalError::NotFound)?;
+    if !matches!(status, RemovalStatus::Failed | RemovalStatus::Submitted | RemovalStatus::Acknowledged) {
+        return Err(RemovalError::NotActionable.into());
+    }
+    if !same_site(&link.site, &source_name) {
+        return Err(RemovalError::OtherSiteLink.into());
+    }
+    sqlx::query("UPDATE exposures SET source_url = $2 WHERE id = $1 AND customer_id = $3")
+        .bind(exposure_id).bind(&link.sealed).bind(customer_id)
+        .execute(&mut *tx).await.context("update exposure link")?;
+    let request: RemovalRequest = sqlx::query_as("UPDATE removal_requests SET source_url = $2, updated_at = NOW() WHERE id = $1 RETURNING *")
+        .bind(request_id).bind(&link.sealed)
+        .fetch_one(&mut *tx).await.context("update request link")?;
+    sqlx::query(
+        "INSERT INTO removal_audit_log (removal_request_id, customer_id, action, actor, details) \
+         VALUES ($1, $2, 'listing_link_updated', 'customer', '{}'::jsonb)",
+    )
+    .bind(request_id).bind(customer_id)
+    .execute(&mut *tx).await.context("audit")?;
+    tx.commit().await.context("commit")?;
+    Ok(request)
+}
+
+/// Most help requests one customer may have open at a time. Help is a hand-worked pilot queue.
+pub const MAX_OPEN_ASSISTANCE_PER_CUSTOMER: i64 = 3;
+
+/// Ask for a person to help with a request that automation could not finish. Allowed only for a
+/// `failed` request (the "manual action required" state) whose listing is still active. Safe to
+/// repeat: asking again changes nothing. Records the ask; it does not promise a result or a time.
+pub async fn request_assistance(pool: &PgPool, customer_id: Uuid, request_id: Uuid) -> Result<RemovalRequest> {
+    let mut tx = pool.begin().await.context("begin transaction")?;
+    let row: Option<(RemovalStatus, bool, Option<String>)> = sqlx::query_as(
+        "SELECT r.status, COALESCE(e.is_active, false), r.assistance_status          FROM removal_requests r LEFT JOIN exposures e ON e.id = r.exposure_id          WHERE r.id = $1 AND r.customer_id = $2 FOR UPDATE OF r",
+    )
+    .bind(request_id)
+    .bind(customer_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("read removal request")?;
+    let (status, active, existing) = row.ok_or(RemovalError::NotFound)?;
+    if status != RemovalStatus::Failed || !active {
+        return Err(RemovalError::AssistanceNotApplicable.into());
+    }
+    if existing.as_deref().is_none_or(|s| s == "declined" || s == "completed") {
+        let open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM removal_requests WHERE customer_id = $1 AND assistance_status IN ('requested', 'in_progress')",
+        )
+        .bind(customer_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("count open assistance requests")?;
+        if open >= MAX_OPEN_ASSISTANCE_PER_CUSTOMER {
+            return Err(RemovalError::TooManyAssistanceRequests.into());
+        }
+        sqlx::query(
+            "UPDATE removal_requests SET assistance_status = 'requested', assistance_requested_at = NOW(),              assistance_minutes = NULL, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await
+        .context("record assistance request")?;
+    }
+    let request: RemovalRequest = sqlx::query_as("SELECT * FROM removal_requests WHERE id = $1")
+        .bind(request_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("reload")?;
+    tx.commit().await.context("commit")?;
+    Ok(request)
 }
 
 /// A submission claim that has not been resolved for this long is presumed abandoned (the

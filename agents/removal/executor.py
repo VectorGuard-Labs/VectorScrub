@@ -232,8 +232,20 @@ class RemovalExecutor:
                 await page.set_viewport_size({"width": 1280, "height": 1024})
 
                 # Navigate to opt-out page
-                await page.goto(procedure.opt_out_url, timeout=30000)
+                response = await page.goto(procedure.opt_out_url, timeout=30000)
                 await page.wait_for_load_state("networkidle", timeout=30000)
+
+                # The site answered with an error instead of its form. Say what happened:
+                # without this, an error page with nothing to fill was reported as "the page
+                # layout may have changed", which sent people looking for the wrong problem.
+                refusal = self._refusal_reason(response.status if response else None)
+                if refusal:
+                    log.warning(
+                        "web_form_page_refused",
+                        opt_out_host=_host(procedure.opt_out_url),
+                        http_status=response.status if response else None,
+                    )
+                    return self._failed(refusal)
 
                 # Do not attempt to defeat bot protection. A CAPTCHA means the
                 # broker wants a human; report it and stop.
@@ -312,6 +324,27 @@ class RemovalExecutor:
                 return self._failed("The opt-out page timed out")
             finally:
                 await browser.close()
+
+    @staticmethod
+    def _refusal_reason(status: int | None) -> str | None:
+        """
+        What to tell the customer when the opt-out page itself answered with an error, or None
+        when the status is fine. We never try to get past a refusal: the reason names the
+        manual route instead.
+        """
+        if status is None or status < 400:
+            return None
+        if status in (401, 403, 429, 451):
+            return (
+                f"The site blocked our automated browser (HTTP {status}), so this opt-out cannot be "
+                "done automatically. Use the manual opt-out guide to do it yourself."
+            )
+        if status in (404, 410):
+            return (
+                f"The site's opt-out page no longer exists at the address we have (HTTP {status}). "
+                "Use the manual opt-out guide to do it yourself; we will fix the link."
+            )
+        return f"The site's opt-out page had an error (HTTP {status}). Try again later, or use the manual opt-out guide."
 
     @staticmethod
     def _failed(reason: str) -> dict:

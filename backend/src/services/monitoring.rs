@@ -36,11 +36,24 @@ pub const PERSONAL_INTERVAL_DAYS: i32 = 30;
 /// after this many days instead of waiting a full interval or hammering the source.
 const INCONCLUSIVE_RETRY_DAYS: i32 = 1;
 
-/// How long to wait before re-checking a request whose record is still live.
-const STILL_PRESENT_RECHECK_DAYS: i64 = 7;
-
 /// Stop verifying after this many days since submission and tell the customer.
 pub const VERIFICATION_TIMEOUT_DAYS: i32 = 45;
+
+/// Days since submission on which a submitted removal is re-checked. Brokers take anywhere from
+/// hours to weeks, so a result is neither expected nor promised early: after each check that does
+/// not settle things (still listed, or the page could not be read) the next one waits for the next
+/// of these days. The last is the timeout, after which the request is closed and the customer told.
+/// There are no per-broker adjustments: we have no measured processing times to base them on.
+pub const VERIFICATION_SCHEDULE_DAYS: [i32; 5] = [3, 7, 14, 30, VERIFICATION_TIMEOUT_DAYS];
+
+/// Days from now until the next scheduled check, given how many days ago the request was submitted.
+pub fn days_until_next_verification(age_days: i32) -> i64 {
+    VERIFICATION_SCHEDULE_DAYS
+        .iter()
+        .find(|d| **d > age_days)
+        .map(|d| (*d - age_days) as i64)
+        .unwrap_or(1)
+}
 
 /// Actor names written to the append-only audit log.
 const ACTOR_MONITORING: &str = "monitoring_agent";
@@ -414,7 +427,8 @@ pub async fn record_verification_result(
         }
 
         VerificationOutcome::StillPresent => {
-            let next = OffsetDateTime::now_utc() + time::Duration::days(STILL_PRESENT_RECHECK_DAYS);
+            let recheck_in = days_until_next_verification(age_days);
+            let next = OffsetDateTime::now_utc() + time::Duration::days(recheck_in);
             removal_svc::update_removal_status(
                 pool,
                 removal_request_id,
@@ -426,7 +440,7 @@ pub async fn record_verification_result(
             .await?;
             (
                 "still_present",
-                json!({ "days_since_submission": age_days, "recheck_in_days": STILL_PRESENT_RECHECK_DAYS }),
+                json!({ "days_since_submission": age_days, "recheck_in_days": recheck_in }),
             )
         }
 
@@ -447,8 +461,8 @@ pub async fn record_verification_result(
         }
 
         VerificationOutcome::Inconclusive => {
-            let next =
-                OffsetDateTime::now_utc() + time::Duration::days(INCONCLUSIVE_RETRY_DAYS as i64);
+            let retry_in = days_until_next_verification(age_days);
+            let next = OffsetDateTime::now_utc() + time::Duration::days(retry_in);
             removal_svc::update_removal_status(
                 pool,
                 removal_request_id,
@@ -460,7 +474,7 @@ pub async fn record_verification_result(
             .await?;
             (
                 "verification_inconclusive",
-                json!({ "days_since_submission": age_days, "retry_in_days": INCONCLUSIVE_RETRY_DAYS }),
+                json!({ "days_since_submission": age_days, "retry_in_days": retry_in }),
             )
         }
     };
@@ -690,6 +704,27 @@ mod tests {
             record_verification_result(&pool, r, c, VerificationOutcome::Removed).await,
             Err(MonitoringError::WrongState)
         ));
+    }
+
+    #[test]
+    fn checks_follow_the_published_schedule_and_end_at_the_timeout() {
+        assert_eq!(VERIFICATION_SCHEDULE_DAYS, [3, 7, 14, 30, 45]);
+        // (days since submission) -> (days until the next check)
+        for (age, wait) in [(0, 3), (3, 4), (7, 7), (8, 6), (14, 16), (29, 1), (30, 15), (44, 1)] {
+            assert_eq!(days_until_next_verification(age), wait, "age {age}");
+        }
+        assert_eq!(days_until_next_verification(45), 1, "past the end: the timeout handles it, never a gap");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_unsettled_check_waits_for_the_next_scheduled_day_not_the_next_day(pool: PgPool) {
+        let c = ts::customer(&pool, "personal", true).await;
+        let e = ts::exposure(&pool, c, true, None).await;
+        let r = ts::removal_request(&pool, c, e, "submitted", Some(-1)).await; // submitted 8 days ago
+        record_verification_result(&pool, r, c, VerificationOutcome::Inconclusive).await.unwrap();
+        // day 8 -> next check on day 14: about 6 days out, not tomorrow
+        assert!(scalar_bool(&pool,
+            "SELECT next_check_at > NOW() + interval '5 days' AND next_check_at < NOW() + interval '7 days' FROM removal_requests WHERE id = $1", r).await);
     }
 
     #[sqlx::test(migrations = "./migrations")]

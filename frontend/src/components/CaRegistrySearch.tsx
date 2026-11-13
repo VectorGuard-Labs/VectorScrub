@@ -4,6 +4,9 @@ import { useMemo, useState } from "react";
 import { ExternalLink, Search } from "lucide-react";
 import type { CaBroker } from "@/lib/ca-brokers.generated";
 import { deletionSummary, safeHref, searchBrokers } from "@/lib/caBrokerSearch";
+import { PAGE_STATUS, isStale } from "@/lib/optoutHealth";
+import { formatDate } from "@/lib/utils";
+import type { OptOutHealth } from "@/types";
 
 const PAGE = 25;
 
@@ -21,10 +24,13 @@ export default function CaRegistrySearch({
   data,
   failed,
   ourSites,
+  pageHealth,
 }: {
   data: RegistryData | null;
   failed: boolean;
   ourSites: Set<string>;
+  /** The daily check of each company's privacy-request page, keyed by registry id. */
+  pageHealth: Record<string, OptOutHealth>;
 }) {
   const [query, setQuery] = useState("");
   const [shown, setShown] = useState(PAGE);
@@ -48,6 +54,14 @@ export default function CaRegistrySearch({
         running {data.source.sites} sites. We do not scan these sites for you (most are not people-search
         sites), but each company names a page for privacy requests, and you can use it. Search by company
         or by a site you found yourself on.
+      </p>
+      <p
+        className="text-gray-300 text-sm mb-4 border-l-2 border-teal-700 pl-3"
+        data-testid="registry-residency-note"
+      >
+        This is California&apos;s list. Your rights depend on where you live, and some companies only act on
+        requests from California residents. The pages below are open to anyone, but we cannot promise a
+        company will honor a request from outside California.
       </p>
 
       <label htmlFor="registry-search" className="sr-only">
@@ -80,6 +94,7 @@ export default function CaRegistrySearch({
           const links = b.rights.map((r) => safeHref(r)).filter((h): h is string => h !== null);
           const stats = deletionSummary(b);
           const ours = b.sites.filter((s) => ourSites.has(s));
+          const page = pageHealth[b.id];
           return (
             <li key={b.id} className="bg-gray-900 border border-gray-800 rounded-xl p-5">
               <div className="flex flex-wrap items-center gap-2 mb-1">
@@ -107,6 +122,25 @@ export default function CaRegistrySearch({
                 {b.sites.length > 8 ? `, and ${b.sites.length - 8} more` : ""}
               </p>
               {stats && <p className="text-gray-500 text-xs mb-2">{stats} Self-reported, not audited.</p>}
+              {page && links.length > 0 && (
+                <p className="flex flex-wrap items-center gap-2 text-xs mb-2">
+                  {isStale(page) ? (
+                    <span className="px-2 py-0.5 rounded-full border text-gray-400 border-gray-700 bg-gray-800">
+                      Not checked recently
+                    </span>
+                  ) : (
+                    <span className={`px-2 py-0.5 rounded-full border ${PAGE_STATUS[page.status].style}`}>
+                      {PAGE_STATUS[page.status].text}
+                    </span>
+                  )}
+                  <span className="text-gray-500">
+                    First page checked {formatDate(page.checked_at)}
+                    {page.status !== "reachable" && page.status !== "captcha" && page.last_reachable_at
+                      ? ` · last opened ${formatDate(page.last_reachable_at)}`
+                      : ""}
+                  </span>
+                </p>
+              )}
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                 {links.length === 0 ? (
                   <span className="text-gray-500">No privacy-request page listed</span>

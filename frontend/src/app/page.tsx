@@ -17,15 +17,15 @@ const features = [
   },
   {
     icon: Trash2,
-    title: "Automated Removal",
+    title: "Opt-Out Requests",
     description:
-      "We identify the correct opt-out procedure for each source, prepare authorized removal requests, and track the results.",
+      "After you authorize a listing, we send the opt-out where the site allows it. Where a site blocks automation, we show you the exact steps to do it yourself in a few minutes.",
   },
   {
     icon: Bell,
-    title: "Continuous Monitoring",
+    title: "Checked, Not Assumed",
     description:
-      "We keep watching. When removed information reappears, we alert you and act again.",
+      "We re-check each listing ourselves and call it removed only when we can see it is gone. If we cannot tell, we say so. Reappearances are flagged for you to re-authorize.",
   },
   {
     icon: BarChart3,
@@ -41,6 +41,25 @@ const features = [
   },
 ];
 
+const pilotPoints = [
+  {
+    title: "We cannot reach every site",
+    body: "Many data brokers block automated tools. We list which ones we can read, and we never claim you are clear of a site we could not check.",
+  },
+  {
+    title: "Some removals are done by you",
+    body: "Where a site blocks us or sends you a confirmation email, you complete the opt-out from our steps (a few minutes each) and tell us. We do not read your inbox.",
+  },
+  {
+    title: "Nothing is sent without your approval",
+    body: "We submit a removal only after you authorize that listing. If a removed listing comes back, you re-authorize it.",
+  },
+  {
+    title: "We check our own work",
+    body: "A listing is marked removed only when our re-check sees it is gone. Blocked, unclear or failed checks are reported as inconclusive, and unconfirmed requests close after 45 days.",
+  },
+];
+
 const plans: {
   name: string;
   tier: PlanTier;
@@ -51,6 +70,7 @@ const plans: {
   note: string | null;
   features: string[];
   cta: string;
+  href?: string;
   highlight: boolean;
 }[] = [
   {
@@ -62,12 +82,31 @@ const plans: {
     note: null,
     features: [
       "Checks up to 4 brokers, once every 7 days",
-      "Up to 3 automated opt-out requests",
+      "Up to 3 opt-out requests, automated where the site allows it",
       "Step-by-step guide for opting out by hand",
       "One identity",
     ],
     cta: "Get Started",
     highlight: false,
+  },
+  {
+    name: "Founding pilot",
+    tier: "free",
+    price: "$1",
+    per: " once",
+    description: "Help us test it, with a person's attention",
+    badge: "Limited places",
+    note: "One-time payment. Nothing renews. The group is small on purpose.",
+    features: [
+      "Everything in Free",
+      "Step-by-step help, and a person to ask, for opt-outs that must be done by hand",
+      "Follow-up checks on a schedule, with plain results",
+      "A printable report of where each listing stands",
+      "We ask for feedback in return",
+    ],
+    cta: "See the pilot",
+    href: "/pilot",
+    highlight: true,
   },
   {
     name: "Early Access",
@@ -78,21 +117,24 @@ const plans: {
     badge: "Early access",
     note: "Founding members keep this price for as long as they stay subscribed, even when it goes up for new members. Cancel any time.",
     features: [
-      "Checks up to 15 brokers, wherever the site allows it",
-      "Unlimited automated opt-out requests for the listings we find",
-      "Guided manual opt-outs for the sites we cannot reach",
+      "Checks the brokers we can read (the figure below is measured, not promised)",
+      "Unlimited opt-out requests for the listings we find, automated where the site allows it",
+      "Step-by-step manual opt-outs for the sites that block automation",
       "Monthly rescans and reappearance checks",
       "Alerts when removed information reappears",
       "One identity",
     ],
     cta: "Start Early Access",
-    highlight: true,
+    highlight: false,
   },
 ];
 
 export default async function LandingPage() {
   const coverage = await fetchPublicCoverage();
   const overall = planCoverage("premium", coverage);
+  // The paid subscription is shown only when billing is actually switched on (SHOW_PAID_PLAN=true
+  // on the web server). Until then the page does not advertise something nobody can buy.
+  const showPaidPlan = process.env.SHOW_PAID_PLAN === "true";
   return (
     <main className="flex flex-col min-h-screen">
       {/* Nav */}
@@ -132,8 +174,9 @@ export default async function LandingPage() {
           <span className="text-teal-400">Under your control.</span>
         </h1>
         <p className="text-xl text-gray-400 mb-10 max-w-2xl">
-          VectorScrub discovers where your personal data is exposed, identifies
-          exactly what's out there, and helps remove it — automatically.
+          VectorScrub finds where your personal data is listed, sends opt-out
+          requests where sites allow it, shows you how to do the rest, and checks
+          whether each listing is really gone.
         </p>
         <div className="flex flex-col sm:flex-row gap-4">
           <Link
@@ -154,15 +197,42 @@ export default async function LandingPage() {
         </p>
       </section>
 
+      {/* Pilot: what must happen */}
+      <section id="pilot" className="px-6 py-16 border-y border-amber-900/40 bg-amber-950/10">
+        <div className="max-w-4xl mx-auto">
+          <div className="text-xs text-amber-300 font-semibold uppercase tracking-wider mb-3">
+            Early pilot
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-4">What to expect, before you sign up</h2>
+          <p className="text-gray-400 text-sm mb-6 max-w-2xl">
+            VectorScrub is new. We would rather tell you now what is automatic and what is not.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {pilotPoints.map((p) => (
+              <div key={p.title} className="border border-gray-700 rounded-lg p-4 bg-gray-900/50">
+                <div className="text-white font-medium text-sm mb-1">{p.title}</div>
+                <p className="text-gray-400 text-sm">{p.body}</p>
+              </div>
+            ))}
+          </div>
+          <p className="text-gray-500 text-xs mt-6">
+            We have not yet published a count of verified removals because we have not yet earned one.
+            When we have, it will be on this page. Read the full{" "}
+            <Link href="/terms" className="underline hover:text-gray-300">Terms</Link> and{" "}
+            <Link href="/privacy" className="underline hover:text-gray-300">Privacy Policy</Link>.
+          </p>
+        </div>
+      </section>
+
       {/* Features */}
       <section id="how-it-works" className="px-6 py-20 bg-gray-900/50">
         <div className="max-w-6xl mx-auto">
           <h2 className="text-3xl font-bold text-white text-center mb-4">
-            Six AI agents working for you
+            How it works
           </h2>
           <p className="text-gray-400 text-center mb-16 max-w-xl mx-auto">
-            VectorScrub runs a coordinated pipeline of specialized AI agents —
-            not a single model doing everything.
+            Find the listings, remove what the sites allow, and verify the result.
+            Here is what happens, including the parts that need you.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">
             {features.map((f) => (
@@ -193,10 +263,10 @@ export default async function LandingPage() {
             Simple, transparent pricing
           </h2>
           <p className="text-gray-400 text-center mb-16 max-w-xl mx-auto">
-            Start free. Upgrade when you&apos;re ready to start removing.
+            Start free. We are still proving the service, so paid plans come after the pilot.
           </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-3xl mx-auto">
-            {plans.map((plan) => (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 max-w-5xl mx-auto">
+            {plans.filter((p) => p.tier !== "personal" || showPaidPlan).map((plan) => (
               <div
                 key={plan.name}
                 className={`rounded-xl border p-6 flex flex-col ${
@@ -234,7 +304,7 @@ export default async function LandingPage() {
                 </ul>
                 <PlanReach tier={plan.tier} coverage={coverage} />
                 <Link
-                  href="/register"
+                  href={plan.href ?? "/register"}
                   className={`text-center py-2.5 rounded-lg text-sm font-medium transition-colors ${
                     plan.highlight
                       ? "bg-teal-600 hover:bg-teal-500 text-white"
@@ -246,8 +316,20 @@ export default async function LandingPage() {
               </div>
             ))}
           </div>
+          <p className="text-gray-300 text-sm text-center mt-10 max-w-3xl mx-auto" data-testid="verified-figure">
+            {coverage && coverage.verified_removals > 0 ? (
+              <>
+                Removals our own re-check has verified so far:{" "}
+                <span className="text-white font-semibold">{coverage.verified_removals}</span>, on{" "}
+                {coverage.verified_sources.length} {coverage.verified_sources.length === 1 ? "site" : "sites"}. We
+                count a removal only when we have seen the listing gone ourselves.
+              </>
+            ) : (
+              <>We will publish how many removals our own re-check has verified once there are some to count. There are none yet.</>
+            )}
+          </p>
           {overall.readable !== null && (
-            <p className="text-gray-300 text-sm text-center mt-10 max-w-3xl mx-auto">
+            <p className="text-gray-300 text-sm text-center mt-4 max-w-3xl mx-auto">
               In our recent scans we could read{" "}
               <span className="text-white font-semibold">
                 {overall.readable} of the {overall.listed}

@@ -178,6 +178,25 @@ async fn authorize_removal(pool: &PgPool, request_id: Uuid) -> Result<Uuid, Acce
         .ok_or(AccessError::Denied)
 }
 
+/// Customer, and whether they agreed to share their address, for a deletion request that a
+/// worker has claimed and is sending right now, or Denied. A queued, finished or failed request
+/// is not actionable, and a Free account cannot have one sent.
+async fn authorize_deletion(pool: &PgPool, request_id: Uuid) -> Result<(Uuid, bool), AccessError> {
+    sqlx::query_as::<_, (Uuid, bool)>(
+        r#"
+        SELECT r.customer_id, c.include_address FROM deletion_requests r
+        JOIN deletion_campaigns c ON c.id = r.campaign_id
+        JOIN customers u ON u.id = r.customer_id
+        WHERE r.id = $1 AND r.status = 'sending'
+          AND u.is_active = true AND u.subscription_tier <> 'free'
+        "#,
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AccessError::Denied)
+}
+
 /// Customer for a removed exposure that is currently due for a reappearance check.
 async fn authorize_monitoring(pool: &PgPool, exposure_id: Uuid) -> Result<Uuid, AccessError> {
     let sql = format!(
@@ -206,6 +225,7 @@ enum Purpose {
     Scan,
     Removal,
     Monitoring,
+    Deletion,
 }
 
 impl Purpose {
@@ -214,6 +234,7 @@ impl Purpose {
             Purpose::Scan => "scan",
             Purpose::Removal => "removal",
             Purpose::Monitoring => "monitoring",
+            Purpose::Deletion => "deletion",
         }
     }
 }
@@ -288,6 +309,38 @@ pub async fn release_for_removal(
         }
     };
     decrypt_and_audit(pool, master, customer_id, Purpose::Removal, request_id).await
+}
+
+/// The details for ONE deletion request email, and nothing more: the name, the first email
+/// address, and the address only if the customer agreed to share it. Phone numbers, previous
+/// addresses and the date of birth are cleared (and zeroed) before this leaves the function,
+/// whatever the agent asks for. The customer comes from the request itself.
+pub async fn release_for_deletion(
+    pool: &PgPool,
+    master: &MasterKey,
+    request_id: Uuid,
+) -> Result<CleartextIdentity, AccessError> {
+    let (customer_id, include_address) = match authorize_deletion(pool, request_id).await {
+        Ok(found) => found,
+        Err(e) => {
+            if matches!(e, AccessError::Denied) {
+                record_denied(pool, Purpose::Deletion, request_id).await;
+            }
+            return Err(e);
+        }
+    };
+    let mut identity = decrypt_and_audit(pool, master, customer_id, Purpose::Deletion, request_id).await?;
+    zeroize::Zeroize::zeroize(&mut identity.phone_numbers);
+    zeroize::Zeroize::zeroize(&mut identity.previous_addresses);
+    zeroize::Zeroize::zeroize(&mut identity.date_of_birth);
+    for extra in identity.email_addresses.iter_mut().skip(1) {
+        zeroize::Zeroize::zeroize(extra);
+    }
+    identity.email_addresses.truncate(1);
+    if !include_address {
+        zeroize::Zeroize::zeroize(&mut identity.current_address);
+    }
+    Ok(identity)
 }
 
 /// Identity for a reappearance check. The customer comes from the exposure itself.

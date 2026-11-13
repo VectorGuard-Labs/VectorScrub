@@ -60,6 +60,9 @@ class Fetched:
     # slashes, case, http->https and www changes do not count.
     moved: bool
     content_type: str
+    # Path of the page finally served (lowercased). Callers use it only to test locally; it is
+    # never logged (profile paths contain names).
+    final_path: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +239,7 @@ async def _safe_get(client, url, headers, timeout, allowed_domain, max_bytes, ma
                 final_host=host,
                 moved=_norm_path(current) != _norm_path(original),
                 content_type=content_type,
+                final_path=urlsplit(current).path.lower(),
             )
         finally:
             await response.aclose()

@@ -19,6 +19,16 @@ async def test_a_redirect_to_a_different_page_is_unknown_not_removed(identity):
     assert s is PageState.UNKNOWN and llm.sent == []
 
 
+async def test_a_redirect_to_a_page_that_still_names_the_customer_is_judged_on_its_content(identity):
+    # a broker canonicalising a search URL to the person's own results page
+    surname = identity.full_name.split()[-1].lower()
+    page = html("No record here, only Jones and Brown. " * 40)
+    (s, _), _ = await state(_Fetch("ok", page, moved=True, final_path=f"/first-{surname}"), identity)
+    assert s is PageState.ABSENT
+    (s, _), _ = await state(_Fetch("ok", page, moved=True, final_path="/not-found"), identity)
+    assert s is PageState.UNKNOWN
+
+
 async def test_an_enable_javascript_page_is_unknown_not_removed(identity):
     shell = f"<html><body><noscript>You need to enable JavaScript to run this app.</noscript><div>{NAV}</div></body></html>"
     (s, _), _ = await state(_Fetch("ok", shell), identity)

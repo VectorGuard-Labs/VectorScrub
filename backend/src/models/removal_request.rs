@@ -54,6 +54,8 @@ impl RemovalStatus {
     }
 }
 
+time::serde::format_description!(date_iso, Date, "[year]-[month]-[day]");
+
 /// A single data removal request targeting one exposure on one source.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RemovalRequest {
@@ -81,6 +83,29 @@ pub struct RemovalRequest {
     pub created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
+    /// Why a failed request failed, in the executor's own fixed words (never exception text, so
+    /// no personal data). Filled in only by the customer's list query, from the audit trail;
+    /// absent from every other query, which is why it defaults.
+    #[sqlx(default)]
+    pub failure_reason: Option<String>,
+    /// The most recent verification result for a submitted request ("removed", "still_present",
+    /// "inconclusive") and when it happened. Filled in only by the customer's list query.
+    #[sqlx(default)]
+    pub last_check_result: Option<String>,
+    #[sqlx(default)]
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub last_check_at: Option<OffsetDateTime>,
+    /// Set when the customer reported completing an opt-out by hand. A claim, not evidence.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub manual_reported_at: Option<OffsetDateTime>,
+    /// "confirmed" (they clicked the site's email link) or "not_required".
+    pub manual_email_confirmation: Option<String>,
+    #[serde(with = "date_iso::option")]
+    pub manual_submitted_on: Option<time::Date>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub assistance_requested_at: Option<OffsetDateTime>,
+    /// "requested" | "in_progress" | "completed" | "declined"
+    pub assistance_status: Option<String>,
 }
 
 /// Audit log entry for every action taken on a removal request.

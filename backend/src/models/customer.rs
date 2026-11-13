@@ -68,6 +68,11 @@ pub struct CleartextIdentity {
     pub date_of_birth: Option<String>,
 }
 
+/// Version of the Terms of Service and Privacy Policy that registration must accept. Change it
+/// (together with `TERMS_VERSION` in frontend/src/lib/legal.ts) whenever either document changes
+/// in a way customers must agree to again.
+pub const TERMS_VERSION: &str = "2026-11-pilot-2";
+
 /// Request body for account creation.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateAccountRequest {
@@ -77,6 +82,15 @@ pub struct CreateAccountRequest {
     #[validate(length(min = 12, max = 128, message = "Password must be between 12 and 128 characters"))]
     #[schema(example = "SecurePassword123!")]
     pub password: String,
+    /// Must equal the current terms version; proves the customer saw and accepted the documents.
+    #[serde(default)]
+    #[schema(example = "2026-11-pilot-2")]
+    pub accepted_terms_version: Option<String>,
+    /// Optional, separate opt-ins for the pilot. False unless the customer ticked them.
+    #[serde(default)]
+    pub pilot_interview_ok: bool,
+    #[serde(default)]
+    pub pilot_story_ok: bool,
 }
 
 /// Request body for submitting an identity profile.

@@ -135,7 +135,7 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "method": "web_form",
     "optOutUrl": "https://www.spokeo.com/optout",
     "optOutEmail": null,
-    "instructions": "Submit name and URL via the opt-out form. Verification email sent.",
+    "instructions": "Spokeo needs the link to one profile, not a search page. Search spokeo.com for your name, open the result that is you (right city and age), and copy that page's address: it looks like spokeo.com/First-Last/City/ST/p12345678. Paste it into the opt-out form with your email, then click the link in Spokeo's confirmation email. If several profiles are you, opt out of each one.",
     "estimatedDays": 7,
     "requiresIdVerification": false
   },

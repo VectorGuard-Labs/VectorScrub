@@ -1,0 +1,117 @@
+{
+  "channels": [
+    {
+      "id": "whitepages",
+      "company": "Whitepages, Inc",
+      "registry_id": "1170",
+      "method": "email",
+      "address": "privacyrequest@whitepages.com",
+      "source_url": "https://www.whitepages.com/privacy/consumer-rights",
+      "evidence": "request deletion of your non-publicly available information by submitting an email to privacyrequest@whitepages.com",
+      "verified_on": "2026-11-12",
+      "applies_to": [
+        "CA"
+      ],
+      "legal_basis": "the California Consumer Privacy Act (Cal. Civ. Code 1798.105 and 1798.120)",
+      "requests": [
+        "delete",
+        "opt_out_sale"
+      ],
+      "agent_requirements": "Whitepages says an agent \"may need to provide written, signed permission\" and verification information, and that it may also verify the consumer directly.",
+      "notes": "Covers non-public information and opt-out of sale or sharing. Removing the public directory listing is a separate tool on the same page that needs the listing's URL."
+    },
+    {
+      "id": "stirista",
+      "company": "Stirista, LLC",
+      "registry_id": "1105",
+      "method": "email",
+      "address": "privacy@stirista.com",
+      "source_url": "https://www.stirista.com/privacy-policy/",
+      "evidence": "First, you may contact us directly at privacy@stirista.com to have your personal information removed from our database.",
+      "verified_on": "2026-11-12",
+      "applies_to": [],
+      "legal_basis": "the opt-out process in Stirista's privacy policy, and any privacy law that applies to them",
+      "requests": [
+        "delete"
+      ],
+      "agent_requirements": "The page asks for the person's current address and email address, and any prior addresses they want opted out. It does not mention authorized agents.",
+      "notes": "A marketing-data company. The page says the request removes the person from its marketing databases, not from other companies that hold the same data. VectorScrub shares the current address (which this company needs) and email, not previous addresses.",
+      "requires_address": true
+    },
+    {
+      "id": "realsource",
+      "company": "RealSource, Inc",
+      "registry_id": "1185",
+      "method": "email",
+      "address": "privacy@realsourcedata.com",
+      "source_url": "https://www.realsourcedata.com/privacy-policy",
+      "evidence": "If you wish to opt-out of our Marketing Databases, please contact us via email at privacy@realsourcedata.com",
+      "verified_on": "2026-11-12",
+      "applies_to": [],
+      "legal_basis": "the marketing-database opt-out in RealSource's privacy policy, and any privacy law that applies to them",
+      "requests": [
+        "delete"
+      ],
+      "agent_requirements": "The page does not mention authorized agents or identity verification.",
+      "notes": "The page says opting out removes your name and address from its marketing databases but does not stop other companies from sending you direct marketing."
+    },
+    {
+      "id": "dealmachine",
+      "company": "DealMachine Operations Inc.",
+      "registry_id": "1746",
+      "method": "email",
+      "address": "privacy@dealmachine.com",
+      "source_url": "https://dealmachine.com/privacy-policy",
+      "evidence": "Emailing privacy@dealmachine.com with the subject line “Privacy Rights Request”",
+      "verified_on": "2026-11-12",
+      "applies_to": [],
+      "legal_basis": "the privacy rights request process in DealMachine's privacy policy, and any privacy law that applies to them",
+      "requests": [
+        "delete",
+        "opt_out_sale"
+      ],
+      "agent_requirements": "The page asks for the subject line \"Privacy Rights Request\" and does not mention authorized agents.",
+      "notes": "The page says DealMachine provides contact information for property owners and may be a data broker. Including your address helps it find your record.",
+      "subject": "Privacy Rights Request"
+    },
+    {
+      "id": "recruitbot",
+      "company": "RecruitBot",
+      "registry_id": "1337",
+      "method": "email",
+      "address": "ccpa@recruitbot.com",
+      "source_url": "https://recruitbot.com/ccpa/",
+      "evidence": "emailing ccpa@recruitbot.com We will need to confirm your identity and California residency to process your requests to exercise your information, access or deletion rights.",
+      "verified_on": "2026-11-12",
+      "applies_to": [
+        "CA"
+      ],
+      "legal_basis": "the California Consumer Privacy Act (Cal. Civ. Code 1798.105)",
+      "requests": [
+        "delete"
+      ],
+      "agent_requirements": "The page says it will need to confirm the person's identity and California residency. It does not mention authorized agents.",
+      "notes": "The page also offers a web form and a phone number for the same requests."
+    },
+    {
+      "id": "snovio",
+      "company": "Snovio Inc",
+      "registry_id": "1415",
+      "method": "email",
+      "address": "help@snov.io",
+      "source_url": "https://snov.io/do-not-sell-my-personal-information",
+      "evidence": "If you are an authorized agent making a CCPA request on behalf of a California consumer, please contact help@snov.io",
+      "verified_on": "2026-11-12",
+      "applies_to": [
+        "CA"
+      ],
+      "legal_basis": "the California Consumer Privacy Act (Cal. Civ. Code 1798.105 and 1798.120)",
+      "requests": [
+        "delete",
+        "opt_out_sale"
+      ],
+      "agent_requirements": "The page directs authorized agents making a CCPA request for a California consumer to this address.",
+      "notes": "The address is the company's general help address, but its page names it for authorized agents. The company also has a form of its own for consumers."
+    }
+  ]
+}

@@ -81,7 +81,7 @@ export function piiCategoryLabel(cat: string): string {
   return labels[cat] ?? cat;
 }
 
-import type { RemovalStatus } from "@/types";
+import type { RemovalRequest, RemovalStatus } from "@/types";
 
 export function removalStatusLabel(status: RemovalStatus): string {
   const labels: Record<RemovalStatus, string> = {
@@ -111,5 +111,94 @@ export function removalStatusColor(status: RemovalStatus): string {
     case "reappeared":
     case "failed":
       return "text-red-400 border-red-800 bg-red-950";
+  }
+}
+
+/** True when a removal failed because the site refuses our automated browser: retrying cannot help. */
+export function isAutomationBlocked(reason: string | null | undefined): boolean {
+  return !!reason && reason.includes("blocked our automated browser");
+}
+
+/** True when the site's opt-out address no longer works: also not fixed by retrying. */
+export function isOptOutPageGone(reason: string | null | undefined): boolean {
+  return !!reason && reason.includes("no longer exists");
+}
+
+export interface RemovalStage {
+  label: string;
+  /** One plain sentence on what is true now and what happens next. */
+  detail: string;
+  color: string;
+}
+
+const AMBER = "text-amber-300 border-amber-800 bg-amber-950";
+
+/**
+ * Where a removal really stands, in words that do not claim more than we know. "Submitted" is
+ * split into what we documented and what the customer told us; a check we could not complete is
+ * "inconclusive", never "removed".
+ */
+export function removalStage(req: RemovalRequest): RemovalStage {
+  const byHand = req.procedure_used === "manual";
+  const inconclusive = req.last_check_result === "inconclusive";
+  switch (req.status) {
+    case "authorized":
+      return {
+        label: "Authorized",
+        detail: "You approved this. We will send the opt-out where the site allows it.",
+        color: removalStatusColor(req.status),
+      };
+    case "submitted":
+    case "acknowledged":
+      return {
+        label: byHand ? "Reported submitted by you" : "Submitted",
+        detail:
+          (byHand
+            ? "This is what you told us. It is not verified. "
+            : "We sent the opt-out. ") +
+          (inconclusive
+            ? "Our last check could not read the page, so the result is inconclusive. We will try again on schedule."
+            : req.last_check_result === "still_present"
+              ? "Our last check still saw the listing. Sites can take weeks. We will check again on schedule."
+              : "We will check the listing on a schedule (about 3, 7, 14 and 30 days after submission)."),
+        color: removalStatusColor(req.status),
+      };
+    case "verified_removed":
+      return {
+        label: "Verified removed",
+        detail: "Our own check confirmed the listing is gone.",
+        color: removalStatusColor(req.status),
+      };
+    case "rejected":
+      return {
+        label: "Still listed",
+        detail: "The listing was still there when we stopped checking (45 days). You can try again or contact the site directly.",
+        color: removalStatusColor(req.status),
+      };
+    case "unverifiable":
+      return {
+        label: "Inconclusive",
+        detail: "We could not read the page well enough to say whether the listing is gone. That is not the same as removed.",
+        color: AMBER,
+      };
+    case "reappeared":
+      return {
+        label: "Reappeared",
+        detail: "A listing we had confirmed removed has come back. Authorize a new removal to act on it.",
+        color: removalStatusColor(req.status),
+      };
+    case "failed":
+      if (isAutomationBlocked(req.failure_reason) || isOptOutPageGone(req.failure_reason)) {
+        return {
+          label: "Manual action required",
+          detail: "We cannot submit this one automatically. Your listing has not been removed yet.",
+          color: AMBER,
+        };
+      }
+      return {
+        label: "Needs your attention",
+        detail: "The automatic attempt failed. Your listing has not been removed.",
+        color: removalStatusColor(req.status),
+      };
   }
 }

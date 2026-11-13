@@ -171,7 +171,7 @@ async def test_the_real_registry_is_covered_and_reports_only_site_names(monkeypa
     assert {r.source for r in results} == web
     for r in results:
         assert "/" not in r.source and "http" not in r.source
-        assert set(r.model_dump()) == {"source", "status", "http_status"}, "nothing else leaves the process"
+        assert set(r.model_dump()) == {"kind", "source", "status", "http_status"}, "nothing else leaves the process"
 
 
 # ---- reporting and the worker loop -----------------------------------------------------------
@@ -189,7 +189,7 @@ async def test_the_report_carries_only_names_and_statuses(monkeypatch):
     assert (method, path) == ("PUT", "/api/v1/internal/optout-health")
     assert key and key.startswith("test-agent-key")
     import json
-    assert json.loads(body) == {"checks": [{"source": "spokeo.com", "status": "captcha", "http_status": 200}]}
+    assert json.loads(body) == {"checks": [{"kind": "optout", "source": "spokeo.com", "status": "captcha", "http_status": 200}]}
 
 
 @pytest.fixture

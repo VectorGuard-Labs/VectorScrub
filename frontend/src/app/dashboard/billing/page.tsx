@@ -26,8 +26,8 @@ const PRICES: Record<PaidTier, { name: string; month: string; year: string; note
     note: "Founding members keep this price for as long as they stay subscribed.",
     features: [
       "Checks up to 15 brokers, wherever the site allows it",
-      "Unlimited automated opt-out requests for the listings we find",
-      "Guided manual opt-outs for the sites we cannot reach",
+      "Unlimited opt-out requests for the listings we find, automated where the site allows it",
+      "Step-by-step manual opt-outs for the sites that block automation",
       "Monthly rescans and reappearance checks",
     ],
   },
@@ -189,7 +189,7 @@ export default function BillingPage() {
               ) : (
                 <p className="text-gray-400 text-sm mt-2">
                   {currentTier === "free"
-                    ? "Free accounts get one scan every 7 days, up to 3 automated opt-out requests, and the manual opt-out guide."
+                    ? "Free accounts get one scan every 7 days, up to 3 opt-out requests (automated where the site allows it), and the manual opt-out guide."
                     : "This plan was set on your account directly, not through a subscription."}
                 </p>
               )}

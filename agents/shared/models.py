@@ -93,11 +93,37 @@ class OptOutStatus(str, Enum):
     UNAVAILABLE = "unavailable"  # down, rate limited, redirected off-site, or unreachable
 
 
+class OptOutKind(str, Enum):
+    """Which set of pages a check belongs to. Mirrors the backend's `PageKind`."""
+    OPTOUT = "optout"        # the opt-out pages of the brokers VectorScrub handles; source = site name
+    CA_RIGHTS = "ca_rights"  # a California-registry company's privacy-request page; source = registry id
+
+
 class OptOutCheck(BaseModel):
-    """One broker's opt-out page, checked. Public information only: a site name and a status."""
+    """One page, checked. Public information only: a site name or registry id, and a status."""
+    kind: OptOutKind = OptOutKind.OPTOUT
     source: str
     status: OptOutStatus
     http_status: Optional[int] = None
+
+
+class QueuedDeletion(BaseModel):
+    """A deletion request waiting to be emailed to a company, as the backend hands it over. The
+    recipient address comes from the backend's evidence-checked catalog and nowhere else. It holds
+    no personal data: the details for the email are fetched separately, per request, once claimed."""
+    id: uuid.UUID
+    customer_id: uuid.UUID
+    channel_id: str
+    company: str
+    to_address: str
+    # A subject line the company's page asks for, used as given (e.g. "Privacy Rights Request").
+    subject: Optional[str] = None
+    legal_basis: str
+    requests: list[str]
+    include_address: bool
+    authorized_at: str
+    authorization_version: str
+    authorization_text: str
 
 
 class DiscoveryReport(BaseModel):

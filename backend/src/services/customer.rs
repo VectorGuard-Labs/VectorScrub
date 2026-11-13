@@ -47,8 +47,9 @@ pub async fn create_account(
     let customer = sqlx::query_as::<_, Customer>(
         r#"
         INSERT INTO customers (id, email, password_hash, subscription_tier,
-                               is_verified, is_active, created_at, updated_at)
-        VALUES ($1, $2, $3, 'free', false, true, $4, $4)
+                               is_verified, is_active, created_at, updated_at,
+                               terms_version, terms_accepted_at, pilot_interview_ok, pilot_story_ok)
+        VALUES ($1, $2, $3, 'free', false, true, $4, $4, $5, $4, $6, $7)
         RETURNING *
         "#,
     )
@@ -56,6 +57,9 @@ pub async fn create_account(
     .bind(email)
     .bind(&password_hash)
     .bind(now)
+    .bind(crate::models::customer::TERMS_VERSION)
+    .bind(req.pilot_interview_ok)
+    .bind(req.pilot_story_ok)
     .fetch_one(pool)
     .await
     .map_err(|e| match &e {

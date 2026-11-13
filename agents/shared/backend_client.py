@@ -126,6 +126,44 @@ class BackendClient:
         resp.raise_for_status()
         log.info("scan_status_updated", job_id=job_id, status=status.value)
 
+    # ------------------------------------------------------------------
+    # Deletion requests: list -> claim -> scoped details -> result
+    # ------------------------------------------------------------------
+
+    async def list_deletion_requests(self) -> list[dict]:
+        """Requests waiting to be emailed. Empty unless the backend has the feature switched on."""
+        async with self._client() as client:
+            resp = await client.get(f"{self._base}/internal/deletion-requests", headers=self._headers)
+        resp.raise_for_status()
+        return list(resp.json().get("requests", []))
+
+    async def claim_deletion_request(self, request_id: str) -> bool:
+        """Take a queued request. True for exactly one caller; the worker must not send otherwise."""
+        async with self._client() as client:
+            resp = await client.post(f"{self._base}/internal/deletion-requests/{request_id}/claim", headers=self._headers)
+        if resp.status_code == 409:
+            return False
+        resp.raise_for_status()
+        return True
+
+    async def fetch_deletion_identity(self, request_id: str) -> dict:
+        """The details for this one email (name, first email, address only if the customer agreed)."""
+        return await self._identity(f"/internal/deletion-requests/{request_id}/identity")
+
+    async def report_deletion_result(
+        self, request_id: str, sent: bool, message_id: str | None = None, error: str | None = None
+    ) -> bool:
+        """Say how sending ended. False if the backend no longer considers it being sent."""
+        payload = {"sent": sent, "message_id": message_id, "error": error}
+        async with self._client() as client:
+            resp = await client.put(
+                f"{self._base}/internal/deletion-requests/{request_id}/result", json=payload, headers=self._headers
+            )
+        if resp.status_code == 409:
+            return False
+        resp.raise_for_status()
+        return True
+
     async def report_optout_health(self, checks: list[OptOutCheck]) -> None:
         """
         Report which brokers' public opt-out pages loaded. Public pages only, so this needs no

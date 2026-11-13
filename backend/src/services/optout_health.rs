@@ -11,6 +11,26 @@ use utoipa::ToSchema;
 /// Most checks one report may carry. There are 19 brokers today; this leaves room to grow.
 pub const MAX_CHECKS_PER_REPORT: usize = 200;
 
+/// Which set of pages a check belongs to (see migration 0014).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PageKind {
+    /// The opt-out pages of the brokers VectorScrub handles itself.
+    #[default]
+    Optout,
+    /// The privacy-request pages named by the California Data Broker Registry's companies.
+    CaRights,
+}
+
+impl PageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PageKind::Optout => "optout",
+            PageKind::CaRights => "ca_rights",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OptOutPageStatus {
@@ -46,6 +66,9 @@ impl OptOutPageStatus {
 /// One page's result, as reported by the agent.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OptOutPageCheck {
+    /// Older workers send no kind: those are the brokers' own opt-out pages.
+    #[serde(default)]
+    pub kind: PageKind,
     pub source: String,
     pub status: OptOutPageStatus,
     pub http_status: Option<i32>,
@@ -64,6 +87,7 @@ impl OptOutPageCheck {
 /// What the public sees for one broker.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PublicOptOutHealth {
+    pub kind: PageKind,
     pub source: String,
     pub status: OptOutPageStatus,
     #[serde(with = "time::serde::rfc3339")]
@@ -82,9 +106,9 @@ pub async fn record_checks(pool: &PgPool, checks: &[OptOutPageCheck]) -> Result<
     for c in checks {
         sqlx::query(
             "INSERT INTO optout_health \
-                (source, status, http_status, checked_at, last_reachable_at, consecutive_failures) \
-             VALUES ($1, $2, $3, NOW(), CASE WHEN $4 THEN NOW() END, CASE WHEN $4 THEN 0 ELSE 1 END) \
-             ON CONFLICT (source) DO UPDATE SET \
+                (kind, source, status, http_status, checked_at, last_reachable_at, consecutive_failures) \
+             VALUES ($5, $1, $2, $3, NOW(), CASE WHEN $4 THEN NOW() END, CASE WHEN $4 THEN 0 ELSE 1 END) \
+             ON CONFLICT (kind, source) DO UPDATE SET \
                 status = EXCLUDED.status, \
                 http_status = EXCLUDED.http_status, \
                 checked_at = NOW(), \
@@ -95,23 +119,26 @@ pub async fn record_checks(pool: &PgPool, checks: &[OptOutPageCheck]) -> Result<
         .bind(c.status.as_str())
         .bind(c.http_status)
         .bind(c.status.opened())
+        .bind(c.kind.as_str())
         .execute(&mut *tx)
         .await?;
     }
     tx.commit().await
 }
 
-pub async fn list_public(pool: &PgPool) -> Result<Vec<PublicOptOutHealth>, sqlx::Error> {
+pub async fn list_public(pool: &PgPool, kind: PageKind) -> Result<Vec<PublicOptOutHealth>, sqlx::Error> {
     let rows: Vec<(String, String, OffsetDateTime, Option<OffsetDateTime>)> = sqlx::query_as(
-        "SELECT source, status, checked_at, last_reachable_at FROM optout_health ORDER BY source",
+        "SELECT source, status, checked_at, last_reachable_at FROM optout_health \
+         WHERE kind = $1 ORDER BY source",
     )
+    .bind(kind.as_str())
     .fetch_all(pool)
     .await?;
     Ok(rows
         .into_iter()
         .filter_map(|(source, status, checked_at, last_reachable_at)| {
             let status = serde_json::from_value(serde_json::Value::String(status)).ok()?;
-            Some(PublicOptOutHealth { source, status, checked_at, last_reachable_at })
+            Some(PublicOptOutHealth { kind, source, status, checked_at, last_reachable_at })
         })
         .collect())
 }

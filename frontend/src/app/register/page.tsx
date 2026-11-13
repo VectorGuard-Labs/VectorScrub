@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Shield } from "lucide-react";
 import { register } from "@/lib/api";
+import { TERMS_VERSION } from "@/lib/legal";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -12,13 +13,20 @@ export default function RegisterPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const [interviewOk, setInterviewOk] = useState(false);
+  const [storyOk, setStoryOk] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError("");
+    if (!accepted) {
+      setError("Please read and accept the Terms of Service and Privacy Policy to continue.");
+      return;
+    }
     setLoading(true);
     try {
-      await register(email, password);
+      await register(email, password, TERMS_VERSION, { interview: interviewOk, story: storyOk });
       router.push("/dashboard");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Registration failed");
@@ -80,6 +88,47 @@ export default function RegisterPage() {
                 placeholder="Choose a strong password"
               />
             </div>
+            <div className="text-xs text-gray-400 border border-gray-800 rounded-lg p-3 space-y-1">
+              <p className="text-gray-300 font-medium">Before you start, this is an early pilot:</p>
+              <ul className="list-disc ml-4 space-y-1">
+                <li>We cannot remove you from every site. Many block automated tools.</li>
+                <li>For those, you will do the opt-out yourself from our steps, then we check the listing.</li>
+                <li>We submit a removal only after you authorize that listing.</li>
+                <li>We mark a listing removed only when our own check confirms it.</li>
+              </ul>
+            </div>
+            <div className="flex items-start gap-2">
+              <input
+                id="accept"
+                type="checkbox"
+                checked={accepted}
+                onChange={(e) => setAccepted(e.target.checked)}
+                className="mt-1"
+              />
+              <label htmlFor="accept" className="text-sm text-gray-400">
+                I have read and accept the{" "}
+                <Link href="/terms" target="_blank" className="text-teal-400 underline">
+                  Terms of Service
+                </Link>{" "}
+                and{" "}
+                <Link href="/privacy" target="_blank" className="text-teal-400 underline">
+                  Privacy Policy
+                </Link>
+                .
+              </label>
+            </div>
+            <fieldset className="space-y-2 border border-gray-800 rounded-lg p-3">
+              <legend className="text-xs text-gray-400 px-1">Optional. Neither is needed to take part.</legend>
+              <label className="flex items-start gap-2 text-xs text-gray-400">
+                <input type="checkbox" checked={interviewOk} onChange={(e) => setInterviewOk(e.target.checked)} className="mt-0.5" />
+                You may contact me about a short follow-up interview about my experience.
+              </label>
+              <label className="flex items-start gap-2 text-xs text-gray-400">
+                <input type="checkbox" checked={storyOk} onChange={(e) => setStoryOk(e.target.checked)} className="mt-0.5" />
+                You may ask me whether you can share an anonymized version of my results. (Asking is not
+                permission to publish; I would be asked first.)
+              </label>
+            </fieldset>
             {error && (
               <p role="alert" className="text-red-400 text-sm">
                 {error}

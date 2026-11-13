@@ -223,8 +223,35 @@ pub mod actions {
     /// A scan was failed because it kept getting lost.
     pub const SCAN_FAILED: &str = "scan.failed";
 
+    /// The customer added a listing they found themselves (site name only in the details).
+    pub const LISTING_ADD: &str = "listing.add";
+
     // Removals
     pub const EXPOSURE_AUTHORIZE_REMOVAL: &str = "exposure.authorize_removal";
+
+    /// The customer says they completed an opt-out by hand after automation failed. A claim, not proof.
+    pub const REMOVAL_MANUAL_SUBMIT: &str = "removal.manual_submit";
+
+    /// The customer asked a person for help with a removal automation could not do.
+    pub const REMOVAL_ASSISTANCE_REQUEST: &str = "removal.assistance_request";
+
+    /// An operator read the account email of a customer who asked for help.
+    pub const ASSISTANCE_CONTACT_READ: &str = "assistance.contact_read";
+
+    /// An operator opened a customer's case view (listings and next actions, no identity details).
+    pub const OPERATOR_CASE_VIEW: &str = "operator.case_view";
+
+    // Deletion requests sent to companies
+    /// The customer authorized a campaign of deletion requests (recipients and what is shared).
+    pub const DELETION_AUTHORIZE: &str = "deletion.authorize";
+    /// A deletion request email was sent to a company.
+    pub const DELETION_SENT: &str = "deletion.sent";
+    /// The customer reported what a company answered.
+    pub const DELETION_OUTCOME: &str = "deletion.outcome";
+
+    // Account
+    /// The customer erased their account. Written after erasure, with no customer attached.
+    pub const ACCOUNT_DELETE: &str = "account.delete";
 
     // Billing
     /// A Stripe event changed the customer's plan (upgrade, downgrade, or cancellation).
@@ -237,6 +264,7 @@ pub mod resources {
     pub const IDENTITY: &str = "identity";
     pub const SCAN: &str = "scan";
     pub const EXPOSURE: &str = "exposure";
+    pub const DELETION_REQUEST: &str = "deletion_request";
 }
 
 #[cfg(test)]

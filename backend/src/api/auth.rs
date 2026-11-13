@@ -65,6 +65,26 @@ pub async fn register(
 ) -> Result<(StatusCode, [(header::HeaderName, String); 1], Json<AuthResponse>), (StatusCode, String)> {
     req.validate()
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    if req.accepted_terms_version.as_deref() != Some(crate::models::customer::TERMS_VERSION) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "You must accept the current Terms of Service and Privacy Policy to create an account.".to_string(),
+        ));
+    }
+
+    // A small pilot stays small: stop at the configured number of accounts.
+    if let Some(max) = state.config.max_accounts {
+        let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM customers")
+            .fetch_one(&state.pool)
+            .await
+            .map_err(internal_error)?;
+        if existing >= max {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "The founding pilot is full, so we are not accepting new accounts right now.".to_string(),
+            ));
+        }
+    }
 
     let customer = customer_svc::create_account(&state.pool, &req)
         .await
@@ -235,4 +255,90 @@ pub async fn logout(State(state): State<AppState>) -> impl IntoResponse {
         StatusCode::NO_CONTENT,
         [(header::SET_COOKIE, cleared_session_cookie(state.config.secure_cookies()).to_string())],
     )
+}
+
+/// Body of `DELETE /api/v1/me`.
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+pub struct DeleteAccountRequest {
+    /// Re-authentication: a stolen session alone cannot erase an account.
+    #[validate(length(max = 1024))]
+    pub password: String,
+}
+
+/// DELETE /api/v1/me
+/// Permanently erases the signed-in customer's account and personal data. Needs the password
+/// again, and refuses while a subscription would keep billing. See services/account_deletion.rs
+/// for exactly what is removed and what is kept.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/me",
+    tag = "auth",
+    request_body = DeleteAccountRequest,
+    responses(
+        (status = 204, description = "Account erased; session cookie cleared"),
+        (status = 401, description = "Wrong password"),
+        (status = 409, description = "A subscription is still billing"),
+        (status = 429, description = "Too many failed attempts"),
+    ),
+)]
+pub async fn delete_account(
+    auth: crate::middleware::auth_extractor::AuthenticatedCustomer,
+    State(state): State<AppState>,
+    Json(req): Json<DeleteAccountRequest>,
+) -> Result<([(header::HeaderName, String); 1], StatusCode), Response> {
+    req.validate()
+        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()))?;
+
+    let customer = customer_svc::find_by_id(&state.pool, auth.id)
+        .await
+        .map_err(|e| internal_error(e).into_response())?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Customer not found"))?;
+
+    // Same lockout as login: this endpoint must not be a way to guess the password.
+    if let Some(wait) = login_throttle::locked_for(&state.pool, &customer.email)
+        .await
+        .map_err(|e| internal_error(e).into_response())?
+    {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, wait.to_string())],
+            format!("Too many failed attempts. Try again in {} minute(s).", (wait + 59) / 60),
+        )
+            .into_response());
+    }
+    let valid = auth_svc::verify_password_async(req.password.clone(), customer.password_hash.clone())
+        .await
+        .map_err(|e| internal_error(e).into_response())?;
+    if !valid {
+        login_throttle::record_failure(&state.pool, &customer.email)
+            .await
+            .map_err(|e| internal_error(e).into_response())?;
+        return Err(err(StatusCode::UNAUTHORIZED, "Incorrect password"));
+    }
+
+    match crate::services::account_deletion::delete_account(&state.pool, auth.id).await {
+        Ok(()) => {}
+        Err(crate::services::account_deletion::DeleteError::SubscriptionActive) => {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Cancel your subscription first (Billing page), then delete your account.",
+            ));
+        }
+        Err(crate::services::account_deletion::DeleteError::NotFound) => {
+            return Err(err(StatusCode::NOT_FOUND, "Customer not found"));
+        }
+        Err(e) => return Err(internal_error(e).into_response()),
+    }
+    login_throttle::clear(&state.pool, &customer.email).await.ok();
+
+    // No customer, no email, no IP: only that an account was erased, and when.
+    audit::AuditEntry::builder(audit::actions::ACCOUNT_DELETE, audit::resources::CUSTOMER)
+        .resource_id(auth.id)
+        .log_or_warn(&state.pool)
+        .await;
+
+    Ok((
+        [(header::SET_COOKIE, cleared_session_cookie(state.config.secure_cookies()).to_string())],
+        StatusCode::NO_CONTENT,
+    ))
 }

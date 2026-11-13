@@ -26,6 +26,22 @@ pub use db::AppState;
 async fn main() -> anyhow::Result<()> {
     dotenv().ok();
 
+    // `vectorscrub erase-account <email>`: erase an account on the customer's written request.
+    // The operator must first confirm the request really comes from the account's owner (for
+    // example by writing back to the account's own address). Same erasure as the self-service
+    // button; it also refuses while a subscription would keep billing.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("erase-account") {
+        return erase_account_cli(args.get(2).map(String::as_str)).await;
+    }
+
+    if args.get(1).map(String::as_str) == Some("pilot") {
+        return pilot_cli(&args[2..]).await;
+    }
+    if args.get(1).map(String::as_str) == Some("assistance") {
+        return assistance_cli(&args[2..]).await;
+    }
+
     let config = services::config::AppConfig::from_env()
         .context("Failed to load application configuration")?;
 
@@ -42,6 +58,13 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Failed to connect to PostgreSQL")?;
 
+    // The catalog of deletion-request channels is data. A malformed or evidence-free entry must
+    // stop the deploy here, not fail when the first customer uses it.
+    let channels = services::broker_channels::check_embedded()
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("Invalid deletion-request channel catalog")?;
+    info!(channels, "Deletion-request channel catalog is valid");
+
     // Run migrations
     sqlx::migrate!("./migrations")
         .run(&pool)
@@ -49,6 +72,17 @@ async fn main() -> anyhow::Result<()> {
         .context("Failed to run database migrations")?;
 
     info!("Database migrations applied successfully");
+
+    // Seal any listing links stored before they were encrypted (idempotent; a no-op once done).
+    // Not fatal: unsealed rows still read correctly, but a failure is loud so it gets fixed.
+    match crypto::MasterKey::from_base64(&config.master_key_b64) {
+        Ok(master) => match services::url_vault::backfill(&pool, &master).await {
+            Ok(0) => {}
+            Ok(n) => info!(sealed = n, "Encrypted legacy listing links"),
+            Err(e) => tracing::error!(error = %e, "Could not encrypt legacy listing links; they remain readable but unencrypted"),
+        },
+        Err(e) => tracing::error!(error = %e, "Master key unusable; listing links not encrypted"),
+    }
 
     // Redis connection
     let redis_client = redis::Client::open(config.redis_url.as_str())
@@ -141,4 +175,102 @@ async fn shutdown_signal() {
     }
     info!("Shutdown signal received — draining connections");
     observability::shutdown_observability();
+}
+
+async fn erase_account_cli(email: Option<&str>) -> anyhow::Result<()> {
+    use services::{account_deletion, audit};
+    let email = email.context("usage: vectorscrub erase-account <email>")?;
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let pool = PgPoolOptions::new().max_connections(2).connect(&url).await?;
+    let id: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM customers WHERE lower(email) = lower($1)")
+        .bind(email.trim())
+        .fetch_optional(&pool)
+        .await?;
+    let id = id.context("no account with that email")?;
+    account_deletion::delete_account(&pool, id).await?;
+    audit::AuditEntry::builder(audit::actions::ACCOUNT_DELETE, audit::resources::CUSTOMER)
+        .resource_id(id)
+        .details(serde_json::json!({ "by": "operator" }))
+        .log_or_warn(&pool)
+        .await;
+    println!("Account erased.");
+    Ok(())
+}
+
+/// `vectorscrub assistance list | contact <id> | start <id> | finish <id> <minutes> | decline <id> | summary`
+/// The pilot's hand-worked help queue. `list` shows no personal details; `contact` prints the
+/// customer's account email (and is audited) so a person can write to them.
+async fn assistance_cli(args: &[String]) -> anyhow::Result<()> {
+    use services::assistance;
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let pool = PgPoolOptions::new().max_connections(2).connect(&url).await?;
+    let id = |i: usize| -> anyhow::Result<uuid::Uuid> {
+        args.get(i).context("missing request id")?.parse().context("not a valid request id")
+    };
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let items = assistance::open_items(&pool).await?;
+            if items.is_empty() {
+                println!("No open help requests.");
+            }
+            for i in items {
+                println!(
+                    "{}  {:<22} {:<12} waiting {}h  {}",
+                    i.id, i.source_name, i.assistance_status, i.waiting_hours,
+                    i.failure_reason.unwrap_or_default()
+                );
+            }
+        }
+        Some("contact") => println!("{}", assistance::contact_email(&pool, id(1)?).await?),
+        Some("start") => assistance::set_status(&pool, id(1)?, "in_progress", None).await?,
+        Some("decline") => assistance::set_status(&pool, id(1)?, "declined", None).await?,
+        Some("finish") => {
+            let minutes: i32 = args.get(2).context("usage: finish <id> <minutes>")?.parse().context("minutes must be a number")?;
+            assistance::set_status(&pool, id(1)?, "completed", Some(minutes)).await?;
+        }
+        Some("summary") => {
+            let (n, avg) = assistance::summary(&pool).await?;
+            println!("{n} finished; average {} minutes", avg.map(|a| format!("{a:.1}")).unwrap_or_else(|| "n/a".into()));
+        }
+        _ => bail_usage()?,
+    }
+    Ok(())
+}
+
+fn bail_usage() -> anyhow::Result<()> {
+    anyhow::bail!("usage: vectorscrub assistance list | contact <id> | start <id> | finish <id> <minutes> | decline <id> | summary")
+}
+
+/// `vectorscrub pilot scorecard | cohort <email> <a|b|c> | log-time <email> <kind> <minutes> | case <email>`
+/// Operator tools for running the pilot. None of them print identity details, listing links or emails.
+async fn pilot_cli(args: &[String]) -> anyhow::Result<()> {
+    use services::pilot;
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let pool = PgPoolOptions::new().max_connections(2).connect(&url).await?;
+    let arg = |i: usize, what: &str| -> anyhow::Result<String> {
+        args.get(i).cloned().with_context(|| format!("missing {what}"))
+    };
+    match args.first().map(String::as_str) {
+        Some("scorecard") => print!("{}", pilot::render_scorecard(&pilot::scorecard(&pool).await?)),
+        Some("cohort") => {
+            let id = pilot::customer_by_email(&pool, &arg(1, "email")?).await?;
+            pilot::set_cohort(&pool, id, &arg(2, "cohort (a, b or c)")?).await?;
+            println!("Tagged.");
+        }
+        Some("log-time") => {
+            let id = pilot::customer_by_email(&pool, &arg(1, "email")?).await?;
+            let minutes: i32 = arg(3, "minutes")?.parse().context("minutes must be a number")?;
+            pilot::log_time(&pool, id, &arg(2, "kind")?, minutes).await?;
+            println!("Logged.");
+        }
+        Some("case") => {
+            let id = pilot::customer_by_email(&pool, &arg(1, "email")?).await?;
+            print!("{}", pilot::case_view(&pool, id).await?);
+        }
+        _ => anyhow::bail!(
+            "usage: vectorscrub pilot scorecard | cohort <email> <a|b|c> | log-time <email> <{}> <minutes> | case <email>",
+            pilot::TIME_KINDS.join("|")
+        ),
+    }
+    Ok(())
 }

@@ -49,6 +49,7 @@ chrono = { version = "0.4", features = ["serde"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # Validation
+url = "2.5"
 validator = { version = "0.18", features = ["derive"] }
 
 # Observability

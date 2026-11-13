@@ -136,3 +136,55 @@ async def test_the_listing_url_is_never_logged(broker, jane, capsys):
     await RemovalExecutor().submit_removal_request("r", "c", proc(broker, "good.html"), jane, "https://broker.example/people/jane-smith-1234")
     out = capsys.readouterr()
     assert "jane-smith" not in out.out + out.err
+
+
+# ---- the opt-out page itself answers with an error ----------------------------------------------
+
+@pytest.fixture(scope="module")
+def status_server():
+    """A fake broker whose opt-out page answers with whatever status the path asks for."""
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            code = int(self.path.strip("/").split("/")[0] or 200)
+            body = b"<html><body><h1>Error</h1><p>Something went wrong.</p></body></html>"
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args, **kwargs):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 451])
+async def test_a_site_that_blocks_our_browser_is_reported_as_blocking_with_the_manual_route(status_server, jane, status):
+    r = await RemovalExecutor().submit_web_form(proc(status_server, str(status)), jane, "u")
+    assert r["status"] == "failed" and r["confirmation_ref"] is None
+    assert f"HTTP {status}" in r["error"] and "blocked our automated browser" in r["error"]
+    assert "manual opt-out guide" in r["error"]
+    assert "layout" not in r["error"], "this is not a changed page"
+
+
+@pytest.mark.parametrize("status", [404, 410])
+async def test_a_dead_opt_out_address_is_reported_as_dead(status_server, jane, status):
+    r = await RemovalExecutor().submit_web_form(proc(status_server, str(status)), jane, "u")
+    assert r["status"] == "failed" and f"HTTP {status}" in r["error"] and "no longer exists" in r["error"]
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+async def test_a_site_error_is_reported_as_a_site_error(status_server, jane, status):
+    r = await RemovalExecutor().submit_web_form(proc(status_server, str(status)), jane, "u")
+    assert r["status"] == "failed" and f"HTTP {status}" in r["error"] and "had an error" in r["error"]
+
+
+def test_the_refusal_wording_for_every_status():
+    f = RemovalExecutor._refusal_reason
+    assert f(None) is None and f(200) is None and f(204) is None and f(302) is None
+    assert "blocked" in f(403) and "no longer exists" in f(404) and "had an error" in f(500)
+    assert "layout" not in " ".join(filter(None, (f(s) for s in (401, 403, 404, 429, 500, 503))))

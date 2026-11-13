@@ -227,3 +227,139 @@ def test_the_sites_we_list_are_found_under_their_parent_companies():
     assert owner["advancedbackgroundchecks.com"] == owner["smartbackgroundchecks.com"] == owner["fastpeoplesearch.com"]
     assert owner["peoplelooker.com"] == owner["ownerly.com"] == owner["beenverified.com"]
     assert "radaris.com" not in owner, "Radaris is not in the California registry"
+
+
+# ---- re-importing: what changed -------------------------------------------------------------
+
+from datetime import date  # noqa: E402
+
+from ca_registry.importer import (  # noqa: E402
+    PAGES_OUTPUT, diff_registries, format_diff, import_file, main, read_committed, render_pages, rights_pages,
+)
+
+
+def as_dicts(brokers):
+    return json.loads(json.dumps(brokers, default=lambda o: o.__dict__))
+
+
+def two_brokers():
+    return parse_registry(to_csv([
+        make_row(**{"Broker ID": "1", "Data broker name:": "Alpha Co", "Data broker primary website:": "alpha.com"}),
+        make_row(**{"Broker ID": "2", "Data broker name:": "Beta Co", "Data broker primary website:": "beta.com"}),
+    ]))
+
+
+def test_identical_data_is_reported_as_no_change():
+    old = as_dicts(two_brokers())
+    d = diff_registries(old, two_brokers())
+    assert d.identical and d.unchanged == 2
+    assert "no changes" in format_diff(d, "2026-01-01", today=date(2026, 3, 1))
+    assert "59 days ago" in format_diff(d, "2026-01-01", today=date(2026, 3, 1))
+    assert "1 day ago" in format_diff(d, "2026-02-28", today=date(2026, 3, 1))
+
+
+def test_additions_removals_and_changes_are_each_reported_by_company():
+    old = as_dicts(two_brokers())
+    new = parse_registry(to_csv([
+        make_row(**{"Broker ID": "1", "Data broker name:": "Alpha Co", "Data broker primary website:": "alpha.com; alpha-two.com"}),  # a site added
+        make_row(**{"Broker ID": "3", "Data broker name:": "Gamma Co", "Data broker primary website:": "gamma.com"}),                   # new; Beta is gone
+    ]))
+    d = diff_registries(old, new)
+    assert (d.added, d.removed, d.sites_changed) == (["Gamma Co"], ["Beta Co"], ["Alpha Co"])
+    assert not d.identical and d.unchanged == 0
+    text = format_diff(d, "2026-01-01", today=date(2026, 3, 1))
+    assert "1 added: Gamma Co" in text and "1 removed: Beta Co" in text and "different sites: Alpha Co" in text
+
+
+def test_a_changed_privacy_page_and_updated_figures_are_noticed():
+    old = as_dicts(two_brokers())
+    new = parse_registry(to_csv([
+        make_row(**{"Broker ID": "1", "Data broker name:": "Alpha Co", "Data broker primary website:": "alpha.com",
+                    "Data broker's primary website that contains details on how consumers can exercise their CA Consumer Privacy rights:": "alpha.com/new-page",
+                    "Requests to delete - Total requests received": "500"}),
+        make_row(**{"Broker ID": "2", "Data broker name:": "Beta Co", "Data broker primary website:": "beta.com"}),
+    ]))
+    d = diff_registries(old, new)
+    assert d.rights_changed == ["Alpha Co"] and d.deletion_changed == 1 and d.unchanged == 1
+
+
+def test_contact_detail_changes_are_invisible_because_they_are_never_kept():
+    old = as_dicts(two_brokers())
+    new = parse_registry(to_csv([
+        make_row(**{"Broker ID": "1", "Data broker name:": "Alpha Co", "Data broker primary website:": "alpha.com",
+                    "Data broker primary contact email address:": "someone.else@alpha.com", "Data broker primary phone number: [optional]": "999"}),
+        make_row(**{"Broker ID": "2", "Data broker name:": "Beta Co", "Data broker primary website:": "beta.com"}),
+    ]))
+    assert diff_registries(old, new).identical
+
+
+def test_a_long_list_is_summarised(monkeypatch):
+    new = parse_registry(to_csv([make_row(**{"Broker ID": str(i), "Data broker name:": f"Co {i:02d}", "Data broker primary website:": f"c{i}.com"}) for i in range(20)]))
+    text = format_diff(diff_registries([], new), None)
+    assert "no data in the repo yet" in text and "20 added" in text and "and 12 more" in text
+
+
+def test_check_mode_writes_nothing_and_signals_with_its_exit_code(tmp_path, monkeypatch):
+    import ca_registry.importer as imp
+    out, pages = tmp_path / "out.ts", tmp_path / "pages.json"
+    monkeypatch.setattr(imp, "OUTPUT", out)
+    monkeypatch.setattr(imp, "PAGES_OUTPUT", pages)
+    csv_file = tmp_path / "registry.csv"
+    csv_file.write_text(to_csv([make_row()]), encoding="utf-8")
+
+    assert main(["importer", "--check", str(csv_file)]) == 1, "nothing committed yet, so it differs"
+    assert not out.exists() and not pages.exists(), "--check never writes"
+
+    assert main(["importer", str(csv_file)]) == 0
+    assert out.exists() and pages.exists(), "the patched locations were used"
+    assert json.loads(pages.read_text()) == [{"id": "1", "url": "https://acme.com/privacy"}]
+
+    # now the file in place matches, so --check says so and still writes nothing
+    before = out.read_text(encoding="utf-8")
+    assert main(["importer", "--check", str(csv_file)]) == 0
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_importing_never_touches_the_real_generated_files_when_the_paths_are_redirected(tmp_path, monkeypatch):
+    """A test (or another checkout) that redirects the output must not overwrite the real data."""
+    import ca_registry.importer as imp
+    real_ts, real_pages = OUTPUT.read_bytes(), PAGES_OUTPUT.read_bytes()
+    monkeypatch.setattr(imp, "OUTPUT", tmp_path / "o.ts")
+    monkeypatch.setattr(imp, "PAGES_OUTPUT", tmp_path / "p.json")
+    csv_file = tmp_path / "r.csv"
+    csv_file.write_text(to_csv([make_row()]), encoding="utf-8")
+    imp.import_file(csv_file)
+    assert OUTPUT.read_bytes() == real_ts and PAGES_OUTPUT.read_bytes() == real_pages
+
+
+def test_bad_arguments_and_a_bad_file_are_reported_not_crashed_on(tmp_path, capsys):
+    assert main(["importer"]) == 2
+    bad = tmp_path / "bad.csv"
+    bad.write_text("a,b\n1,2\n", encoding="utf-8")
+    assert main(["importer", str(bad)]) == 1
+    assert "import failed" in capsys.readouterr().out
+    assert main(["importer", str(tmp_path / "missing.csv")]) == 1
+
+
+# ---- the pages file the nightly check reads ---------------------------------------------------
+
+def test_the_pages_file_matches_the_directory_and_holds_one_public_page_per_company():
+    _, brokers = committed()
+    pages = json.loads(PAGES_OUTPUT.read_text(encoding="utf-8"))
+    expected = [{"id": b["id"], "url": b["rights"][0]} for b in brokers if b["rights"]]
+    assert sorted(pages, key=lambda p: p["id"]) == sorted(expected, key=lambda p: p["id"]), (
+        "rights_pages.json is out of step with ca-brokers.generated.ts: re-run the importer")
+    assert len(pages) == len(brokers)
+    for p in pages:
+        assert set(p) == {"id", "url"} and p["id"].isalnum() and p["url"].startswith(("http://", "https://"))
+
+
+def test_rendered_pages_round_trip():
+    brokers = two_brokers()
+    assert json.loads(render_pages(brokers)) == rights_pages(brokers)
+    assert render_pages(brokers).endswith("\n")
+
+
+def test_the_committed_data_can_be_read_back_for_comparison():
+    brokers, imported_on = read_committed()
+    assert len(brokers) > 500 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", imported_on or "")

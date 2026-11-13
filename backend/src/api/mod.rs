@@ -12,6 +12,7 @@ pub mod billing;
 pub mod client_ip;
 mod csrf;
 mod customers;
+pub mod deletion;
 pub mod error;
 mod exposures;
 mod health;
@@ -46,13 +47,19 @@ pub fn router(state: AppState) -> Router {
             // CSRF check exempts: signing someone out is harmless.
             .route("/auth/logout", post(auth::logout))
             // Customer profile & identity
-            .route("/me", get(customers::get_profile))
+            .route("/me", get(customers::get_profile).delete(auth::delete_account))
             .route("/me/identity", post(customers::submit_identity))
             // The state of the saved address (two letters or null); never the address itself
             .route("/me/residence", get(customers::get_residence))
+            .route("/me/listings", post(customers::add_listing))
             // Which brokers recent scans could read (public: shown on the pricing page)
             .route("/public/coverage", get(public::coverage))
             .route("/public/optout-health", get(public::optout_health))
+            // Deletion requests sent to companies on the customer's behalf (off unless enabled)
+            .route("/deletion-requests/info", get(deletion::info))
+            .route("/deletion-requests", get(deletion::list))
+            .route("/deletion-campaigns", post(deletion::create_campaign))
+            .route("/deletion-requests/:id/outcome", post(deletion::outcome))
             // Billing: plans on offer and current subscription
             .route("/me/billing", get(billing::get_billing))
             // Stripe calls this; authenticated by its signature, not a session (see handler)
@@ -74,6 +81,9 @@ pub fn router(state: AppState) -> Router {
             // Removal requests
             .route("/removal-requests", get(removals::list_requests))
             .route("/removal-requests/:exposure_id/authorize", post(removals::authorize))
+            .route("/removal-requests/:id/done-by-hand", post(removals::done_by_hand))
+            .route("/removal-requests/:id/request-assistance", post(removals::request_assistance))
+            .route("/removal-requests/:id/listing-link", post(removals::update_listing_link))
             .route("/removal-requests/:id", get(removals::get_request)),
         &cfg,
     );
@@ -94,6 +104,11 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/scan/status", put(agent_callbacks::update_scan_status))
         .route("/internal/identity", post(agent_callbacks::scan_identity))
         .route("/internal/exposures", post(agent_callbacks::record_exposure))
+        // deletion requests: queue -> claim -> scoped identity -> result
+        .route("/internal/deletion-requests", get(deletion::queued))
+        .route("/internal/deletion-requests/:id/claim", post(deletion::claim))
+        .route("/internal/deletion-requests/:id/identity", post(deletion::identity))
+        .route("/internal/deletion-requests/:id/result", put(deletion::result))
         // nightly check that brokers' public opt-out pages still load (no customer data)
         .route("/internal/optout-health", put(agent_callbacks::report_optout_health))
         // removal submission and verification

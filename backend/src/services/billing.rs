@@ -37,7 +37,7 @@ pub const SIGNATURE_TOLERANCE_SECS: i64 = 300;
 /// Subscription statuses that carry a paid plan. `past_due` keeps access while Stripe retries
 /// the card; if it never succeeds Stripe cancels the subscription and the plan drops then.
 /// `unpaid`, `incomplete`, `incomplete_expired`, `paused` and `canceled` carry none.
-const ENTITLED_STATUSES: [&str; 3] = ["active", "trialing", "past_due"];
+pub(crate) const ENTITLED_STATUSES: [&str; 3] = ["active", "trialing", "past_due"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum BillingError {

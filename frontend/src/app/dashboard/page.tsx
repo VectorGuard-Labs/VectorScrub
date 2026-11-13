@@ -234,10 +234,22 @@ export default function DashboardPage() {
             Removals
           </button>
           <button
+            onClick={() => router.push("/dashboard/report")}
+            className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
+          >
+            Report
+          </button>
+          <button
             onClick={() => router.push("/dashboard/history")}
             className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
           >
             History
+          </button>
+          <button
+            onClick={() => router.push("/dashboard/requests")}
+            className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
+          >
+            Deletion requests
           </button>
           <button
             onClick={() => router.push("/dashboard/optouts")}
@@ -399,13 +411,16 @@ export default function DashboardPage() {
                       <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full">
                         {piiCategoryLabel(exp.pii_category)}
                       </span>
+                      {exp.origin === "customer" && (
+                        <span className="text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full">Added by you</span>
+                      )}
                     </div>
                     <p className="text-gray-400 text-sm truncate">
                       {exp.pii_summary}
                     </p>
                     <p className="text-gray-600 text-xs mt-1">
-                      Discovered {formatDate(exp.discovered_at)} · Confidence{" "}
-                      {Math.round(exp.confidence * 100)}%
+                      {exp.origin === "customer" ? "Added" : "Discovered"} {formatDate(exp.discovered_at)}
+                      {exp.origin === "customer" ? "" : ` · Confidence ${Math.round(exp.confidence * 100)}%`}
                     </p>
                   </div>
                   <div className="flex items-center gap-3 flex-shrink-0">

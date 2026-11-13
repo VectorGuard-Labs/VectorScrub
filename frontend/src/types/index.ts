@@ -45,7 +45,10 @@ export interface CustomerProfile {
 export interface Exposure {
   id: string;
   customer_id: string;
-  scan_job_id: string;
+  /** null for a listing the customer added themselves. */
+  scan_job_id: string | null;
+  /** "scan": found by our scan. "customer": added by the customer (their word, not our detection). */
+  origin: "scan" | "customer";
   source_name: string;
   source_url: string;
   pii_category: PiiCategory;
@@ -123,6 +126,17 @@ export interface RemovalRequest {
   next_check_at: string | null;
   created_at: string;
   updated_at: string;
+  /** Why a failed request failed, in plain words; null if it has not failed. */
+  failure_reason: string | null;
+  /** Most recent re-check of a submitted request, in our own words. */
+  last_check_result: "removed" | "still_present" | "inconclusive" | null;
+  last_check_at: string | null;
+  /** Present when the customer reported doing the opt-out by hand. A claim, not evidence. */
+  manual_reported_at: string | null;
+  manual_email_confirmation: "confirmed" | "not_required" | null;
+  manual_submitted_on: string | null;
+  assistance_requested_at: string | null;
+  assistance_status: "requested" | "in_progress" | "completed" | "declined" | null;
 }
 
 export interface RemovalAuditEntry {
@@ -165,10 +179,56 @@ export interface BillingInfo {
 // Opt-out page health (nightly check of each broker's public opt-out page)
 export type OptOutPageStatus = "reachable" | "captcha" | "blocked" | "not_found" | "unavailable";
 
+export type OptOutHealthKind = "optout" | "ca_rights";
+
 export interface OptOutHealth {
+  kind: OptOutHealthKind;
+  /** A site name for "optout"; the registry's Broker ID for "ca_rights". */
   source: string;
   status: OptOutPageStatus;
   checked_at: string;
   /** The last time the page opened (even with a CAPTCHA); kept across later failures. */
   last_reachable_at: string | null;
+}
+
+// Deletion requests sent to companies on the customer's behalf
+export interface DeletionChannel {
+  id: string;
+  company: string;
+  /** Where the request would be sent: the address the company itself publishes. */
+  address: string;
+  /** The company's own page that publishes it, a short quote from it, and when we last checked. */
+  source_url: string;
+  evidence: string;
+  verified_on: string;
+  applies_to: string[];
+  requests: string[];
+  legal_basis: string;
+  agent_requirements: string;
+  notes: string;
+  /** The company's page asks for the address to find a record, so it cannot be sent without it. */
+  requires_address: boolean;
+  eligible: boolean;
+  ineligible_reason: string | null;
+}
+
+export interface DeletionInfo {
+  authorization: { version: string; text: string };
+  plan_ok: boolean;
+  cooldown_days: number;
+  channels: DeletionChannel[];
+}
+
+export type DeletionStatus = "queued" | "sending" | "sent" | "failed" | "replied" | "removed" | "denied";
+
+export interface DeletionRequest {
+  id: string;
+  channel_id: string;
+  company: string;
+  status: DeletionStatus;
+  queued_at: string;
+  sent_at: string | null;
+  outcome_at: string | null;
+  follow_up_due: boolean;
+  error: string | null;
 }

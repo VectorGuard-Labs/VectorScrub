@@ -21,7 +21,7 @@ export interface CaBroker {
   deletion: CaBrokerDeletion | null;
 }
 
-export const CA_BROKERS_SOURCE = {"label": "California Data Broker Registry 2026 (California Privacy Protection Agency)", "importedOn": "2026-11-11", "companies": 625, "sites": 809} as const;
+export const CA_BROKERS_SOURCE = {"label": "California Data Broker Registry 2026 (California Privacy Protection Agency)", "importedOn": "2026-11-12", "companies": 625, "sites": 809} as const;
 
 export const CA_BROKERS: CaBroker[] = [
   {"id":"1000","name":"01Advertising Inc.","dba":null,"sites":["01advertising.com"],"rights":["https://www.01advertising.com/legal/dsar/"],"fcra":false,"us":true,"deletion":{"received":0,"whole":0,"part":0,"denied":0,"medianDays":0.0}},

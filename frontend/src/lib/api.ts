@@ -5,10 +5,13 @@
 import type {
   AuthResponse,
   BillingInfo,
+  DeletionInfo,
+  DeletionRequest,
   CustomerProfile,
   Exposure,
   ExposureSummary,
   OptOutHealth,
+  OptOutHealthKind,
   RemovalAuditEntry,
   RemovalRequest,
   ScanJob,
@@ -76,13 +79,21 @@ async function handleResponse<T>(
 // Auth
 export async function register(
   email: string,
-  password: string
+  password: string,
+  acceptedTermsVersion: string,
+  pilotConsents: { interview: boolean; story: boolean } = { interview: false, story: false }
 ): Promise<AuthResponse> {
   const res = await fetch(`${BASE}/auth/register`, {
     method: "POST",
     headers: jsonHeaders(),
     credentials: "same-origin",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({
+      email,
+      password,
+      accepted_terms_version: acceptedTermsVersion,
+      pilot_interview_ok: pilotConsents.interview,
+      pilot_story_ok: pilotConsents.story,
+    }),
   });
   return handleResponse<AuthResponse>(res, { authenticated: false });
 }
@@ -112,6 +123,30 @@ export async function logout(): Promise<void> {
   }
 }
 
+/**
+ * Permanently erases the signed-in account (needs the password again). A wrong password is a
+ * 401 that must be shown on the form, not treated as an expired session, so this does not use
+ * handleResponse's redirect.
+ */
+export async function deleteAccount(password: string): Promise<void> {
+  const res = await csrfFetch(`${BASE}/me`, {
+    method: "DELETE",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+}
+
+/** Track a listing the customer found themselves on a site we cannot scan. */
+export async function addOwnListing(sourceUrl: string): Promise<{ exposure: Exposure; message: string }> {
+  const res = await csrfFetch(`${BASE}/me/listings`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ source_url: sourceUrl }),
+  });
+  return handleResponse(res);
+}
+
 // Profile
 export async function getProfile(): Promise<CustomerProfile> {
   const res = await csrfFetch(`${BASE}/me`, { headers: jsonHeaders() });
@@ -119,10 +154,54 @@ export async function getProfile(): Promise<CustomerProfile> {
 }
 
 // Public: whether each broker's opt-out page loaded at its last nightly check. No session needed.
-export async function getOptOutHealth(): Promise<OptOutHealth[]> {
-  const res = await fetch(`${BASE}/public/optout-health`, { credentials: "same-origin" });
+export async function getOptOutHealth(kind: OptOutHealthKind = "optout"): Promise<OptOutHealth[]> {
+  const res = await fetch(`${BASE}/public/optout-health?kind=${kind}`, { credentials: "same-origin" });
   const body = await handleResponse<{ checks: OptOutHealth[] }>(res, { authenticated: false });
   return body.checks;
+}
+
+// The US state of the saved address as two letters, or null when there is none or it cannot be
+// told. Never the address itself. Used to offer California's DROP service to Californians only.
+export async function getResidenceState(): Promise<string | null> {
+  const res = await csrfFetch(`${BASE}/me/residence`, { headers: jsonHeaders() });
+  const body = await handleResponse<{ state: string | null }>(res);
+  return body.state;
+}
+
+// Deletion requests sent to companies on the customer's behalf. Every call answers 404 while the
+// feature is switched off on the server.
+export async function getDeletionInfo(): Promise<DeletionInfo> {
+  const res = await csrfFetch(`${BASE}/deletion-requests/info`, { headers: jsonHeaders() });
+  return handleResponse<DeletionInfo>(res);
+}
+
+export async function listDeletionRequests(): Promise<DeletionRequest[]> {
+  const res = await csrfFetch(`${BASE}/deletion-requests`, { headers: jsonHeaders() });
+  const body = await handleResponse<{ requests: DeletionRequest[] }>(res);
+  return body.requests;
+}
+
+export async function createDeletionCampaign(payload: {
+  channel_ids: string[];
+  include_address: boolean;
+  consent: boolean;
+  authorization_version: string;
+}): Promise<{ message: string }> {
+  const res = await csrfFetch(`${BASE}/deletion-campaigns`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(payload),
+  });
+  return handleResponse(res);
+}
+
+export async function reportDeletionOutcome(id: string, outcome: "replied" | "removed" | "denied"): Promise<void> {
+  const res = await csrfFetch(`${BASE}/deletion-requests/${id}/outcome`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ outcome }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
 }
 
 // Billing
@@ -205,6 +284,49 @@ export async function authorizeRemoval(exposureId: string): Promise<{
   message: string;
 }> {
   const res = await csrfFetch(`${BASE}/removal-requests/${exposureId}/authorize`, {
+    method: "POST",
+    headers: jsonHeaders(),
+  });
+  return handleResponse(res);
+}
+
+export interface ManualReport {
+  /** Did the site ask you to confirm by email? Only report once you have clicked the link. */
+  email_confirmation: "confirmed" | "not_required";
+  /** YYYY-MM-DD, the day you submitted it. Defaults to today. */
+  submitted_on?: string;
+  /** Optional: the exact profile link you opted out, on the same site. We re-check that page. */
+  listing_url?: string;
+}
+
+export async function markRemovalDoneByHand(
+  requestId: string,
+  report: ManualReport
+): Promise<{ request: RemovalRequest; message: string }> {
+  const res = await csrfFetch(`${BASE}/removal-requests/${requestId}/done-by-hand`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(report),
+  });
+  return handleResponse(res);
+}
+
+export async function updateListingLink(
+  requestId: string,
+  listingUrl: string
+): Promise<{ request: RemovalRequest; message: string }> {
+  const res = await csrfFetch(`${BASE}/removal-requests/${requestId}/listing-link`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ listing_url: listingUrl }),
+  });
+  return handleResponse(res);
+}
+
+export async function requestRemovalAssistance(
+  requestId: string
+): Promise<{ request: RemovalRequest; message: string }> {
+  const res = await csrfFetch(`${BASE}/removal-requests/${requestId}/request-assistance`, {
     method: "POST",
     headers: jsonHeaders(),
   });

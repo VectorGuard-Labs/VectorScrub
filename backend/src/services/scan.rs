@@ -231,6 +231,11 @@ pub struct PublicCoverage {
     /// the caller must not present `sources` as a result.
     pub scans: i64,
     pub sources: Vec<PublicSourceStatus>,
+    /// Sites where at least one listing found by our scan has been independently verified as
+    /// removed (ever, across all customers). Listings customers added themselves are left out,
+    /// because the page they point to is not one we chose. Empty until it has happened.
+    pub verified_sources: Vec<String>,
+    pub verified_removals: i64,
 }
 
 /// Summarise the per-source outcomes of recent finished scans (see `record_coverage`).
@@ -260,9 +265,20 @@ pub async fn public_coverage(pool: &PgPool) -> Result<PublicCoverage, sqlx::Erro
     .fetch_one(pool)
     .await?;
 
+    let verified: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT r.source_name, count(*) FROM removal_requests r \
+         JOIN exposures e ON e.id = r.exposure_id \
+         WHERE r.status = 'verified_removed' AND e.origin = 'scan' \
+         GROUP BY 1 ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
     Ok(PublicCoverage {
         window_days: PUBLIC_COVERAGE_WINDOW_DAYS,
         scans,
+        verified_removals: verified.iter().map(|(_, n)| n).sum(),
+        verified_sources: verified.into_iter().map(|(s, _)| s).collect(),
         sources: rows
             .into_iter()
             .map(|(source, checked, attempts)| PublicSourceStatus { source, readable: checked * 2 >= attempts })

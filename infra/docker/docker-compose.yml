@@ -104,6 +104,11 @@ services:
         # variable: Next.js bakes rewrites in at build time, so a runtime value is ignored.
         API_URL: http://backend:8080
     container_name: vectorscrub-frontend
+    environment:
+      # Shown on the Terms and Privacy pages; read at request time by the Next.js server.
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+      PILOT_PAYMENT_URL: ${PILOT_PAYMENT_URL:-}
+      SHOW_PAID_PLAN: ${SHOW_PAID_PLAN:-false}
     depends_on:
       backend:
         condition: service_healthy

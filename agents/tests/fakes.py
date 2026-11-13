@@ -31,12 +31,40 @@ class FakeBackend:
         self.audits: list[dict] = []
         self.optout_reports: list[list] = []
         self.optout_report_error: Exception | None = None
+        self.deletion_queue: list[dict] = []
+        self.deletion_claims_lost: set[str] = set()
+        self.deletion_identity: dict | Exception = {
+            "full_name": "Jane Marie Smith", "email_addresses": ["jane.smith@example.com"], "current_address": ""}
+        self.deletion_results: list[tuple] = []
+        self.deletion_result_errors: list[Exception] = []
 
     def _log(self, *call):
         self.calls.append(call)
 
     def names(self):
         return [c[0] for c in self.calls]
+
+    # --- deletion requests
+    async def list_deletion_requests(self):
+        self._log("list_deletion_requests")
+        return list(self.deletion_queue)
+
+    async def claim_deletion_request(self, request_id):
+        self._log("claim_deletion_request", request_id)
+        return request_id not in self.deletion_claims_lost
+
+    async def fetch_deletion_identity(self, request_id):
+        self._log("fetch_deletion_identity", request_id)
+        if isinstance(self.deletion_identity, Exception):
+            raise self.deletion_identity
+        return dict(self.deletion_identity)
+
+    async def report_deletion_result(self, request_id, sent, message_id=None, error=None):
+        self._log("report_deletion_result", request_id, sent)
+        if self.deletion_result_errors:
+            raise self.deletion_result_errors.pop(0)
+        self.deletion_results.append((request_id, sent, message_id, error))
+        return True
 
     # --- opt-out page health
     async def report_optout_health(self, checks):

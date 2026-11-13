@@ -2,6 +2,12 @@
 
 This document states what the system does today, what it does not, and the open design problem. An earlier version described a daily automated cleanup (inactive-account warnings and deletion, exposure and scan expiry, and so on). **None of that ran.** The module (`services/data_retention.rs`) was never started from `main.rs`, and was deleted because, as written, it could not have worked and an automatic deleter of customer data is too risky to ship unverified.
 
+## Account erasure (implemented, migration 0017)
+
+`DELETE /api/v1/me` (password required, refused while a subscription would keep billing; one set to cancel at period end is allowed) and the operator command `vectorscrub erase-account <email>` call `services/account_deletion.rs`. In one transaction it pseudonymizes the customer's rows in `audit_log` (customer, email, IP, user agent cleared, including failed-login rows that carry only the email) and `removal_audit_log` (customer and request links cleared, free-text `details` reset to `{}`), then deletes the customer; everything the customer owns cascades. `stripe_subscriptions` keeps Stripe's identifiers with the customer link cut. The audit triggers still reject every other UPDATE, all DELETEs and TRUNCATE (tested).
+
+Not covered: `audit_log.details` and `error_message` are not rewritten (they hold no email or name by convention, which is not enforced by the database); backups follow the hosting platform's schedule; inactive-account deletion still does not exist; an operator must confirm a written erasure request really comes from the account owner before running the command.
+
 ## What runs today
 
 The scan recovery loop (`jobs/recovery.rs`) performs two housekeeping deletes:
@@ -15,8 +21,6 @@ Nothing else is ever deleted automatically: customers, identity profiles, scan j
 
 ## What does not exist
 
-- Account deletion (no endpoint, no job).
-- Right-to-erasure / data-subject deletion workflow.
 - Inactive-account warnings or deletion.
 - Expiry of scan jobs, exposures, or alerts.
 - Application-log, backup, or Prometheus retention (these belong to the deployment platform).
