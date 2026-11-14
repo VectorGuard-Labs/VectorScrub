@@ -35,9 +35,10 @@ def test_scan_sources_match_what_discovery_actually_does():
     exported = {s["name"]: s for s in scan_sources()}
     assert {n for n, s in exported.items() if s["tier"] == "free"} == {
         "spokeo.com", "whitepages.com", "peoplefinder.com", "truepeoplesearch.com"}
-    assert len(exported) == 19
+    assert len(exported) == 34
     assert {n for n, s in exported.items() if s["manual"]} == {
-        "peoplefinder.com", "intelius.com", "peoplelooker.com", "ownerly.com", "instantcheckmate.com"}
+        "peoplefinder.com", "intelius.com", "peoplelooker.com", "ownerly.com", "instantcheckmate.com",
+        "zoominfo.com", "contactout.com", "rocketreach.co"}
 
 
 def test_the_peopleconnect_brands_share_one_suppression_center_and_no_known_dead_link_returns():

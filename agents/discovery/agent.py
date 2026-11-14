@@ -16,8 +16,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from shared.circuit_breaker import CircuitBreakerConfig, CircuitOpenError, get_circuit_breaker
 from shared.config import get_config
+from shared.metrics import get_metrics_collector, OperationType, OperationStatus
 from shared.models import DiscoveryReport, DiscoveryResult, IdentityContext, SourceOutcome
 from shared.page_text import MIN_PAGE_TEXT_CHARS, extract_text, looks_blocked, surname_of, window_around_surname
+from shared.rate_limiter import RateLimitExceeded, get_rate_limiter
 from shared.safe_fetch import FetchBlocked, ResponseTooLarge, safe_get
 
 # Characters of page text handed to the detection agent per candidate. The detection agent
@@ -45,7 +47,7 @@ log = structlog.get_logger(__name__)
 # Supported data broker sources
 # FREE tier: 4 brokers (acquisition tier)
 # PERSONAL: those 4 plus 11 more (15 total)
-# PREMIUM: all of Personal's plus 4 more (19 total), the "expanded source coverage" of the plan.
+# PREMIUM: all of Personal's plus 19 more (34 total), the "expanded source coverage" of the plan.
 # Every source here needs an entry in removal/agent.py OPT_OUT_REGISTRY, or a customer would
 # be offered a removal that cannot run (tests/test_discovery.py checks this).
 # The URL templates follow each site's public search-URL pattern; they have not been
@@ -154,6 +156,85 @@ DISCOVERY_SOURCES = [
         "url": "https://www.advancedbackgroundchecks.com/name/{name_slug}",
         "tier": "premium",
     },
+    # Phase 1 Expansion - Low-Hanging Fruit (15 additional, 34 total)
+    {
+        "name": "peekyou.com",
+        "url": "https://www.peekyou.com/{name_slug}",
+        "tier": "premium",
+    },
+    {
+        "name": "addresses.com",
+        "url": "https://www.addresses.com/people/{name_slug}",
+        "tier": "premium",
+    },
+    {
+        "name": "usphonebook.com",
+        "url": "https://www.usphonebook.com/{name_slug}",
+        "tier": "premium",
+    },
+    {
+        "name": "anywho.com",
+        "url": "https://www.anywho.com/people/{name}",
+        "tier": "premium",
+    },
+    {
+        "name": "411.com",
+        "url": "https://www.411.com/name/{name_slug}",
+        "tier": "premium",
+    },
+    {
+        "name": "checkpeople.com",
+        "url": "https://www.checkpeople.com/landingpages/namesearch?fn={first}&ln={last}",
+        "tier": "premium",
+    },
+    {
+        "name": "peoplewiz.com",
+        "url": "https://www.peoplewiz.com/people/{name_slug}",
+        "tier": "premium",
+    },
+    {
+        "name": "infotracer.com",
+        "url": "https://infotracer.com/people/{first}-{last}",
+        "tier": "premium",
+    },
+    {
+        "name": "publicrecordsnow.com",
+        "url": "https://www.publicrecordsnow.com/people/{name_slug}",
+        "tier": "premium",
+    },
+    {
+        "name": "myaddressbook.com",
+        "url": "https://www.myaddressbook.com/search.php?q={name}",
+        "tier": "premium",
+    },
+    {
+        "name": "neighbor.report",
+        "url": "https://neighbor.report/search?name={name}",
+        "tier": "premium",
+    },
+    {
+        "name": "pipl.com",
+        "url": "https://pipl.com/search/?q={name}",
+        "tier": "premium",
+    },
+    {
+        "name": "zoominfo.com",
+        "url": "https://www.zoominfo.com/p/{name_slug}",
+        "tier": "premium",
+        "manual": True,  # Requires business account for full access
+    },
+    {
+        "name": "contactout.com",
+        "url": "https://contactout.com/search/{name_slug}",
+        "tier": "premium",
+        "manual": True,  # B2B focus, requires account
+    },
+    {
+        "name": "rocketreach.co",
+        "url": "https://rocketreach.co/person/{name_slug}",
+        "tier": "premium",
+        "manual": True,  # B2B focus, requires account
+    },
 ]
 
 # Tier hierarchy: free gets 4 brokers, personal 15, premium 19. A tier gets every source
@@ -188,6 +269,8 @@ class DiscoveryAgent:
         self._outcomes: dict[str, SourceOutcome] = {}
         self.cfg = get_config()
         self._tier_level = TIER_ORDER.get(tier, 0)
+        self._rate_limiter = get_rate_limiter()
+        self._metrics = get_metrics_collector()
 
     def _sources_for_tier(self) -> list[dict]:
         return [
@@ -225,6 +308,7 @@ class DiscoveryAgent:
         Fetch a single source and do a lightweight keyword scan for PII signals.
         A high-confidence result goes to the Detection Agent for deep analysis.
         """
+        start_time = asyncio.get_event_loop().time()
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (compatible; VectorScrubBot/1.0; "
@@ -233,6 +317,18 @@ class DiscoveryAgent:
         }
         host = urlparse(url).hostname or source_name
         breaker = get_circuit_breaker(f"discovery:{host}", SOURCE_BREAKER)
+
+        # Check rate limit before attempting request
+        try:
+            await self._rate_limiter.check_rate_limit(source_name, "discovery")
+        except RateLimitExceeded as exc:
+            log.info(
+                "discovery_rate_limited",
+                source=source_name,
+                retry_after=exc.retry_after_seconds,
+            )
+            self._outcomes[source_name] = SourceOutcome.UNAVAILABLE
+            return []
 
         async def get():
             # safe_get follows redirects itself, one validated hop at a time, stays on this
@@ -253,23 +349,54 @@ class DiscoveryAgent:
         except CircuitOpenError:
             log.info("discovery_skipped_circuit_open", source=source_name)
             self._outcomes[source_name] = SourceOutcome.UNAVAILABLE
+            await self._metrics.record_operation(
+                broker=source_name,
+                operation=OperationType.DISCOVERY,
+                status=OperationStatus.FAILURE,
+                metadata={"reason": "circuit_open"},
+            )
             return []
         except SourceUnhealthy as exc:
             log.warning("discovery_source_unhealthy", source=source_name, status=exc.args[0])
             self._outcomes[source_name] = SourceOutcome.UNAVAILABLE
+            await self._metrics.record_operation(
+                broker=source_name,
+                operation=OperationType.DISCOVERY,
+                status=OperationStatus.FAILURE,
+                metadata={"reason": "unhealthy", "status": exc.args[0]},
+            )
             return []
         except FetchBlocked as exc:
             log.warning("discovery_fetch_blocked", source=source_name, reason=exc.reason)
             self._outcomes[source_name] = SourceOutcome.UNAVAILABLE
+            await self._metrics.record_operation(
+                broker=source_name,
+                operation=OperationType.DISCOVERY,
+                status=OperationStatus.BLOCKED,
+                metadata={"reason": exc.reason},
+            )
             return []
         except ResponseTooLarge:
             log.warning("discovery_response_too_large", source=source_name)
             self._outcomes[source_name] = SourceOutcome.UNREADABLE
+            await self._metrics.record_operation(
+                broker=source_name,
+                operation=OperationType.DISCOVERY,
+                status=OperationStatus.FAILURE,
+                metadata={"reason": "response_too_large"},
+            )
             return []
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             # Type only: transport error text can embed the URL, and the URL embeds the name.
             log.warning("discovery_fetch_failed", source=source_name, error_type=type(exc).__name__)
             self._outcomes[source_name] = SourceOutcome.UNAVAILABLE
+            status = OperationStatus.TIMEOUT if isinstance(exc, asyncio.TimeoutError) else OperationStatus.FAILURE
+            await self._metrics.record_operation(
+                broker=source_name,
+                operation=OperationType.DISCOVERY,
+                status=status,
+                metadata={"error_type": type(exc).__name__},
+            )
             return []
 
         if resp.status != 200:
@@ -288,6 +415,19 @@ class DiscoveryAgent:
             return []
         # From here the page was read, whether or not it lists the customer.
         self._outcomes[source_name] = SourceOutcome.CHECKED
+
+        # Record successful request for rate limiting
+        await self._rate_limiter.record_request(source_name, "discovery")
+
+        # Record metrics
+        duration_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+        await self._metrics.record_operation(
+            broker=source_name,
+            operation=OperationType.DISCOVERY,
+            status=OperationStatus.SUCCESS,
+            duration_ms=duration_ms,
+        )
+
         text = page_text.lower()
         results = []
 

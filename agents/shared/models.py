@@ -164,3 +164,40 @@ class RemovalProcedure(BaseModel):
     instructions: str = ""
     requires_id_verification: bool = False
     estimated_days: int = 14
+    # Phase 2: Site-specific form handling
+    form_fields: Optional[dict] = None  # Site-specific selectors and field mappings
+    handler_class: Optional[str] = None  # Handler class name to use (e.g., "SpokeoHandler")
+    # Phase 3: CAPTCHA handling
+    supports_human_captcha: bool = False  # Whether broker allows human-in-the-loop CAPTCHA solving
+    prefers_email_for_captcha: bool = False  # Prefer email opt-out if CAPTCHA frequent
+
+
+class CaptchaSessionStatus(str, Enum):
+    """Status of a paused CAPTCHA intervention session."""
+    WAITING_FOR_CUSTOMER = "waiting_for_customer"  # Paused at CAPTCHA, customer notified
+    CUSTOMER_SOLVING = "customer_solving"  # Customer opened session and is solving
+    SOLVED = "solved"  # Customer solved CAPTCHA, ready to resume
+    EXPIRED = "expired"  # Session expired (30 min timeout)
+    FAILED = "failed"  # Customer reported they couldn't solve it
+
+
+class CaptchaSession(BaseModel):
+    """
+    A paused browser session waiting for customer CAPTCHA intervention.
+
+    Phase 3: Human-in-the-loop CAPTCHA workflow.
+    The agent pauses when encountering a CAPTCHA, saves the browser session,
+    and notifies the customer to complete it. The customer solves the CAPTCHA
+    in an embedded browser view, then the agent resumes automation.
+    """
+    session_id: uuid.UUID
+    customer_id: uuid.UUID
+    removal_request_id: uuid.UUID
+    broker: str
+    status: CaptchaSessionStatus = CaptchaSessionStatus.WAITING_FOR_CUSTOMER
+    session_url: str  # URL for customer to access embedded browser
+    created_at: str  # ISO timestamp
+    expires_at: str  # ISO timestamp (30 minutes from creation)
+    browser_context_path: str  # Path to saved browser context
+    page_url: str  # URL where CAPTCHA was encountered
+    screenshot_hash: Optional[str] = None  # Evidence of CAPTCHA page

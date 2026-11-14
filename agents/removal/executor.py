@@ -6,9 +6,11 @@ Supports web forms (Playwright), email requests, and California DROP API.
 import asyncio
 import hashlib
 import html
+import logging
 import re
 import smtplib
 import ssl
+import uuid
 from dataclasses import dataclass
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -18,10 +20,24 @@ from urllib.parse import urlparse
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 import httpx
 import structlog
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
 
 from shared.models import RemovalProcedure, IdentityContext
+from removal.handlers import get_handler
+from shared.browser_stealth import BrowserStealth, get_fingerprint_rotator
+from shared.captcha_session import get_captcha_session_manager
 from shared.backend_client import BackendClient
 from shared.config import get_config
+from shared.evidence_storage import get_evidence_storage
+from shared.metrics import get_metrics_collector
+from shared.rate_limiter import get_rate_limiter
+from removal.handlers import get_handler
 
 log = structlog.get_logger()
 
@@ -152,6 +168,9 @@ class RemovalExecutor:
     def __init__(self):
         self.backend = BackendClient()
         self.config = get_config()
+        self._rate_limiter = get_rate_limiter()
+        self._metrics = get_metrics_collector()
+        self._evidence_storage = get_evidence_storage()
 
     async def submit_removal_request(
         self,
@@ -207,6 +226,12 @@ class RemovalExecutor:
                 "error": f"Submission failed ({_why(exc)})",
             }
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        retry=retry_if_exception_type((httpx.ConnectError, httpx.TimeoutException, PlaywrightTimeout)),
+        before_sleep=before_sleep_log(log, logging.INFO),
+    )
     async def submit_web_form(
         self, procedure: RemovalProcedure, identity: IdentityContext, source_url: str
     ) -> dict:
@@ -222,14 +247,40 @@ class RemovalExecutor:
         result page — returns "failed" with a reason, so the customer is told the
         truth and can retry, instead of being told a request went through when it
         may not have.
+
+        Retries up to 3 times with exponential backoff (4s, 8s, 16s) for network
+        errors and timeouts.
         """
         log.info("submit_web_form", opt_out_host=_host(procedure.opt_out_url))
 
+        # Generate removal request ID for evidence tracking
+        removal_request_id = str(uuid.uuid4())
+
+        # Check rate limit before starting expensive browser automation
+        broker = urlparse(procedure.opt_out_url or "").hostname or "unknown"
+        start_time = asyncio.get_event_loop().time()
+        await self._rate_limiter.wait_if_needed(broker, "removal", max_wait=60)
+
+        # Get site-specific handler (get_handler returns an instance, not a class)
+        handler = get_handler(procedure.source_name, procedure.handler_class)
+
+        # Phase 3: Browser fingerprinting improvements
+        fingerprint_rotator = get_fingerprint_rotator()
+        user_agent = fingerprint_rotator.get_user_agent_for_broker(procedure.source_name)
+
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ]
+            )
             try:
-                page = await browser.new_page()
-                await page.set_viewport_size({"width": 1280, "height": 1024})
+                # Use stealth context instead of plain new_page
+                context = await BrowserStealth.configure_stealth_context(browser, user_agent)
+                page = await context.new_page()
 
                 # Navigate to opt-out page
                 response = await page.goto(procedure.opt_out_url, timeout=30000)
@@ -247,30 +298,82 @@ class RemovalExecutor:
                     )
                     return self._failed(refusal)
 
-                # Do not attempt to defeat bot protection. A CAPTCHA means the
-                # broker wants a human; report it and stop.
-                if await self._has_captcha(page):
+                # Phase 3: CAPTCHA handling - human-in-the-loop or fail
+                has_captcha = await handler.has_captcha(page) if handler else await self._has_captcha(page)
+                if has_captcha:
                     log.warning("web_form_captcha", opt_out_host=_host(procedure.opt_out_url))
-                    return self._failed(
-                        "CAPTCHA challenge on the opt-out page; this source needs "
-                        "to be completed manually"
-                    )
 
-                # Fill form fields using generic selectors
-                # In production: use procedure.form_fields for site-specific selectors
-                fields_filled = await self._fill_generic_form(page, identity, source_url)
-                if fields_filled == 0:
-                    return self._failed(
-                        "No recognizable form fields on the opt-out page (the page "
-                        "layout may have changed)"
-                    )
+                    # Check if broker supports human CAPTCHA intervention
+                    if procedure.supports_human_captcha:
+                        # Pause automation and create intervention session
+                        screenshot_bytes = await page.screenshot(full_page=True)
+                        session_manager = get_captcha_session_manager()
 
-                # Submit form
-                if not await self._submit_form(page):
-                    return self._failed(
-                        "No submit control found on the opt-out page (the page "
-                        "layout may have changed)"
-                    )
+                        session = await session_manager.pause_for_captcha(
+                            customer_id=identity.customer_id,
+                            removal_request_id=uuid.UUID(removal_request_id),
+                            broker=procedure.source_name,
+                            context=context,
+                            page=page,
+                            screenshot_bytes=screenshot_bytes,
+                        )
+
+                        log.info(
+                            "captcha_intervention_created",
+                            session_id=str(session.session_id),
+                            session_url=session.session_url,
+                        )
+
+                        # Return pending status with session info
+                        return {
+                            "status": "captcha_intervention",
+                            "session_id": str(session.session_id),
+                            "session_url": session.session_url,
+                            "message": "CAPTCHA detected. Please solve it via the provided link to continue.",
+                            "error": None,
+                        }
+                    else:
+                        # No human intervention supported, fail
+                        await self._metrics.record_removal(
+                            broker=procedure.source_name,
+                            success=False,
+                            captcha_blocked=True,
+                        )
+                        return self._failed(
+                            "CAPTCHA challenge on the opt-out page; this source needs "
+                            "to be completed manually"
+                        )
+
+                # Fill form - use site-specific handler if available
+                if handler:
+                    fill_success = await handler.fill_form(page, identity, source_url)
+                    if not fill_success:
+                        return self._failed(
+                            "Site-specific form filling failed (the page layout may have changed)"
+                        )
+                else:
+                    # Fall back to generic form filling
+                    fields_filled = await self._fill_generic_form(page, identity, source_url)
+                    if fields_filled == 0:
+                        return self._failed(
+                            "No recognizable form fields on the opt-out page (the page "
+                            "layout may have changed)"
+                        )
+
+                # Submit form - use site-specific handler if available
+                if handler:
+                    submit_success = await handler.submit(page)
+                    if not submit_success:
+                        return self._failed(
+                            "Site-specific form submission failed (the page layout may have changed)"
+                        )
+                else:
+                    # Fall back to generic submission
+                    if not await self._submit_form(page):
+                        return self._failed(
+                            "No submit control found on the opt-out page (the page "
+                            "layout may have changed)"
+                        )
 
                 # Wait for confirmation page
                 await page.wait_for_load_state("networkidle", timeout=20000)
@@ -280,12 +383,32 @@ class RemovalExecutor:
                 screenshot_bytes = await page.screenshot(full_page=True)
                 evidence_hash = self.generate_evidence_hash(screenshot_bytes)
 
+                # Store screenshot in encrypted storage
+                try:
+                    await self._evidence_storage.store_evidence(
+                        screenshot_bytes=screenshot_bytes,
+                        customer_id=identity.customer_id,
+                        removal_request_id=removal_request_id,
+                        broker=procedure.source_name,
+                        timestamp=asyncio.get_event_loop().time(),
+                    )
+                    log.debug("evidence_screenshot_stored", evidence_hash=evidence_hash)
+                except Exception as exc:
+                    log.error("evidence_storage_failed", error_type=type(exc).__name__)
+                    # Continue anyway - evidence_hash is still recorded
+
                 # Judge the page from what a person would read on it. One verdict decides:
                 # failure wording vetoes acceptance, even when a reference is also shown.
                 try:
                     page_text = await page.inner_text("body")
                 except Exception:
                     page_text = ""
+
+                # Try handler-specific confirmation extraction first
+                handler_confirmation = None
+                if handler:
+                    handler_confirmation = await handler.extract_confirmation(page, page_text)
+
                 verdict = judge_result_page(page_text)
 
                 if not verdict.accepted:
@@ -304,12 +427,26 @@ class RemovalExecutor:
                     result["evidence_hash"] = evidence_hash
                     return result
 
-                confirmation_ref = verdict.reference
+                # Use handler confirmation if available, otherwise use verdict reference
+                confirmation_ref = handler_confirmation or verdict.reference
                 log.info(
                     "web_form_submitted",
                     confirmation_ref=confirmation_ref,
                     evidence_hash=evidence_hash,
                     reason=verdict.reason,
+                    handler_used=handler is not None,
+                )
+
+                # Record successful removal for rate limiting
+                await self._rate_limiter.record_request(broker, "removal")
+
+                # Record metrics
+                duration_s = asyncio.get_event_loop().time() - start_time
+                await self._metrics.record_removal(
+                    broker=procedure.source_name,
+                    success=True,
+                    duration_s=duration_s,
+                    verification_required="EMAIL_VERIFICATION" in (confirmation_ref or ""),
                 )
 
                 return {
@@ -323,6 +460,11 @@ class RemovalExecutor:
                 log.warning("web_form_timeout", opt_out_host=_host(procedure.opt_out_url), error_type=_why(exc))
                 return self._failed("The opt-out page timed out")
             finally:
+                # Close context first (if not saved for CAPTCHA intervention)
+                try:
+                    await context.close()
+                except Exception:
+                    pass  # May already be closed or saved
                 await browser.close()
 
     @staticmethod
@@ -464,6 +606,12 @@ class RemovalExecutor:
         """Generates SHA-256 hash of screenshot for tamper-evidence."""
         return hashlib.sha256(screenshot_bytes).hexdigest()
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        retry=retry_if_exception_type((smtplib.SMTPException, ssl.SSLError, OSError)),
+        before_sleep=before_sleep_log(log, logging.INFO),
+    )
     async def submit_email_request(
         self, procedure: RemovalProcedure, identity: IdentityContext, source_url: str
     ) -> dict:
@@ -472,6 +620,9 @@ class RemovalExecutor:
 
         Sends a properly formatted opt-out email to the data broker's
         privacy contact address with all required customer information.
+
+        Retries up to 3 times with exponential backoff (4s, 8s, 16s) for
+        SMTP and SSL errors.
         """
         if not procedure.opt_out_email:
             return {
@@ -491,6 +642,11 @@ class RemovalExecutor:
             }
 
         log.info("submit_email_request", to_domain=(procedure.opt_out_email or "").rpartition("@")[2])
+
+        # Rate limit check - use domain from email address as broker identifier
+        email_domain = (procedure.opt_out_email or "").rpartition("@")[2]
+        broker = procedure.source_name or email_domain
+        await self._rate_limiter.wait_if_needed(broker, "removal", max_wait=60)
 
         try:
             # Build email content
@@ -523,6 +679,16 @@ class RemovalExecutor:
                 evidence_hash=evidence_hash,
             )
 
+            # Record successful email removal for rate limiting
+            await self._rate_limiter.record_request(broker, "removal")
+
+            # Record metrics
+            await self._metrics.record_smtp_delivery(success=True)
+            await self._metrics.record_removal(
+                broker=procedure.source_name,
+                success=True,
+            )
+
             return {
                 "status": "submitted",
                 "confirmation_ref": message_id or f"email:{procedure.opt_out_email}",
@@ -532,6 +698,14 @@ class RemovalExecutor:
 
         except Exception as exc:
             log.error("email_submission_failed", error_type=_why(exc))
+
+            # Record metrics
+            await self._metrics.record_smtp_delivery(success=False, error_type=_why(exc))
+            await self._metrics.record_removal(
+                broker=procedure.source_name,
+                success=False,
+            )
+
             return {
                 "status": "failed",
                 "confirmation_ref": None,

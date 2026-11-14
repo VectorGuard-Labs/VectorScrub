@@ -14,6 +14,24 @@ export interface BrokerOptOut {
 
 export const BROKER_OPT_OUTS: BrokerOptOut[] = [
   {
+    "name": "411.com",
+    "method": "email",
+    "optOutUrl": null,
+    "optOutEmail": "privacy@411.com",
+    "instructions": "Email with subject 'Opt-Out Request' including your full name, phone number, address, and profile URL.",
+    "estimatedDays": 7,
+    "requiresIdVerification": false
+  },
+  {
+    "name": "addresses.com",
+    "method": "email",
+    "optOutUrl": null,
+    "optOutEmail": "support@addresses.com",
+    "instructions": "Email with subject 'Privacy Opt-Out Request' including your full name, current address, and any profile URLs you want removed.",
+    "estimatedDays": 10,
+    "requiresIdVerification": false
+  },
+  {
     "name": "advancedbackgroundchecks.com",
     "method": "web_form",
     "optOutUrl": "https://www.advancedbackgroundchecks.com/opt-out",
@@ -23,12 +41,39 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "requiresIdVerification": false
   },
   {
+    "name": "anywho.com",
+    "method": "web_form",
+    "optOutUrl": "https://www.anywho.com/whitepages/suppression-requests",
+    "optOutEmail": null,
+    "instructions": "AnyWho is operated by Whitepages. Use the Whitepages suppression request form. Enter your listing URL and submit.",
+    "estimatedDays": 3,
+    "requiresIdVerification": false
+  },
+  {
     "name": "beenverified.com",
     "method": "web_form",
     "optOutUrl": "https://www.beenverified.com/app/optout/search",
     "optOutEmail": null,
     "instructions": "Enter personal details, find your record, and submit opt-out.",
     "estimatedDays": 7,
+    "requiresIdVerification": false
+  },
+  {
+    "name": "checkpeople.com",
+    "method": "web_form",
+    "optOutUrl": "https://www.checkpeople.com/opt-out",
+    "optOutEmail": null,
+    "instructions": "Enter your name and email, then verify via email link. Removal typically within 48 hours.",
+    "estimatedDays": 2,
+    "requiresIdVerification": false
+  },
+  {
+    "name": "contactout.com",
+    "method": "email",
+    "optOutUrl": null,
+    "optOutEmail": "privacy@contactout.com",
+    "instructions": "Email with subject 'GDPR Data Removal Request' including your name, email, and any associated profile URLs. B2B service, allow 30 days per GDPR compliance.",
+    "estimatedDays": 30,
     "requiresIdVerification": false
   },
   {
@@ -50,6 +95,15 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "requiresIdVerification": false
   },
   {
+    "name": "infotracer.com",
+    "method": "web_form",
+    "optOutUrl": "https://infotracer.com/optout",
+    "optOutEmail": null,
+    "instructions": "Enter personal details to find your record, then submit opt-out request. Email verification required. Removal within 5-7 days.",
+    "estimatedDays": 7,
+    "requiresIdVerification": false
+  },
+  {
     "name": "instantcheckmate.com",
     "method": "web_form",
     "optOutUrl": "https://suppression.peopleconnect.us/login",
@@ -68,6 +122,15 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "requiresIdVerification": false
   },
   {
+    "name": "myaddressbook.com",
+    "method": "email",
+    "optOutUrl": null,
+    "optOutEmail": "privacy@myaddressbook.com",
+    "instructions": "Email with subject 'Data Removal Request' including your name and address. Allow 14 days for processing.",
+    "estimatedDays": 14,
+    "requiresIdVerification": false
+  },
+  {
     "name": "mylife.com",
     "method": "email",
     "optOutUrl": null,
@@ -75,6 +138,15 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "instructions": "Email with subject 'Opt-Out Request' including full name and profile URL.",
     "estimatedDays": 30,
     "requiresIdVerification": true
+  },
+  {
+    "name": "neighbor.report",
+    "method": "web_form",
+    "optOutUrl": "https://neighbor.report/opt-out",
+    "optOutEmail": null,
+    "instructions": "Enter your name and address to search for your record. Select it and submit opt-out. Email verification required. Removal within 48-72 hours.",
+    "estimatedDays": 3,
+    "requiresIdVerification": false
   },
   {
     "name": "nuwber.com",
@@ -92,6 +164,15 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "optOutEmail": null,
     "instructions": "Search by name and state, select your record, enter your email and confirm the verification email. Ownerly's opt-outs are managed by BeenVerified, so a BeenVerified removal may also cover it.",
     "estimatedDays": 5,
+    "requiresIdVerification": false
+  },
+  {
+    "name": "peekyou.com",
+    "method": "web_form",
+    "optOutUrl": "https://www.peekyou.com/about/contact/optout/",
+    "optOutEmail": null,
+    "instructions": "Enter your full name and email address. PeekYou will send a verification email. Click the link in the email to confirm your opt-out request. Removal typically completes within 48 hours.",
+    "estimatedDays": 2,
     "requiresIdVerification": false
   },
   {
@@ -113,12 +194,48 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "requiresIdVerification": false
   },
   {
+    "name": "peoplewiz.com",
+    "method": "web_form",
+    "optOutUrl": "https://www.peoplewiz.com/privacy",
+    "optOutEmail": null,
+    "instructions": "Fill out the privacy request form with your name, email, and profile URL. Verify via email. Removal within 72 hours.",
+    "estimatedDays": 3,
+    "requiresIdVerification": false
+  },
+  {
+    "name": "pipl.com",
+    "method": "web_form",
+    "optOutUrl": "https://pipl.com/privacy/remove/",
+    "optOutEmail": null,
+    "instructions": "Enter your profile URL and email address. Pipl will send verification email. Click link to confirm removal. Processing takes 48 hours.",
+    "estimatedDays": 2,
+    "requiresIdVerification": false
+  },
+  {
+    "name": "publicrecordsnow.com",
+    "method": "email",
+    "optOutUrl": null,
+    "optOutEmail": "support@publicrecordsnow.com",
+    "instructions": "Email with subject 'Privacy Request - Opt Out' including your full name, address, and profile URL. Allow 7-10 business days.",
+    "estimatedDays": 10,
+    "requiresIdVerification": false
+  },
+  {
     "name": "radaris.com",
     "method": "web_form",
     "optOutUrl": "https://radaris.com/page/how-to-remove",
     "optOutEmail": null,
     "instructions": "Search for your listing, copy the URL, submit opt-out form. Verify via email. Removal completes within 24-72 hours.",
     "estimatedDays": 3,
+    "requiresIdVerification": false
+  },
+  {
+    "name": "rocketreach.co",
+    "method": "email",
+    "optOutUrl": null,
+    "optOutEmail": "privacy@rocketreach.co",
+    "instructions": "Email with subject 'Data Removal Request - CCPA/GDPR' including your full name, work email, and profile URL. B2B-focused service. Allow 30 days.",
+    "estimatedDays": 30,
     "requiresIdVerification": false
   },
   {
@@ -167,6 +284,15 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "requiresIdVerification": false
   },
   {
+    "name": "usphonebook.com",
+    "method": "web_form",
+    "optOutUrl": "https://www.usphonebook.com/opt-out",
+    "optOutEmail": null,
+    "instructions": "Search for your listing, select it, and submit the opt-out form with your email for verification. Removal completes within 72 hours.",
+    "estimatedDays": 3,
+    "requiresIdVerification": false
+  },
+  {
     "name": "ussearch.com",
     "method": "web_form",
     "optOutUrl": "https://suppression.peopleconnect.us/login",
@@ -182,6 +308,15 @@ export const BROKER_OPT_OUTS: BrokerOptOut[] = [
     "optOutEmail": null,
     "instructions": "Enter listing URL and submit suppression request.",
     "estimatedDays": 3,
+    "requiresIdVerification": false
+  },
+  {
+    "name": "zoominfo.com",
+    "method": "web_form",
+    "optOutUrl": "https://www.zoominfo.com/update/remove",
+    "optOutEmail": null,
+    "instructions": "Search for your profile, enter your email and verify. ZoomInfo is B2B-focused but includes some consumer records. Removal within 24 hours for verified requests.",
+    "estimatedDays": 1,
     "requiresIdVerification": false
   }
 ];
@@ -287,5 +422,80 @@ export const SCAN_SOURCES: ScanSource[] = [
     "name": "advancedbackgroundchecks.com",
     "tier": "premium",
     "manual": false
+  },
+  {
+    "name": "peekyou.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "addresses.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "usphonebook.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "anywho.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "411.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "checkpeople.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "peoplewiz.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "infotracer.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "publicrecordsnow.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "myaddressbook.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "neighbor.report",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "pipl.com",
+    "tier": "premium",
+    "manual": false
+  },
+  {
+    "name": "zoominfo.com",
+    "tier": "premium",
+    "manual": true
+  },
+  {
+    "name": "contactout.com",
+    "tier": "premium",
+    "manual": true
+  },
+  {
+    "name": "rocketreach.co",
+    "tier": "premium",
+    "manual": true
   }
 ];

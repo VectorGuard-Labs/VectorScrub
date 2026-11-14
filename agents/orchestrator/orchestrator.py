@@ -49,6 +49,7 @@ from deletion.sender import DeletionSender
 from removal.health import OptOutHealthChecker
 from shared.backend_client import BackendClient, IdentityDenied, ScanJobLost
 from shared.config import get_config
+from shared.distributed_lock import DistributedLock, LockAcquisitionFailed
 from shared.models import IdentityContext, QueuedDeletion, ScanJobPayload, ScanJobStatus
 
 log = structlog.get_logger(__name__)
@@ -169,6 +170,33 @@ class Orchestrator:
     async def _run_scan_pipeline(self, payload: ScanJobPayload, attempt: int) -> None:
         job_id = str(payload.job_id)
         customer_id = str(payload.customer_id)
+
+        # Acquire distributed lock to prevent concurrent scans for the same customer
+        lock = DistributedLock(
+            f"scan:{customer_id}",
+            timeout=300,  # 5 minute lock (scans should complete faster)
+            wait_timeout=10,  # Wait up to 10 seconds for lock
+        )
+
+        try:
+            await lock.acquire()
+        except LockAcquisitionFailed:
+            log.warning(
+                "scan_already_running",
+                customer_id=customer_id,
+                job_id=job_id,
+            )
+            await self.backend.update_scan_status(
+                job_id,
+                ScanJobStatus.FAILED,
+                attempt=attempt,
+                error_message=(
+                    "Another scan is already in progress for this account. "
+                    "Please wait for it to complete before starting a new scan."
+                ),
+            )
+            return
+
         try:
             # Identity comes from the backend, scoped to this job by the token that was
             # minted for it. The Python layer never holds a key.
@@ -256,6 +284,9 @@ class Orchestrator:
                 attempt=attempt,
                 error_message=f"The scan could not be completed ({type(exc).__name__}).",
             )
+        finally:
+            # Always release the distributed lock
+            await lock.release()
 
     async def _heartbeat(self, job_id: str, attempt: int, work: "asyncio.Task") -> None:
         """

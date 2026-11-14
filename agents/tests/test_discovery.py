@@ -185,9 +185,9 @@ async def test_manual_sources_are_never_fetched_and_are_reported_as_needing_a_ma
     report = await DiscoveryAgent(tier="premium").run_report(identity)
 
     assert not (set(fetched) & MANUAL), "no requests are wasted on pages known not to work"
-    assert len(report.outcomes) == 19, "they still appear in the report"
+    assert len(report.outcomes) == 34, "they still appear in the report"
     assert {n for n, o in report.outcomes.items() if o is SourceOutcome.NOT_SUPPORTED} == MANUAL
-    assert report.checked == 14 and report.total == 19
+    assert report.checked == 26 and report.total == 34
 
 
 async def test_a_free_scan_reports_its_one_manual_source(identity, monkeypatch):

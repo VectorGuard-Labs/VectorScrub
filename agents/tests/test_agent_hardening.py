@@ -255,13 +255,23 @@ def names(tier):
 
 def test_each_tier_gets_the_sources_at_or_below_its_level():
     free, personal, premium = names("free"), names("personal"), names("premium")
-    assert (len(free), len(personal), len(premium)) == (4, 15, 19)
+    assert (len(free), len(personal), len(premium)) == (4, 15, 34)
     assert free < personal < premium, "strict supersets: Premium has everything Personal has, plus more"
 
 
 def test_premium_gets_the_expanded_sources_personal_does_not():
     extra = names("premium") - names("personal")
-    assert extra == {"truthfinder.com", "thatsthem.com", "smartbackgroundchecks.com", "advancedbackgroundchecks.com"}
+    # Phase 1 expansion added 15 new premium brokers + original 4 premium-only
+    expected_premium_only = {
+        # Original premium-only (4)
+        "truthfinder.com", "thatsthem.com", "smartbackgroundchecks.com", "advancedbackgroundchecks.com",
+        # Phase 1 expansion (15)
+        "peekyou.com", "addresses.com", "usphonebook.com", "anywho.com", "411.com",
+        "checkpeople.com", "peoplewiz.com", "infotracer.com", "publicrecordsnow.com",
+        "myaddressbook.com", "neighbor.report", "pipl.com", "zoominfo.com",
+        "contactout.com", "rocketreach.co"
+    }
+    assert extra == expected_premium_only
 
 
 def test_every_discovery_source_has_a_removal_procedure():
