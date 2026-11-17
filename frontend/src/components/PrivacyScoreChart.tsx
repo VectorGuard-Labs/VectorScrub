@@ -108,7 +108,7 @@ export default function PrivacyScoreChart() {
               onClick={() => setTimeRange(days)}
               className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                 timeRange === days
-                  ? "bg-teal-600 text-white"
+                  ? "bg-brand-blue-600 text-white"
                   : "bg-gray-800 text-gray-400 hover:bg-gray-700"
               }`}
             >
@@ -125,7 +125,7 @@ export default function PrivacyScoreChart() {
         </h3>
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={scoreData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <CartesianGrid strokeDasharray="3 3" stroke="#22365F" />
             <XAxis
               dataKey="date"
               stroke="#9CA3AF"
@@ -138,8 +138,8 @@ export default function PrivacyScoreChart() {
             />
             <Tooltip
               contentStyle={{
-                backgroundColor: "#1F2937",
-                border: "1px solid #374151",
+                backgroundColor: "#15254A",
+                border: "1px solid #22365F",
                 borderRadius: "8px",
                 fontSize: "12px",
               }}
@@ -148,9 +148,9 @@ export default function PrivacyScoreChart() {
             <Line
               type="monotone"
               dataKey="score"
-              stroke="#14B8A6"
+              stroke="#3B82F6"
               strokeWidth={2}
-              dot={{ fill: "#14B8A6", r: 4 }}
+              dot={{ fill: "#3B82F6", r: 4 }}
               activeDot={{ r: 6 }}
             />
           </LineChart>
@@ -164,7 +164,7 @@ export default function PrivacyScoreChart() {
         </h3>
         <ResponsiveContainer width="100%" height={200}>
           <AreaChart data={scoreData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <CartesianGrid strokeDasharray="3 3" stroke="#22365F" />
             <XAxis
               dataKey="date"
               stroke="#9CA3AF"
@@ -173,8 +173,8 @@ export default function PrivacyScoreChart() {
             <YAxis stroke="#9CA3AF" style={{ fontSize: "12px" }} />
             <Tooltip
               contentStyle={{
-                backgroundColor: "#1F2937",
-                border: "1px solid #374151",
+                backgroundColor: "#15254A",
+                border: "1px solid #22365F",
                 borderRadius: "8px",
                 fontSize: "12px",
               }}

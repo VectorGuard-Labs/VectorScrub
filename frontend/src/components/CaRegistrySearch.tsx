@@ -56,7 +56,7 @@ export default function CaRegistrySearch({
         or by a site you found yourself on.
       </p>
       <p
-        className="text-gray-300 text-sm mb-4 border-l-2 border-teal-700 pl-3"
+        className="text-gray-300 text-sm mb-4 border-l-2 border-brand-blue-700 pl-3"
         data-testid="registry-residency-note"
       >
         This is California&apos;s list. Your rights depend on where you live, and some companies only act on
@@ -78,7 +78,7 @@ export default function CaRegistrySearch({
             setShown(PAGE);
           }}
           placeholder="Company or site, for example zabasearch.com"
-          className="w-full bg-gray-900 border border-gray-700 text-white text-sm rounded-lg pl-9 pr-3 py-2.5 focus:ring-2 focus:ring-teal-600 focus:outline-none"
+          className="w-full bg-gray-900 border border-gray-700 text-white text-sm rounded-lg pl-9 pr-3 py-2.5 focus:ring-2 focus:ring-brand-blue-600 focus:outline-none"
           autoComplete="off"
           spellCheck={false}
         />
@@ -101,7 +101,7 @@ export default function CaRegistrySearch({
                 <h3 className="text-white font-medium text-sm">{b.name}</h3>
                 {b.dba && <span className="text-gray-500 text-xs">({b.dba})</span>}
                 {ours.length > 0 && (
-                  <span className="text-xs px-2 py-0.5 rounded-full border text-teal-300 border-teal-800 bg-teal-950">
+                  <span className="text-xs px-2 py-0.5 rounded-full border text-brand-blue-300 border-brand-blue-800 bg-brand-blue-950">
                     Runs {ours.length === 1 ? "a site" : "sites"} in our guide
                   </span>
                 )}
@@ -151,7 +151,7 @@ export default function CaRegistrySearch({
                       href={href}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 text-teal-400 hover:text-teal-300 font-medium break-all"
+                      className="inline-flex items-center gap-1.5 text-brand-blue-400 hover:text-brand-blue-300 font-medium break-all"
                     >
                       {i === 0 ? "Privacy-request page" : "Another page"}
                       <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
@@ -167,7 +167,7 @@ export default function CaRegistrySearch({
       {shown < results.length && (
         <button
           onClick={() => setShown((n) => n + PAGE)}
-          className="mt-4 text-teal-400 hover:text-teal-300 text-sm font-medium"
+          className="mt-4 text-brand-blue-400 hover:text-brand-blue-300 text-sm font-medium"
         >
           Show {Math.min(PAGE, results.length - shown)} more
         </button>

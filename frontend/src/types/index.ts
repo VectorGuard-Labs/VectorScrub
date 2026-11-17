@@ -110,6 +110,32 @@ export interface AuthResponse {
   customer: CustomerProfile;
 }
 
+/** Answer to a login whose password was right but whose account needs a second factor. */
+export interface MfaRequired {
+  mfa_required: true;
+}
+
+export interface MfaStatus {
+  enabled: boolean;
+  recovery_codes_remaining: number;
+}
+
+export interface MfaSetup {
+  /** Base32 secret, for typing into an authenticator app by hand. */
+  secret: string;
+  /** otpauth:// link; opens the account in an authenticator app on the same device. */
+  otpauth_uri: string;
+}
+
+export interface SessionInfo {
+  id: string;
+  created_at: string;
+  last_seen_at: string;
+  user_agent: string | null;
+  /** True for the session making the request. */
+  current: boolean;
+}
+
 export interface RemovalRequest {
   id: string;
   customer_id: string;

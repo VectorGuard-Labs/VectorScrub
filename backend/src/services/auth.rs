@@ -14,6 +14,9 @@ use uuid::Uuid;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String, // customer UUID
+    /// The session this token belongs to (`sessions.id`). A token is honoured only while that
+    /// session is live, see `services::session`. A token without one fails to decode.
+    pub jti: String,
     pub tier: String,
     pub iat: i64,
     pub exp: i64,
@@ -87,15 +90,17 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
         .is_ok())
 }
 
-/// Issue a signed JWT valid for 24 hours.
+/// Issue a signed JWT valid for 24 hours, bound to a server-side session.
 pub fn issue_token(
     customer_id: Uuid,
+    session_id: Uuid,
     tier: &str,
     secret: &str,
 ) -> Result<String> {
     let now = OffsetDateTime::now_utc();
     let claims = Claims {
         sub: customer_id.to_string(),
+        jti: session_id.to_string(),
         tier: tier.to_string(),
         iat: now.unix_timestamp(),
         exp: (now + Duration::hours(crate::middleware::session::SESSION_MAX_AGE_HOURS)).unix_timestamp(),
@@ -176,5 +181,26 @@ mod tests {
     async fn warm_up_and_the_dummy_verification_work() {
         warm_up().await;
         verify_against_dummy_async("anything at all".into()).await;
+    }
+
+    #[test]
+    fn a_token_carries_its_session_and_a_token_without_one_is_refused() {
+        let (c, sid) = (Uuid::new_v4(), Uuid::new_v4());
+        let t = issue_token(c, sid, "free", "k".repeat(40).as_str()).unwrap();
+        let claims = validate_token(&t, &"k".repeat(40)).unwrap();
+        assert_eq!((claims.sub, claims.jti), (c.to_string(), sid.to_string()));
+        assert!(validate_token(&t, &"x".repeat(40)).is_err(), "wrong secret");
+
+        // A token minted before sessions existed has no jti and must not be accepted.
+        #[derive(Serialize)]
+        struct Old { sub: String, tier: String, iat: i64, exp: i64 }
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let old = encode(
+            &Header::new(Algorithm::HS256),
+            &Old { sub: c.to_string(), tier: "free".into(), iat: now, exp: now + 3600 },
+            &EncodingKey::from_secret("k".repeat(40).as_bytes()),
+        )
+        .unwrap();
+        assert!(validate_token(&old, &"k".repeat(40)).is_err());
     }
 }

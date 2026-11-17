@@ -102,8 +102,10 @@ Verify all required variables are set:
 
 ### Backup & Recovery
 
+Procedure, scripts and the drill log: [docs/runbooks/backup-and-restore.md](docs/runbooks/backup-and-restore.md). The master key is part of the backup: without it the data cannot be opened.
+
 - [ ] Database backup tested and working
-- [ ] Backup restoration tested
+- [ ] Backup restoration tested (`restore_verify.sh` reports "usable" against the off-site copy, with the key from the secrets manager)
 - [ ] Backup retention policy configured (30 days minimum)
 - [ ] Off-site backup storage configured
 - [ ] Disaster recovery plan documented
@@ -262,8 +264,8 @@ docker compose pull <previous-tag>
 docker compose up -d
 
 # Option 2: Restore from backup (if database corrupted)
-gunzip < /var/backups/vectorscrub/db-latest.sql.gz | \
-  docker exec -i vectorscrub-postgres psql -U vectorscrub vectorscrub
+# Follow docs/runbooks/backup-and-restore.md ("Restoring for real"); verify with
+# `vectorscrub verify-backup` before starting the service.
 
 # Option 3: AWS ECS rollback
 aws ecs update-service \

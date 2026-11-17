@@ -148,6 +148,11 @@ pub async fn recover_once(
     if let Err(e) = login_throttle::purge_stale(pool).await {
         warn!(error = %e, "Could not purge stale login throttle records");
     }
+    match crate::services::session::prune(pool).await {
+        Ok(n) if n > 0 => info!(deleted = n, "Pruned sessions that ended over a week ago"),
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "Could not prune old sessions"),
+    }
     match privacy_score_svc::cleanup_old_records(pool).await {
         Ok(n) if n > 0 => info!(deleted = n, "Pruned privacy score history older than 1 year"),
         Ok(_) => {}

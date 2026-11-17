@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Shield, LogOut, CheckCircle, CreditCard } from "lucide-react";
+import { LogOut, CheckCircle, CreditCard } from "lucide-react";
 import { getBilling, getProfile, logout } from "@/lib/api";
+import RenewalNotice from "@/components/RenewalNotice";
 import { formatDate } from "@/lib/utils";
 import type {
   BillingInfo,
@@ -123,7 +124,6 @@ export default function BillingPage() {
     <div className="min-h-screen">
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Shield className="text-teal-400 w-5 h-5" aria-hidden="true" />
           <span className="text-white font-bold">VectorScrub</span>
         </div>
         <div className="flex items-center gap-4">
@@ -155,7 +155,7 @@ export default function BillingPage() {
         )}
 
         {activating && (
-          <div role="status" className="bg-teal-950 border border-teal-800 text-teal-300 rounded-lg px-4 py-3 mb-6 text-sm">
+          <div role="status" className="bg-brand-blue-950 border border-brand-blue-800 text-brand-blue-300 rounded-lg px-4 py-3 mb-6 text-sm">
             Thank you. Your payment went through and your plan is being activated.
           </div>
         )}
@@ -224,7 +224,7 @@ export default function BillingPage() {
                     onClick={() => setInterval_(i)}
                     aria-pressed={activeInterval === i}
                     className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                      activeInterval === i ? "bg-teal-600 text-white" : "text-gray-400 hover:text-white"
+                      activeInterval === i ? "bg-brand-blue-600 text-white" : "text-gray-400 hover:text-white"
                     }`}
                   >
                     {i === "month" ? "Monthly" : "Annual"}
@@ -234,7 +234,7 @@ export default function BillingPage() {
               )}
             </div>
             {activeInterval === "year" && (
-              <p className="text-teal-400 text-sm mb-4">Annual billing: pay for 10 months, get 12.</p>
+              <p className="text-brand-blue-400 text-sm mb-4">Annual billing: pay for 10 months, get 12.</p>
             )}
 
             <div className={`grid grid-cols-1 gap-6 ${tiers.length > 1 ? "sm:grid-cols-2" : "max-w-md"}`}>
@@ -251,29 +251,29 @@ export default function BillingPage() {
                         {activeInterval === "year" ? " / year" : " / month"}
                       </span>
                     </div>
-                    {info.note && <p className="text-teal-300/80 text-xs mt-2">{info.note}</p>}
+                    {info.note && <p className="text-brand-blue-300/80 text-xs mt-2">{info.note}</p>}
                     <ul className="mt-4 mb-6 space-y-2 flex-1">
                       {info.features.map((f) => (
                         <li key={f} className="flex items-start gap-2 text-gray-300 text-sm">
-                          <CheckCircle className="w-4 h-4 text-teal-400 mt-0.5 flex-shrink-0" aria-hidden="true" />
+                          <CheckCircle className="w-4 h-4 text-brand-blue-400 mt-0.5 flex-shrink-0" aria-hidden="true" />
                           {f}
                         </li>
                       ))}
                     </ul>
                     {isCurrent ? (
-                      <div className="text-center text-teal-400 text-sm font-medium py-2.5">Your current plan</div>
+                      <div className="text-center text-brand-blue-400 text-sm font-medium py-2.5">Your current plan</div>
                     ) : sub ? (
                       <div className="text-center text-gray-500 text-sm py-2.5">
                         Use Manage subscription to switch plans
                       </div>
                     ) : plan ? (
-                      <a
+                      <SubscribeAction
+                        name={info.name}
+                        price={activeInterval === "year" ? info.year : info.month}
+                        interval={activeInterval}
+                        locksPrice={Boolean(info.note)}
                         href={plan.checkout_url}
-                        rel="noopener noreferrer"
-                        className="block text-center bg-teal-600 hover:bg-teal-500 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
-                      >
-                        Subscribe to {info.name}
-                      </a>
+                      />
                     ) : (
                       <div className="text-center text-gray-500 text-sm py-2.5">Not available yet</div>
                     )}
@@ -284,6 +284,58 @@ export default function BillingPage() {
           </section>
         )}
       </main>
+    </div>
+  );
+}
+
+/**
+ * The Subscribe button, with the renewal terms directly above it and a box the customer ticks to
+ * agree to them. The button stays inactive until it is ticked: renewing automatically is a
+ * separate agreement from buying, and must be clear and agreed to before the charge.
+ */
+function SubscribeAction({
+  name,
+  price,
+  interval,
+  locksPrice,
+  href,
+}: {
+  name: string;
+  price: string;
+  interval: "month" | "year";
+  locksPrice: boolean;
+  href: string;
+}) {
+  const [agreed, setAgreed] = useState(false);
+  const base = "block w-full text-center px-5 py-2.5 rounded-lg text-sm font-medium transition-colors";
+  const boxId = `renew-${name.replace(/\s+/g, "-").toLowerCase()}-${interval}`;
+  return (
+    <div className="space-y-3">
+      <RenewalNotice name={name} price={price} interval={interval} locksPrice={locksPrice} id={`${boxId}-notice`} />
+      <label htmlFor={boxId} className="flex items-start gap-2 text-xs text-gray-300">
+        <input
+          id={boxId}
+          type="checkbox"
+          checked={agreed}
+          onChange={(e) => setAgreed(e.target.checked)}
+          aria-describedby={`${boxId}-notice`}
+          className="mt-0.5"
+        />
+        I understand that this plan renews automatically at {price} per {interval} until I cancel.
+      </label>
+      {agreed ? (
+        <a
+          href={href}
+          rel="noopener noreferrer"
+          className={`${base} bg-brand-red-600 hover:bg-brand-red-500 text-white`}
+        >
+          Subscribe to {name}
+        </a>
+      ) : (
+        <button type="button" disabled className={`${base} bg-gray-800 text-gray-500 cursor-not-allowed`}>
+          Subscribe to {name}
+        </button>
+      )}
     </div>
   );
 }

@@ -71,7 +71,7 @@ pub struct CleartextIdentity {
 /// Version of the Terms of Service and Privacy Policy that registration must accept. Change it
 /// (together with `TERMS_VERSION` in frontend/src/lib/legal.ts) whenever either document changes
 /// in a way customers must agree to again.
-pub const TERMS_VERSION: &str = "2026-11-pilot-2";
+pub const TERMS_VERSION: &str = "2026-11-pilot-3";
 
 /// Request body for account creation.
 #[derive(Debug, Deserialize, Validate, ToSchema)]
@@ -84,8 +84,12 @@ pub struct CreateAccountRequest {
     pub password: String,
     /// Must equal the current terms version; proves the customer saw and accepted the documents.
     #[serde(default)]
-    #[schema(example = "2026-11-pilot-2")]
+    #[schema(example = "2026-11-pilot-3")]
     pub accepted_terms_version: Option<String>,
+    /// The customer's declaration that they are 18 or older. Must be `true`: the API refuses a
+    /// registration without it. Recorded with a timestamp (`customers.adult_confirmed_at`).
+    #[serde(default)]
+    pub confirmed_adult: Option<bool>,
     /// Optional, separate opt-ins for the pilot. False unless the customer ticked them.
     #[serde(default)]
     pub pilot_interview_ok: bool,

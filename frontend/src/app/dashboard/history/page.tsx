@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Shield,
   LogOut,
   AlertTriangle,
   CheckCircle,
@@ -216,7 +215,6 @@ export default function HistoryPage() {
       {/* Top nav */}
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Shield className="text-teal-400 w-5 h-5" aria-hidden="true" />
           <span className="text-white font-bold">VectorScrub</span>
         </div>
         <div className="flex items-center gap-4">
@@ -273,7 +271,7 @@ export default function HistoryPage() {
             <select
               value={typeFilter}
               onChange={(e) => setTypeFilter(e.target.value)}
-              className="bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-600 focus:outline-none"
+              className="bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-brand-blue-600 focus:outline-none"
             >
               <option value="all">All Events</option>
               <option value="discovered">Discovered</option>
@@ -285,7 +283,7 @@ export default function HistoryPage() {
           <select
             value={severityFilter}
             onChange={(e) => setSeverityFilter(e.target.value)}
-            className="bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-600 focus:outline-none"
+            className="bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-brand-blue-600 focus:outline-none"
           >
             <option value="all">All Severities</option>
             <option value="critical">Critical</option>

@@ -3,9 +3,8 @@
 import { useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Shield } from "lucide-react";
 import { register } from "@/lib/api";
-import { TERMS_VERSION } from "@/lib/legal";
+import { MINIMUM_AGE, TERMS_VERSION } from "@/lib/legal";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -14,6 +13,7 @@ export default function RegisterPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [accepted, setAccepted] = useState(false);
+  const [adult, setAdult] = useState(false);
   const [interviewOk, setInterviewOk] = useState(false);
   const [storyOk, setStoryOk] = useState(false);
 
@@ -24,9 +24,13 @@ export default function RegisterPage() {
       setError("Please read and accept the Terms of Service and Privacy Policy to continue.");
       return;
     }
+    if (!adult) {
+      setError(`VectorScrub is for people aged ${MINIMUM_AGE} or over. Please confirm that you are ${MINIMUM_AGE} or older to continue.`);
+      return;
+    }
     setLoading(true);
     try {
-      await register(email, password, TERMS_VERSION, { interview: interviewOk, story: storyOk });
+      await register(email, password, TERMS_VERSION, adult, { interview: interviewOk, story: storyOk });
       router.push("/dashboard");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Registration failed");
@@ -39,7 +43,6 @@ export default function RegisterPage() {
     <main className="min-h-screen flex items-center justify-center px-4">
       <div className="w-full max-w-md">
         <div className="flex items-center justify-center gap-2 mb-8">
-          <Shield className="text-teal-400 w-7 h-7" aria-hidden="true" />
           <span className="text-white font-bold text-xl">VectorScrub</span>
         </div>
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8">
@@ -64,7 +67,7 @@ export default function RegisterPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-teal-500 transition-colors"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-brand-blue-500 transition-colors"
                 placeholder="you@example.com"
               />
             </div>
@@ -84,7 +87,7 @@ export default function RegisterPage() {
                 minLength={12}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-teal-500 transition-colors"
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-brand-blue-500 transition-colors"
                 placeholder="Choose a strong password"
               />
             </div>
@@ -99,6 +102,18 @@ export default function RegisterPage() {
             </div>
             <div className="flex items-start gap-2">
               <input
+                id="adult"
+                type="checkbox"
+                checked={adult}
+                onChange={(e) => setAdult(e.target.checked)}
+                className="mt-1"
+              />
+              <label htmlFor="adult" className="text-sm text-gray-400">
+                I am {MINIMUM_AGE} years old or older.
+              </label>
+            </div>
+            <div className="flex items-start gap-2">
+              <input
                 id="accept"
                 type="checkbox"
                 checked={accepted}
@@ -107,11 +122,11 @@ export default function RegisterPage() {
               />
               <label htmlFor="accept" className="text-sm text-gray-400">
                 I have read and accept the{" "}
-                <Link href="/terms" target="_blank" className="text-teal-400 underline">
+                <Link href="/terms" target="_blank" className="text-brand-blue-400 underline">
                   Terms of Service
                 </Link>{" "}
                 and{" "}
-                <Link href="/privacy" target="_blank" className="text-teal-400 underline">
+                <Link href="/privacy" target="_blank" className="text-brand-blue-400 underline">
                   Privacy Policy
                 </Link>
                 .
@@ -137,7 +152,7 @@ export default function RegisterPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-teal-600 hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed text-white py-3 rounded-lg font-medium transition-colors"
+              className="w-full bg-brand-red-600 hover:bg-brand-red-500 disabled:opacity-50 disabled:cursor-not-allowed text-white py-3 rounded-lg font-medium transition-colors"
             >
               {loading ? "Creating account…" : "Create account"}
             </button>
@@ -146,7 +161,7 @@ export default function RegisterPage() {
             Already have an account?{" "}
             <Link
               href="/login"
-              className="text-teal-400 hover:text-teal-300 transition-colors"
+              className="text-brand-blue-400 hover:text-brand-blue-300 transition-colors"
             >
               Sign in
             </Link>

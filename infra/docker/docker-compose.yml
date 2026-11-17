@@ -107,6 +107,13 @@ services:
     environment:
       # Shown on the Terms and Privacy pages; read at request time by the Next.js server.
       CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+      # Company postal address (page footers) and the registered copyright agent (Terms,
+      # section 9). All four DMCA_* values or none: see docs/COMPLIANCE_CHECKLIST.md.
+      POSTAL_ADDRESS: ${POSTAL_ADDRESS:-}
+      DMCA_AGENT_NAME: ${DMCA_AGENT_NAME:-}
+      DMCA_AGENT_ADDRESS: ${DMCA_AGENT_ADDRESS:-}
+      DMCA_AGENT_EMAIL: ${DMCA_AGENT_EMAIL:-}
+      DMCA_AGENT_REGISTRATION: ${DMCA_AGENT_REGISTRATION:-}
       PILOT_PAYMENT_URL: ${PILOT_PAYMENT_URL:-}
       SHOW_PAID_PLAN: ${SHOW_PAID_PLAN:-false}
     depends_on:

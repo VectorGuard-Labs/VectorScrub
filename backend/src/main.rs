@@ -35,6 +35,10 @@ async fn main() -> anyhow::Result<()> {
         return erase_account_cli(args.get(2).map(String::as_str)).await;
     }
 
+    if args.get(1).map(String::as_str) == Some("verify-backup") {
+        return verify_backup_cli(&args[2..]).await;
+    }
+
     if args.get(1).map(String::as_str) == Some("pilot") {
         return pilot_cli(&args[2..]).await;
     }
@@ -175,6 +179,27 @@ async fn shutdown_signal() {
     }
     info!("Shutdown signal received — draining connections");
     observability::shutdown_observability();
+}
+
+/// `vectorscrub verify-backup [--sample N]`: check a database restored from a backup (see
+/// infra/scripts/restore_verify.sh). Reads DATABASE_URL (the RESTORED copy, never production)
+/// and MASTER_ENCRYPTION_KEY. Prints counts and problems only; exits non-zero if the backup is
+/// not usable.
+async fn verify_backup_cli(args: &[String]) -> anyhow::Result<()> {
+    use services::backup_check;
+    let sample = match args {
+        [] => backup_check::DEFAULT_SAMPLE,
+        [flag, n] if flag == "--sample" => n.parse().context("--sample needs a number")?,
+        _ => anyhow::bail!("usage: vectorscrub verify-backup [--sample N]"),
+    };
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let key = std::env::var("MASTER_ENCRYPTION_KEY").context("MASTER_ENCRYPTION_KEY is not set")?;
+    let master = crypto::MasterKey::from_base64(&key).context("MASTER_ENCRYPTION_KEY is not a valid key")?;
+    let pool = PgPoolOptions::new().max_connections(2).connect(&url).await.context("could not connect to DATABASE_URL")?;
+    let report = backup_check::run(&pool, &master, sample).await?;
+    print!("{}", report.render());
+    anyhow::ensure!(report.ok(), "the backup is not usable");
+    Ok(())
 }
 
 async fn erase_account_cli(email: Option<&str>) -> anyhow::Result<()> {

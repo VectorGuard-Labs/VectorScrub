@@ -62,7 +62,7 @@ export default function ScanCoverage({ job }: { job: ScanJob }) {
       )}
 
       <details className="mt-3">
-        <summary className="text-teal-400 hover:text-teal-300 text-sm cursor-pointer select-none">
+        <summary className="text-brand-blue-400 hover:text-brand-blue-300 text-sm cursor-pointer select-none">
           Show every source
         </summary>
         <div className="mt-3 space-y-3">

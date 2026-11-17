@@ -1,5 +1,5 @@
 use axum::{
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 
@@ -22,6 +22,7 @@ mod privacy_score;
 pub mod public;
 mod removals;
 mod scans;
+pub mod security;
 #[cfg(test)]
 mod tests;
 
@@ -34,6 +35,7 @@ pub fn router(state: AppState) -> Router {
             .route("/auth/register", post(auth::register))
             .route("/auth/login", post(auth::login)),
         &cfg,
+        &state.redis,
     );
 
     // Customer-facing API: general per-IP limit.
@@ -46,6 +48,14 @@ pub fn router(state: AppState) -> Router {
             // Ends the browser session (clears the HttpOnly cookie). Under /auth/, which the
             // CSRF check exempts: signing someone out is harmless.
             .route("/auth/logout", post(auth::logout))
+            .route("/auth/logout-all", post(auth::logout_all))
+            // Two-factor authentication and the customer's own sessions
+            .route("/me/mfa", get(security::mfa_status))
+            .route("/me/mfa/setup", post(security::mfa_setup))
+            .route("/me/mfa/enable", post(security::mfa_enable))
+            .route("/me/mfa/disable", post(security::mfa_disable))
+            .route("/me/sessions", get(security::list_sessions))
+            .route("/me/sessions/:id", delete(security::revoke_session))
             // Customer profile & identity
             .route("/me", get(customers::get_profile).delete(auth::delete_account))
             .route("/me/identity", post(customers::submit_identity))
@@ -86,6 +96,7 @@ pub fn router(state: AppState) -> Router {
             .route("/removal-requests/:id/listing-link", post(removals::update_listing_link))
             .route("/removal-requests/:id", get(removals::get_request)),
         &cfg,
+        &state.redis,
     );
 
     // Probes: unauthenticated and not rate limited.

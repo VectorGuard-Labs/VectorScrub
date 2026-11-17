@@ -209,6 +209,14 @@ pub mod actions {
     pub const USER_LOGIN: &str = "user.login";
     /// An email reached the failed-login threshold and was locked out.
     pub const USER_LOGIN_LOCKED: &str = "user.login_locked";
+    /// Two-factor authentication was switched on.
+    pub const MFA_ENABLE: &str = "mfa.enable";
+    /// Two-factor authentication was switched off.
+    pub const MFA_DISABLE: &str = "mfa.disable";
+    /// A one-time recovery code was used instead of an authenticator code.
+    pub const MFA_RECOVERY_USED: &str = "mfa.recovery_code_used";
+    /// The customer ended one session (another device), or all of them.
+    pub const SESSION_REVOKE: &str = "session.revoke";
 
     // Identity
     pub const IDENTITY_SUBMIT: &str = "identity.submit";

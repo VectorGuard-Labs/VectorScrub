@@ -100,7 +100,7 @@ export default class ErrorBoundary extends Component<
             <div className="flex flex-col sm:flex-row gap-3 justify-center">
               <button
                 onClick={this.resetError}
-                className="flex items-center justify-center gap-2 bg-teal-600 hover:bg-teal-500 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
+                className="flex items-center justify-center gap-2 bg-brand-red-600 hover:bg-brand-red-500 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
               >
                 <RefreshCw className="w-4 h-4" aria-hidden="true" />
                 Try again

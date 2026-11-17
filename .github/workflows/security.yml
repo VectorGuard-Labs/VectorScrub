@@ -1,0 +1,119 @@
+name: Dependency security
+
+# Looks for known-vulnerable dependencies in all three code bases. It runs on every push and
+# pull request, and also every Monday: advisories are published against code that has not
+# changed, so a build that was green last week can be red today. Everything here can be run
+# locally; the exact commands are in each step.
+#
+# What blocks a merge:
+#   * Rust: any advisory not listed (with a reason) in backend/.cargo/audit.toml.
+#   * Python: any known vulnerability in the installed agent environment.
+#   * Frontend: any high or critical advisory in production dependencies.
+# What only reports: unmaintained-crate warnings, and advisories in frontend dev tooling (the
+# linter), which never reaches a customer's browser.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (cargo audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.90.0
+
+      # Pinned, and cached so that the install (a few minutes of compiling) happens once.
+      - uses: actions/cache@v4
+        id: audit-bin
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.22.2-${{ runner.os }}
+
+      - name: Install cargo-audit
+        if: steps.audit-bin.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      # Reads backend/.cargo/audit.toml for the advisories we have reviewed and set aside.
+      - name: Audit Cargo.lock
+        run: cargo audit
+
+      # The set-aside advisories are about crates that are not part of the running service. This
+      # is the fact those reasons rest on; if it stops being true the entries are wrong.
+      - name: Ignored advisories still concern only crates outside the runtime build
+        run: |
+          if cargo tree --locked --edges normal --prefix none | awk '{print $1}' | sort -u | grep -xE 'zip|rsa|libsqlite3-sys'; then
+            echo "A crate with a set-aside advisory is now part of the runtime build. Review backend/.cargo/audit.toml."
+            exit 1
+          fi
+
+  python:
+    name: Agents (pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: agents
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            agents/requirements.txt
+            agents/requirements-dev.txt
+
+      # The runtime requirements, with everything they pull in, exactly as the agents install them.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Audits what is installed (transitive packages included), not just the top-level pins.
+      # The spaCy model is installed from a hash-pinned URL, which has no version to look up; that
+      # is reported as skipped and is not a failure.
+      - name: Audit the installed packages
+        run: |
+          pip install pip-audit==2.10.1
+          pip-audit --skip-editable
+
+  frontend:
+    name: Frontend (npm audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+
+      - name: Production dependencies (blocks on high or critical)
+        run: npm audit --omit=dev --audit-level=high
+
+      # Build and lint tooling. It does not ship to customers, so this reports without blocking.
+      - name: Development dependencies (report only)
+        continue-on-error: true
+        run: npm audit --audit-level=high

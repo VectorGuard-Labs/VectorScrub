@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { Shield, Search, Trash2, Bell, BarChart3, Lock } from "lucide-react";
+import RenewalNotice from "@/components/RenewalNotice";
+import { postalAddress } from "@/lib/legal";
 import { fetchPublicCoverage, planCoverage, type PlanTier } from "@/lib/coverage";
 
 const features = [
@@ -140,7 +142,6 @@ export default async function LandingPage() {
       {/* Nav */}
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between max-w-7xl mx-auto w-full">
         <div className="flex items-center gap-2">
-          <Shield className="text-teal-400 w-6 h-6" aria-hidden="true" />
           <span className="font-bold text-white text-lg tracking-tight">
             VectorScrub
           </span>
@@ -155,7 +156,7 @@ export default async function LandingPage() {
           </Link>
           <Link
             href="/register"
-            className="bg-teal-600 hover:bg-teal-500 text-white text-sm px-4 py-2 rounded-lg transition-colors"
+            className="bg-brand-red-600 hover:bg-brand-red-500 text-white text-sm px-4 py-2 rounded-lg transition-colors"
           >
             Get Started Free
           </Link>
@@ -164,14 +165,14 @@ export default async function LandingPage() {
 
       {/* Hero */}
       <section className="flex flex-col items-center text-center px-6 py-24 max-w-4xl mx-auto">
-        <div className="inline-flex items-center gap-2 bg-teal-950 border border-teal-800 rounded-full px-4 py-1.5 text-teal-400 text-sm mb-8">
+        <div className="inline-flex items-center gap-2 bg-brand-blue-950 border border-brand-blue-800 rounded-full px-4 py-1.5 text-brand-blue-400 text-sm mb-8">
           <Shield className="w-3.5 h-3.5" aria-hidden="true" />
           AI-powered privacy protection
         </div>
         <h1 className="text-5xl sm:text-6xl font-bold text-white leading-tight mb-6">
           Your personal information.
           <br />
-          <span className="text-teal-400">Under your control.</span>
+          <span className="text-brand-blue-400">Under your control.</span>
         </h1>
         <p className="text-xl text-gray-400 mb-10 max-w-2xl">
           VectorScrub finds where your personal data is listed, sends opt-out
@@ -181,7 +182,7 @@ export default async function LandingPage() {
         <div className="flex flex-col sm:flex-row gap-4">
           <Link
             href="/register"
-            className="bg-teal-600 hover:bg-teal-500 text-white px-8 py-3 rounded-lg font-medium transition-colors text-lg"
+            className="bg-brand-red-600 hover:bg-brand-red-500 text-white px-8 py-3 rounded-lg font-medium transition-colors text-lg"
           >
             See my exposure — it&apos;s free
           </Link>
@@ -241,7 +242,7 @@ export default async function LandingPage() {
                 className="bg-gray-800/60 border border-gray-700 rounded-xl p-6"
               >
                 <f.icon
-                  className="text-teal-400 w-7 h-7 mb-4"
+                  className="text-brand-blue-400 w-7 h-7 mb-4"
                   aria-hidden="true"
                 />
                 <h3 className="text-white font-semibold text-lg mb-2">
@@ -271,12 +272,12 @@ export default async function LandingPage() {
                 key={plan.name}
                 className={`rounded-xl border p-6 flex flex-col ${
                   plan.highlight
-                    ? "border-teal-500 bg-teal-950/40"
+                    ? "border-brand-blue-500 bg-brand-blue-950/40"
                     : "border-gray-700 bg-gray-800/40"
                 }`}
               >
                 {plan.badge && (
-                  <div className="text-xs text-teal-400 font-semibold uppercase tracking-wider mb-3">
+                  <div className="text-xs text-brand-blue-400 font-semibold uppercase tracking-wider mb-3">
                     {plan.badge}
                   </div>
                 )}
@@ -292,12 +293,17 @@ export default async function LandingPage() {
                   )}
                 </div>
                 <p className="text-gray-400 text-sm mb-2">{plan.description}</p>
-                {plan.note && <p className="text-teal-300/80 text-xs mb-6">{plan.note}</p>}
+                {plan.note && <p className="text-brand-blue-300/80 text-xs mb-6">{plan.note}</p>}
                 {!plan.note && <div className="mb-4" />}
+                {plan.tier === "personal" && (
+                  <div className="mb-5">
+                    <RenewalNotice name={plan.name} price={plan.price} interval="month" />
+                  </div>
+                )}
                 <ul className="space-y-2 mb-4">
                   {plan.features.map((f) => (
                     <li key={f} className="flex items-start gap-2 text-sm text-gray-300">
-                      <span className="text-teal-400 mt-0.5">✓</span>
+                      <span className="text-brand-blue-400 mt-0.5">✓</span>
                       {f}
                     </li>
                   ))}
@@ -307,7 +313,7 @@ export default async function LandingPage() {
                   href={plan.href ?? "/register"}
                   className={`text-center py-2.5 rounded-lg text-sm font-medium transition-colors ${
                     plan.highlight
-                      ? "bg-teal-600 hover:bg-teal-500 text-white"
+                      ? "bg-brand-red-600 hover:bg-brand-red-500 text-white"
                       : "border border-gray-600 hover:border-gray-400 text-gray-300"
                   }`}
                 >
@@ -367,6 +373,7 @@ export default async function LandingPage() {
           &nbsp;·&nbsp;
           <Link href="/terms" className="hover:text-gray-400 transition-colors">Terms of Service</Link>
         </p>
+        {postalAddress() && <p className="text-gray-600 text-xs mt-2">{postalAddress()}</p>}
       </footer>
     </main>
   );

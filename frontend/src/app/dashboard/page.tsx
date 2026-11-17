@@ -3,7 +3,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Shield,
   Search,
   AlertTriangle,
   CheckCircle,
@@ -217,7 +216,6 @@ export default function DashboardPage() {
       {/* Top nav */}
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Shield className="text-teal-400 w-5 h-5" aria-hidden="true" />
           <span className="text-white font-bold">VectorScrub</span>
         </div>
         <div className="flex items-center gap-4">
@@ -263,6 +261,12 @@ export default function DashboardPage() {
           >
             Billing
           </button>
+          <button
+            onClick={() => router.push("/dashboard/security")}
+            className="text-gray-400 hover:text-white text-sm font-medium transition-colors"
+          >
+            Security
+          </button>
           <span className="text-gray-500 text-sm hidden sm:block">
             {profile?.email}
           </span>
@@ -302,7 +306,7 @@ export default function DashboardPage() {
           <button
             onClick={handleScan}
             disabled={scanLoading}
-            className="flex items-center gap-2 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
+            className="flex items-center gap-2 bg-brand-red-600 hover:bg-brand-red-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
           >
             <RefreshCw
               className={`w-4 h-4 ${scanLoading ? "animate-spin" : ""}`}
@@ -313,7 +317,7 @@ export default function DashboardPage() {
         </div>
 
         {scanMessage && (
-          <div className="bg-teal-950 border border-teal-800 text-teal-300 rounded-lg px-4 py-3 mb-6 text-sm flex items-center gap-2">
+          <div className="bg-brand-blue-950 border border-brand-blue-800 text-brand-blue-300 rounded-lg px-4 py-3 mb-6 text-sm flex items-center gap-2">
             {isPolling && (
               <RefreshCw className="w-4 h-4 animate-spin flex-shrink-0" aria-hidden="true" />
             )}
@@ -432,7 +436,7 @@ export default function DashboardPage() {
                         </span>
                         <button
                           onClick={() => handleAuthorizeRemoval(exp.id)}
-                          className="text-teal-400 hover:text-teal-300 text-xs font-medium transition-colors"
+                          className="text-brand-blue-400 hover:text-brand-blue-300 text-xs font-medium transition-colors"
                         >
                           Remove
                         </button>
@@ -447,7 +451,7 @@ export default function DashboardPage() {
                       href={exp.source_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-gray-500 hover:text-teal-400 transition-colors"
+                      className="text-gray-500 hover:text-brand-blue-400 transition-colors"
                       aria-label={`View ${exp.source_name} listing`}
                     >
                       <ExternalLink className="w-4 h-4" />

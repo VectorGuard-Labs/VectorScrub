@@ -52,7 +52,7 @@ export default function PilotPage() {
       <Section title="Your information">
         <p>
           We ask for the minimum needed to look you up, encrypt it, and never sell it or use it to train AI
-          models. Read the <Link href="/privacy" className="text-teal-400 underline">Privacy Policy</Link> for
+          models. Read the <Link href="/privacy" className="text-brand-blue-400 underline">Privacy Policy</Link> for
           exactly what is stored, who sees it and how to delete it. You can delete your account yourself at any time.
           We will never ask for your email password or ID documents by email.
         </p>
@@ -64,7 +64,7 @@ export default function PilotPage() {
             {pay ? (
               <>
                 Pay the one-time $1:{" "}
-                <a href={pay} target="_blank" rel="noopener noreferrer" className="text-teal-400 underline">
+                <a href={pay} target="_blank" rel="noopener noreferrer" className="text-brand-blue-400 underline">
                   founding pilot payment
                 </a>
                 . Use the same email address you will register with.
@@ -74,7 +74,7 @@ export default function PilotPage() {
             )}
           </li>
           <li>
-            <Link href="/register" className="text-teal-400 underline">Create your account</Link> and add your details.
+            <Link href="/register" className="text-brand-blue-400 underline">Create your account</Link> and add your details.
           </li>
           <li>We will confirm your place by email.</li>
         </ol>

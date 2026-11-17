@@ -1,11 +1,10 @@
 import Link from "next/link";
-import { Shield } from "lucide-react";
-import { contactEmail, LEGAL_UPDATED, TERMS_VERSION } from "@/lib/legal";
+import { contactEmail, LEGAL_UPDATED, postalAddress, TERMS_VERSION } from "@/lib/legal";
 
 export function Contact() {
   const email = contactEmail();
   return email ? (
-    <a href={`mailto:${email}`} className="text-teal-400 underline">
+    <a href={`mailto:${email}`} className="text-brand-blue-400 underline">
       {email}
     </a>
   ) : (
@@ -13,9 +12,9 @@ export function Contact() {
   );
 }
 
-export function Section({ title, children }: { title: string; children: React.ReactNode }) {
+export function Section({ title, id, children }: { title: string; id?: string; children: React.ReactNode }) {
   return (
-    <section className="mb-8">
+    <section id={id} className="mb-8 scroll-mt-8">
       <h2 className="text-xl font-semibold text-white mb-3">{title}</h2>
       <div className="space-y-3 text-gray-300 text-sm leading-relaxed">{children}</div>
     </section>
@@ -26,7 +25,7 @@ export default function LegalLayout({ title, children }: { title: string; childr
   return (
     <main className="min-h-screen px-6 py-12 max-w-3xl mx-auto">
       <Link href="/" className="inline-flex items-center gap-2 mb-8 text-gray-400 hover:text-white text-sm">
-        <Shield className="w-4 h-4 text-teal-400" aria-hidden="true" /> VectorScrub
+        VectorScrub
       </Link>
       <h1 className="text-3xl font-bold text-white mb-2">{title}</h1>
       <p className="text-gray-500 text-xs mb-6">
@@ -42,6 +41,7 @@ export default function LegalLayout({ title, children }: { title: string; childr
         <Link href="/terms" className="hover:text-gray-400">Terms of Service</Link> ·{" "}
         <Link href="/privacy" className="hover:text-gray-400">Privacy Policy</Link> ·{" "}
         <Link href="/" className="hover:text-gray-400">Home</Link>
+        {postalAddress() && <span className="block mt-2">{postalAddress()}</span>}
       </p>
     </main>
   );

@@ -16,10 +16,10 @@
 //! it authenticates. The `Authorization: Bearer` header remains accepted for non-browser
 //! clients and takes precedence when both are present.
 //!
-//! Limits worth knowing: XSS can still make requests *as* the user while the page is open
-//! (HttpOnly stops theft of the token, not use of the session), and there is no server-side
-//! revocation, so logging out clears the cookie but a token copied before that stays valid
-//! until it expires.
+//! Limit worth knowing: XSS can still make requests *as* the user while the page is open
+//! (HttpOnly stops theft of the token, not use of the session). Revocation does exist (see
+//! `services::session`): the token carries a session id and logging out ends that session on
+//! the server, so a copied token stops working too.
 
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use time::Duration;

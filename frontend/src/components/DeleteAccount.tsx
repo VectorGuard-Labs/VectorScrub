@@ -11,6 +11,7 @@ import { deleteAccount } from "@/lib/api";
 export default function DeleteAccount() {
   const [open, setOpen] = useState(false);
   const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -18,7 +19,7 @@ export default function DeleteAccount() {
     setBusy(true);
     setError("");
     try {
-      await deleteAccount(password);
+      await deleteAccount(password, code.trim() || undefined);
       // The session cookie is already cleared; leave the app.
       window.location.assign("/?deleted=1");
     } catch (e) {
@@ -61,6 +62,18 @@ export default function DeleteAccount() {
             onChange={(e) => setPassword(e.target.value)}
             className="w-full max-w-sm bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
           />
+          <label htmlFor="delete-code" className="block text-xs text-gray-400">
+            Authenticator code (only if you use two-factor sign-in)
+          </label>
+          <input
+            id="delete-code"
+            type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            className="w-full max-w-sm bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
+          />
           {error && (
             <p role="alert" className="text-red-400 text-xs">
               {error}
@@ -80,6 +93,7 @@ export default function DeleteAccount() {
               onClick={() => {
                 setOpen(false);
                 setPassword("");
+                setCode("");
                 setError("");
               }}
               className="px-4 py-2 border border-gray-700 text-gray-300 rounded-lg text-sm"

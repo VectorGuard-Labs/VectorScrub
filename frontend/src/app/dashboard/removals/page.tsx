@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Shield, LogOut, ArrowLeft } from "lucide-react";
+import { LogOut, ArrowLeft } from "lucide-react";
 import { listRemovalRequests, logout, markRemovalDoneByHand, requestRemovalAssistance, updateListingLink } from "@/lib/api";
 import {
   removalStage,
@@ -72,7 +72,6 @@ export default function RemovalsPage() {
       <nav className="border-b border-gray-800 bg-black/40 backdrop-blur-sm sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Shield className="w-6 h-6 text-teal-400" aria-hidden="true" />
             <span className="font-bold text-lg text-white">VectorScrub</span>
           </div>
           <button
@@ -259,7 +258,7 @@ function ManualRoute({ req, onDone }: { req: RemovalRequest; onDone: () => Promi
         {listing && (
           <li>
             Open{" "}
-            <a href={listing} target="_blank" rel="noopener noreferrer" className="text-teal-400 hover:text-teal-300 underline break-all">
+            <a href={listing} target="_blank" rel="noopener noreferrer" className="text-brand-blue-400 hover:text-brand-blue-300 underline break-all">
               the page where we found you on {req.source_name}
             </a>
             . If it is a list of search results, click the one that is you (right city and age) and copy{" "}
@@ -270,7 +269,7 @@ function ManualRoute({ req, onDone }: { req: RemovalRequest; onDone: () => Promi
           {optOutHref ? (
             <>
               Open{" "}
-              <a href={optOutHref} target="_blank" rel="noopener noreferrer" className="text-teal-400 hover:text-teal-300 underline">
+              <a href={optOutHref} target="_blank" rel="noopener noreferrer" className="text-brand-blue-400 hover:text-brand-blue-300 underline">
                 {req.source_name}&apos;s opt-out page
               </a>{" "}
               and submit the request.
@@ -278,7 +277,7 @@ function ManualRoute({ req, onDone }: { req: RemovalRequest; onDone: () => Promi
           ) : (
             <>
               Follow the steps in the{" "}
-              <Link href="/dashboard/optouts" className="text-teal-400 hover:text-teal-300 underline">
+              <Link href="/dashboard/optouts" className="text-brand-blue-400 hover:text-brand-blue-300 underline">
                 manual opt-out guide
               </Link>
               .
@@ -295,7 +294,7 @@ function ManualRoute({ req, onDone }: { req: RemovalRequest; onDone: () => Promi
             <div className="flex gap-2">
               <button
                 onClick={() => setSubmitted(true)}
-                className="px-3 py-1.5 rounded-lg border border-teal-600 text-teal-300 hover:bg-teal-900/30 text-sm"
+                className="px-3 py-1.5 rounded-lg border border-brand-blue-600 text-brand-blue-300 hover:bg-brand-blue-900/30 text-sm"
               >
                 Yes, I submitted it
               </button>
@@ -352,7 +351,7 @@ function ManualRoute({ req, onDone }: { req: RemovalRequest; onDone: () => Promi
               <button
                 onClick={report}
                 disabled={busy || email === "" || email === "pending" || !date}
-                className="px-3 py-1.5 rounded-lg border border-teal-600 text-teal-300 hover:bg-teal-900/30 disabled:opacity-50 text-sm"
+                className="px-3 py-1.5 rounded-lg border border-brand-blue-600 text-brand-blue-300 hover:bg-brand-blue-900/30 disabled:opacity-50 text-sm"
                 data-testid={`done-by-hand-${req.id}`}
               >
                 {busy ? "Saving..." : "Record what I did"}
@@ -438,7 +437,7 @@ function CheckedLink({ req, onDone }: { req: RemovalRequest; onDone: () => Promi
       <p>
         We re-check{" "}
         {current ? (
-          <a href={current} target="_blank" rel="noopener noreferrer" className="text-teal-400 underline break-all">
+          <a href={current} target="_blank" rel="noopener noreferrer" className="text-brand-blue-400 underline break-all">
             this page
           </a>
         ) : (
@@ -466,13 +465,13 @@ function CheckedLink({ req, onDone }: { req: RemovalRequest; onDone: () => Promi
           <button
             onClick={save}
             disabled={busy || !url.trim()}
-            className="px-3 py-1 rounded border border-teal-600 text-teal-300 disabled:opacity-50 text-sm"
+            className="px-3 py-1 rounded border border-brand-blue-600 text-brand-blue-300 disabled:opacity-50 text-sm"
           >
             {busy ? "Saving..." : "Use this link"}
           </button>
         </div>
       )}
-      {msg && <p className={msg.ok ? "text-teal-300" : "text-red-400"}>{msg.text}</p>}
+      {msg && <p className={msg.ok ? "text-brand-blue-300" : "text-red-400"}>{msg.text}</p>}
     </div>
   );
 }

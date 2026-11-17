@@ -13,7 +13,12 @@ use super::error::internal_error;
 use crate::db::AppState;
 use crate::middleware::session::{cleared_session_cookie, session_cookie};
 use crate::models::customer::{CreateAccountRequest, CustomerProfile};
-use crate::services::{audit, auth as auth_svc, customer as customer_svc, login_throttle};
+use crate::crypto::MasterKey;
+use crate::middleware::auth_extractor::AuthenticatedCustomer;
+use crate::models::customer::Customer;
+use crate::services::{
+    audit, auth as auth_svc, customer as customer_svc, login_throttle, mfa as mfa_svc, session as session_svc,
+};
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct LoginRequest {
@@ -24,6 +29,19 @@ pub struct LoginRequest {
     #[validate(length(max = 1024))]
     #[schema(example = "SecurePassword123!")]
     pub password: String,
+    /// Six-digit code from the authenticator app, or a recovery code. Needed only when the
+    /// account has two-factor authentication on; send it with the first request, or send the
+    /// password alone, learn from the `mfa_required` answer, and send both again.
+    #[validate(length(max = 64))]
+    #[schema(example = "123456")]
+    pub mfa_code: Option<String>,
+}
+
+/// Answer to a login whose password was right but whose account needs a second factor. No
+/// session exists yet and no cookie is set.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MfaRequiredResponse {
+    pub mfa_required: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -72,6 +90,15 @@ pub async fn register(
         ));
     }
 
+    // Adults only (Terms: "Who can use VectorScrub"). A declaration, checked here so a client
+    // that skips the form cannot skip the question. Nothing is stored for a refused attempt.
+    if req.confirmed_adult != Some(true) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "VectorScrub is for people aged 18 or over. Please confirm that you are 18 or older to create an account.".to_string(),
+        ));
+    }
+
     // A small pilot stays small: stop at the configured number of accounts.
     if let Some(max) = state.config.max_accounts {
         let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM customers")
@@ -98,8 +125,12 @@ pub async fn register(
             }
         })?;
 
+    let session_id = session_svc::create(&state.pool, customer.id, user_agent(&headers).as_deref())
+        .await
+        .map_err(internal_error)?;
     let token = auth_svc::issue_token(
         customer.id,
+        session_id,
         &format!("{:?}", customer.subscription_tier).to_lowercase(),
         &state.config.jwt_secret,
     )
@@ -127,6 +158,55 @@ pub async fn register(
     ))
 }
 
+fn login_audit(
+    action: &'static str,
+    email: &str,
+    ip: Option<std::net::IpAddr>,
+    headers: &HeaderMap,
+    status: audit::AuditStatus,
+    note: Option<&str>,
+) -> audit::AuditEntryBuilder {
+    let mut b = audit::AuditEntry::builder(action, audit::resources::CUSTOMER)
+        .user_email(email)
+        .status(status);
+    if let Some(ip) = ip {
+        b = b.ip_address(ip);
+    }
+    if let Some(ua) = user_agent(headers) {
+        b = b.user_agent(ua);
+    }
+    if let Some(n) = note {
+        b = b.error_message(n);
+    }
+    b
+}
+
+/// A failed login attempt (wrong password, or right password and wrong second factor): count
+/// it toward the lockout, audit it, and answer the same way each time.
+async fn login_failed(
+    state: &AppState,
+    req_email: &str,
+    ip: Option<std::net::IpAddr>,
+    headers: &HeaderMap,
+    note: &str,
+    message: &str,
+) -> Response {
+    let locked = match login_throttle::record_failure(&state.pool, req_email).await {
+        Ok(l) => l,
+        Err(e) => return internal_error(e).into_response(),
+    };
+    login_audit(audit::actions::USER_LOGIN, req_email, ip, headers, audit::AuditStatus::Failure, Some(note))
+        .log_or_warn(&state.pool)
+        .await;
+    if let Some(secs) = locked {
+        login_audit(audit::actions::USER_LOGIN_LOCKED, req_email, ip, headers, audit::AuditStatus::Failure, None)
+            .details(serde_json::json!({ "lock_seconds": secs }))
+            .log_or_warn(&state.pool)
+            .await;
+    }
+    err(StatusCode::UNAUTHORIZED, message)
+}
+
 /// POST /api/v1/auth/login
 #[utoipa::path(
     post,
@@ -134,8 +214,8 @@ pub async fn register(
     tag = "auth",
     request_body = LoginRequest,
     responses(
-        (status = 200, description = "Login successful", body = AuthResponse),
-        (status = 401, description = "Invalid credentials"),
+        (status = 200, description = "Login successful (AuthResponse, session cookie set), or the password was right and a second factor is needed (MfaRequiredResponse, no cookie)", body = AuthResponse),
+        (status = 401, description = "Invalid credentials or code"),
         (status = 422, description = "Validation error"),
         (status = 429, description = "Too many failed attempts for this email, or too many requests from this address (see Retry-After)"),
     ),
@@ -145,24 +225,12 @@ pub async fn login(
     ClientIp(ip): ClientIp,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
-) -> Result<([(header::HeaderName, String); 1], Json<AuthResponse>), Response> {
+) -> Result<Response, Response> {
     req.validate()
         .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()))?;
 
     let audit_entry = |action: &'static str, status: audit::AuditStatus, note: Option<&str>| {
-        let mut b = audit::AuditEntry::builder(action, audit::resources::CUSTOMER)
-            .user_email(&req.email)
-            .status(status);
-        if let Some(ip) = ip {
-            b = b.ip_address(ip);
-        }
-        if let Some(ua) = user_agent(&headers) {
-            b = b.user_agent(ua);
-        }
-        if let Some(n) = note {
-            b = b.error_message(n);
-        }
-        b
+        login_audit(action, &req.email, ip, &headers, status, note)
     };
 
     // 1. Locked out? Checked first, before any password work, and identical whether or
@@ -201,28 +269,45 @@ pub async fn login(
 
     // 3. Failure: count it, maybe lock, and answer exactly as for any other bad login.
     let Some(customer) = customer.filter(|_| valid) else {
-        let locked = login_throttle::record_failure(&state.pool, &req.email)
-            .await
-            .map_err(|e| internal_error(e).into_response())?;
-        audit_entry(audit::actions::USER_LOGIN, audit::AuditStatus::Failure, Some("invalid credentials"))
-            .log_or_warn(&state.pool)
-            .await;
-        if let Some(secs) = locked {
-            audit_entry(audit::actions::USER_LOGIN_LOCKED, audit::AuditStatus::Failure, None)
-                .details(serde_json::json!({ "lock_seconds": secs }))
-                .log_or_warn(&state.pool)
-                .await;
-        }
-        return Err(err(StatusCode::UNAUTHORIZED, "Invalid email or password"));
+        return Err(login_failed(&state, &req.email, ip, &headers, "invalid credentials", "Invalid email or password").await);
     };
 
-    // 4. Success.
+    // 4. Second factor, for accounts that have one. The password alone never opens such an
+    //    account. A wrong code counts toward the same lockout as a wrong password, so codes
+    //    cannot be guessed. Asking for the code is not a failure and does not count.
+    let mut mfa_method = None;
+    if mfa_svc::is_enabled(&state.pool, customer.id)
+        .await
+        .map_err(|e| internal_error(e).into_response())?
+    {
+        let code = req.mfa_code.as_deref().map(str::trim).filter(|c| !c.is_empty());
+        let Some(code) = code else {
+            return Ok(Json(MfaRequiredResponse { mfa_required: true }).into_response());
+        };
+        let master = MasterKey::from_base64(&state.config.master_key_b64)
+            .map_err(|e| internal_error(e).into_response())?;
+        match mfa_svc::verify(&state.pool, &master, customer.id, code)
+            .await
+            .map_err(|e| internal_error(e).into_response())?
+        {
+            Some(method) => mfa_method = Some(method),
+            None => {
+                return Err(login_failed(&state, &req.email, ip, &headers, "invalid second factor", "Invalid verification code").await);
+            }
+        }
+    }
+
+    // 5. Success.
     login_throttle::clear(&state.pool, &req.email)
         .await
         .map_err(|e| internal_error(e).into_response())?;
 
+    let session_id = session_svc::create(&state.pool, customer.id, user_agent(&headers).as_deref())
+        .await
+        .map_err(|e| internal_error(e).into_response())?;
     let token = auth_svc::issue_token(
         customer.id,
+        session_id,
         &format!("{:?}", customer.subscription_tier).to_lowercase(),
         &state.config.jwt_secret,
     )
@@ -231,30 +316,143 @@ pub async fn login(
     audit_entry(audit::actions::USER_LOGIN, audit::AuditStatus::Success, None)
         .customer_id(customer.id)
         .resource_id(customer.id)
+        .details(serde_json::json!({
+            "second_factor": match mfa_method {
+                Some(mfa_svc::Verified::Totp) => "totp",
+                Some(mfa_svc::Verified::RecoveryCode) => "recovery_code",
+                None => "none",
+            }
+        }))
         .log_or_warn(&state.pool)
         .await;
+    if mfa_method == Some(mfa_svc::Verified::RecoveryCode) {
+        audit_entry(audit::actions::MFA_RECOVERY_USED, audit::AuditStatus::Success, None)
+            .customer_id(customer.id)
+            .resource_id(customer.id)
+            .log_or_warn(&state.pool)
+            .await;
+    }
 
     Ok((
         [(header::SET_COOKIE, session_cookie(&token, state.config.secure_cookies()).to_string())],
         Json(AuthResponse { customer: customer.into() }),
-    ))
+    )
+        .into_response())
 }
 
 /// POST /api/v1/auth/logout
-/// Ends the browser session by expiring the session cookie. Idempotent, and works whether or
-/// not the caller is signed in. There is no server-side revocation: a token copied before
-/// logout stays valid until it expires (24 hours).
+/// Ends the browser session: the session is revoked on the server (so a copy of the token stops
+/// working at once) and the cookie is cleared. Idempotent, and harmless when not signed in.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/logout",
     tag = "auth",
-    responses((status = 204, description = "Session cookie cleared")),
+    responses((status = 204, description = "Session ended and cookie cleared")),
 )]
-pub async fn logout(State(state): State<AppState>) -> impl IntoResponse {
-    (
+pub async fn logout(
+    State(state): State<AppState>,
+    auth: Result<AuthenticatedCustomer, (StatusCode, String)>,
+) -> Response {
+    let cleared = [(header::SET_COOKIE, cleared_session_cookie(state.config.secure_cookies()).to_string())];
+    match auth {
+        Ok(a) => {
+            if let Err(e) = session_svc::revoke(&state.pool, a.id, a.session_id).await {
+                // The cookie is cleared regardless, but the caller must not be told the session
+                // is over when it may still be live.
+                tracing::error!(error = %e, "Could not revoke session at logout");
+                return (StatusCode::INTERNAL_SERVER_ERROR, cleared, "Internal server error").into_response();
+            }
+        }
+        // Not signed in (or the session had already ended): nothing to revoke.
+        Err((StatusCode::UNAUTHORIZED, _)) => {}
+        Err(other) => return (other.0, cleared, other.1).into_response(),
+    }
+    (StatusCode::NO_CONTENT, cleared).into_response()
+}
+
+/// POST /api/v1/auth/logout-all
+/// Ends every session of the signed-in customer, this one included.
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/logout-all",
+    tag = "auth",
+    responses((status = 204, description = "All sessions ended and cookie cleared"), (status = 401, description = "Not signed in")),
+)]
+pub async fn logout_all(auth: AuthenticatedCustomer, State(state): State<AppState>) -> Result<Response, Response> {
+    let ended = session_svc::revoke_all(&state.pool, auth.id, None)
+        .await
+        .map_err(|e| internal_error(e).into_response())?;
+    audit::AuditEntry::builder(audit::actions::SESSION_REVOKE, audit::resources::CUSTOMER)
+        .customer_id(auth.id)
+        .resource_id(auth.id)
+        .details(serde_json::json!({ "scope": "all", "ended": ended }))
+        .log_or_warn(&state.pool)
+        .await;
+    Ok((
         StatusCode::NO_CONTENT,
         [(header::SET_COOKIE, cleared_session_cookie(state.config.secure_cookies()).to_string())],
     )
+        .into_response())
+}
+
+/// Prove that the person at the keyboard is the account's owner, for actions a stolen session
+/// must not be able to take (erasing the account, changing two-factor settings). Needs the
+/// password and, for an account with two-factor on, a current code.
+///
+/// Shares the login lockout: these endpoints must not become a way to guess the password or a
+/// code. Asking for a missing code is not counted as a failure.
+pub(super) async fn reauthenticate(
+    state: &AppState,
+    customer_id: uuid::Uuid,
+    password: &str,
+    mfa_code: Option<&str>,
+) -> Result<Customer, Response> {
+    let customer = customer_svc::find_by_id(&state.pool, customer_id)
+        .await
+        .map_err(|e| internal_error(e).into_response())?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Customer not found"))?;
+
+    if let Some(wait) = login_throttle::locked_for(&state.pool, &customer.email)
+        .await
+        .map_err(|e| internal_error(e).into_response())?
+    {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, wait.to_string())],
+            format!("Too many failed attempts. Try again in {} minute(s).", (wait + 59) / 60),
+        )
+            .into_response());
+    }
+    let valid = auth_svc::verify_password_async(password.to_string(), customer.password_hash.clone())
+        .await
+        .map_err(|e| internal_error(e).into_response())?;
+    if !valid {
+        login_throttle::record_failure(&state.pool, &customer.email)
+            .await
+            .map_err(|e| internal_error(e).into_response())?;
+        return Err(err(StatusCode::UNAUTHORIZED, "Incorrect password"));
+    }
+
+    if mfa_svc::is_enabled(&state.pool, customer.id)
+        .await
+        .map_err(|e| internal_error(e).into_response())?
+    {
+        let Some(code) = mfa_code.map(str::trim).filter(|c| !c.is_empty()) else {
+            return Err(err(StatusCode::UNAUTHORIZED, "Enter a code from your authenticator app."));
+        };
+        let master = MasterKey::from_base64(&state.config.master_key_b64)
+            .map_err(|e| internal_error(e).into_response())?;
+        let ok = mfa_svc::verify(&state.pool, &master, customer.id, code)
+            .await
+            .map_err(|e| internal_error(e).into_response())?;
+        if ok.is_none() {
+            login_throttle::record_failure(&state.pool, &customer.email)
+                .await
+                .map_err(|e| internal_error(e).into_response())?;
+            return Err(err(StatusCode::UNAUTHORIZED, "Invalid verification code"));
+        }
+    }
+    Ok(customer)
 }
 
 /// Body of `DELETE /api/v1/me`.
@@ -263,11 +461,14 @@ pub struct DeleteAccountRequest {
     /// Re-authentication: a stolen session alone cannot erase an account.
     #[validate(length(max = 1024))]
     pub password: String,
+    /// Required when the account has two-factor authentication on.
+    #[validate(length(max = 64))]
+    pub mfa_code: Option<String>,
 }
 
 /// DELETE /api/v1/me
 /// Permanently erases the signed-in customer's account and personal data. Needs the password
-/// again, and refuses while a subscription would keep billing. See services/account_deletion.rs
+/// again (and a two-factor code if the account uses one), and refuses while a subscription would keep billing. See services/account_deletion.rs
 /// for exactly what is removed and what is kept.
 #[utoipa::path(
     delete,
@@ -276,7 +477,7 @@ pub struct DeleteAccountRequest {
     request_body = DeleteAccountRequest,
     responses(
         (status = 204, description = "Account erased; session cookie cleared"),
-        (status = 401, description = "Wrong password"),
+        (status = 401, description = "Wrong password, or a missing or wrong two-factor code"),
         (status = 409, description = "A subscription is still billing"),
         (status = 429, description = "Too many failed attempts"),
     ),
@@ -289,32 +490,7 @@ pub async fn delete_account(
     req.validate()
         .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()))?;
 
-    let customer = customer_svc::find_by_id(&state.pool, auth.id)
-        .await
-        .map_err(|e| internal_error(e).into_response())?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Customer not found"))?;
-
-    // Same lockout as login: this endpoint must not be a way to guess the password.
-    if let Some(wait) = login_throttle::locked_for(&state.pool, &customer.email)
-        .await
-        .map_err(|e| internal_error(e).into_response())?
-    {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            [(header::RETRY_AFTER, wait.to_string())],
-            format!("Too many failed attempts. Try again in {} minute(s).", (wait + 59) / 60),
-        )
-            .into_response());
-    }
-    let valid = auth_svc::verify_password_async(req.password.clone(), customer.password_hash.clone())
-        .await
-        .map_err(|e| internal_error(e).into_response())?;
-    if !valid {
-        login_throttle::record_failure(&state.pool, &customer.email)
-            .await
-            .map_err(|e| internal_error(e).into_response())?;
-        return Err(err(StatusCode::UNAUTHORIZED, "Incorrect password"));
-    }
+    let customer = reauthenticate(&state, auth.id, &req.password, req.mfa_code.as_deref()).await?;
 
     match crate::services::account_deletion::delete_account(&state.pool, auth.id).await {
         Ok(()) => {}

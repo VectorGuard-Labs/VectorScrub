@@ -6,16 +6,19 @@ This document states what the system does today, what it does not, and the open 
 
 `DELETE /api/v1/me` (password required, refused while a subscription would keep billing; one set to cancel at period end is allowed) and the operator command `vectorscrub erase-account <email>` call `services/account_deletion.rs`. In one transaction it pseudonymizes the customer's rows in `audit_log` (customer, email, IP, user agent cleared, including failed-login rows that carry only the email) and `removal_audit_log` (customer and request links cleared, free-text `details` reset to `{}`), then deletes the customer; everything the customer owns cascades. `stripe_subscriptions` keeps Stripe's identifiers with the customer link cut. The audit triggers still reject every other UPDATE, all DELETEs and TRUNCATE (tested).
 
-Not covered: `audit_log.details` and `error_message` are not rewritten (they hold no email or name by convention, which is not enforced by the database); backups follow the hosting platform's schedule; inactive-account deletion still does not exist; an operator must confirm a written erasure request really comes from the account owner before running the command.
+Not covered: `audit_log.details` and `error_message` are not rewritten (they hold no email or name by convention, which is not enforced by the database); backups keep an erased customer until they age out (`BACKUP_KEEP_DAYS`, default 30), and restoring one brings the customer back, so erasures made after the backup must be repeated (procedure in `docs/runbooks/backup-and-restore.md`); inactive-account deletion still does not exist; an operator must confirm a written erasure request really comes from the account owner before running the command.
 
 ## What runs today
 
-The scan recovery loop (`jobs/recovery.rs`) performs two housekeeping deletes:
+The scan recovery loop (`jobs/recovery.rs`) performs three housekeeping deletes:
 
 | Data | Rule |
 |------|------|
 | `login_throttle` rows | Purged once their lockout window has expired |
 | `privacy_score_history` | Rows older than 1 year are deleted |
+| `sessions` | Rows that expired or were revoked more than 7 days ago |
+
+Two-factor secrets, recovery codes and sessions belong to the customer and are removed with the account by the same cascade as everything else (tested).
 
 Nothing else is ever deleted automatically: customers, identity profiles, scan jobs, exposures, removal requests, alerts, `audit_log`, and `removal_audit_log` are kept indefinitely.
 

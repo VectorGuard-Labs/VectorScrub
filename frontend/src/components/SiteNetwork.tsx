@@ -72,13 +72,13 @@ export default function SiteNetwork({
                   href={href}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-teal-400 hover:text-teal-300"
+                  className="inline-flex items-center gap-1 text-brand-blue-400 hover:text-brand-blue-300"
                 >
                   Search this site <ExternalLink className="w-3 h-3" aria-hidden="true" />
                 </a>
               )}
               {site !== current && guided.has(site) && (
-                <a href={`#broker-${site}`} className="text-teal-400 hover:text-teal-300 underline">
+                <a href={`#broker-${site}`} className="text-brand-blue-400 hover:text-brand-blue-300 underline">
                   Opt-out steps
                 </a>
               )}

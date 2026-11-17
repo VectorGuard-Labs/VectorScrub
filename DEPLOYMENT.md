@@ -523,31 +523,11 @@ scrape_configs:
 
 ### Automated Backups
 
-```bash
-# PostgreSQL daily backups
-# Create backup script
-cat > /opt/vectorscrub/backup.sh <<'EOF'
-#!/bin/bash
-set -euo pipefail
-BACKUP_DIR=/var/backups/vectorscrub
-DATE=$(date +%Y%m%d-%H%M%S)
-mkdir -p $BACKUP_DIR
-
-# Backup database
-docker exec vectorscrub-postgres pg_dump -U vectorscrub vectorscrub | gzip > $BACKUP_DIR/db-$DATE.sql.gz
-
-# Upload to S3 (optional)
-aws s3 cp $BACKUP_DIR/db-$DATE.sql.gz s3://vectorscrub-backups/
-
-# Keep only last 30 days
-find $BACKUP_DIR -name "db-*.sql.gz" -mtime +30 -delete
-EOF
-
-chmod +x /opt/vectorscrub/backup.sh
-
-# Add to crontab
-echo "0 2 * * * /opt/vectorscrub/backup.sh" | crontab -
-```
+Use `infra/scripts/backup.sh` (encrypted, verified, copied off the machine, with a heartbeat) and
+test it with `infra/scripts/restore_verify.sh`. Setup, the monthly drill, and what a restore must
+not forget (the master key, erased accounts) are in
+[docs/runbooks/backup-and-restore.md](docs/runbooks/backup-and-restore.md). A plain
+`pg_dump | gzip` is not enough: it is unencrypted personal data, and nothing proves it restores.
 
 ### Log Rotation
 
@@ -581,11 +561,11 @@ systemctl restart docker
 
 #### Database Restore
 
-```bash
-# From backup
-gunzip < db-20261109.sql.gz | docker exec -i vectorscrub-postgres psql -U vectorscrub vectorscrub
+Follow "Restoring for real" in [docs/runbooks/backup-and-restore.md](docs/runbooks/backup-and-restore.md),
+and run `vectorscrub verify-backup` against the restored database before starting the service.
+On RDS, point-in-time restore works too:
 
-# AWS RDS point-in-time restore
+```bash
 aws rds restore-db-instance-to-point-in-time \
   --source-db-instance-identifier vectorscrub-postgres \
   --target-db-instance-identifier vectorscrub-postgres-restored \
@@ -638,7 +618,7 @@ aws rds restore-db-instance-to-point-in-time \
 - [ ] Fail2ban installed and configured
 - [ ] Regular security updates automated
 - [ ] Audit logs enabled and monitored
-- [ ] Backup restoration tested monthly
+- [ ] Backup restoration tested monthly with `infra/scripts/restore_verify.sh` (drill log in the runbook)
 - [ ] Incident response plan documented
 
 ---

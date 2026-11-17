@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import LegalLayout, { Contact, Section } from "@/components/LegalLayout";
+import { dmcaAgent } from "@/lib/legal";
 
 export const metadata: Metadata = { title: "Terms of Service — VectorScrub" };
 
 export default function TermsPage() {
+  const agent = dmcaAgent();
   return (
     <LegalLayout title="Terms of Service">
       <Section title="1. What VectorScrub is, and what it is not">
@@ -12,7 +14,7 @@ export default function TermsPage() {
           VectorScrub, a product of VectorGuard Labs (&quot;we&quot;), checks a set of data-broker and
           people-search websites for listings that match you, helps you ask those sites to remove them,
           and re-checks the listings afterwards. By creating an account you agree to these terms and to
-          our <Link href="/privacy" className="text-teal-400 underline">Privacy Policy</Link>.
+          our <Link href="/privacy" className="text-brand-blue-400 underline">Privacy Policy</Link>.
         </p>
         <p>
           <strong className="text-white">We cannot remove you from every site, and we do not promise to.</strong>{" "}
@@ -49,8 +51,9 @@ export default function TermsPage() {
         </ul>
       </Section>
 
-      <Section title="3. What you must do">
+      <Section title="3. Who can use VectorScrub, and what you must do">
         <ul className="list-disc ml-5 space-y-1">
+          <li><strong className="text-white">You must be 18 or older.</strong> We ask you to confirm this when you create an account. If we learn that an account belongs to someone under 18, we will close it and erase its data.</li>
           <li>Use VectorScrub only for <strong className="text-white">your own</strong> information. You may not enter another person&apos;s details, or use the service to find or locate someone.</li>
           <li>Give accurate details. A wrong name, address or date of birth leads to wrong matches and failed requests.</li>
           <li>Keep your password private. You are responsible for activity in your account.</li>
@@ -90,13 +93,13 @@ export default function TermsPage() {
         </p>
       </Section>
 
-      <Section title="6. Plans and payment">
+      <Section title="6. Plans and payment" id="plans">
         <ul className="list-disc ml-5 space-y-1">
           <li><strong className="text-white">Free:</strong> a scan every 7 days across up to 4 sites and up to 3 opt-out requests (requests that fail do not count). Free accounts are not monitored.</li>
           <li>
             <strong className="text-white">Founding pilot:</strong> a one-time payment of $1 for a small group of
             early customers. It does not renew and starts no subscription. It includes what is on the{" "}
-            <Link href="/pilot" className="text-teal-400 underline">pilot page</Link>. It guarantees no removal. If the
+            <Link href="/pilot" className="text-brand-blue-400 underline">pilot page</Link>. It guarantees no removal. If the
             pilot is full or ends, we will say so.
           </li>
           <li>
@@ -121,7 +124,7 @@ export default function TermsPage() {
         <p>
           You can stop using the service at any time. You can delete your account yourself
           from your profile page, which erases your personal details at once, or write to <Contact /> and we
-          will do it for you. Cancel any paid plan first. What we keep afterwards is described in the <Link href="/privacy" className="text-teal-400 underline">Privacy Policy</Link>.
+          will do it for you. Cancel any paid plan first. What we keep afterwards is described in the <Link href="/privacy" className="text-brand-blue-400 underline">Privacy Policy</Link>.
         </p>
         <p>
           We may suspend or close an account that breaks these terms, for example by searching for
@@ -142,7 +145,37 @@ export default function TermsPage() {
         </p>
       </Section>
 
-      <Section title="9. Changes and contact">
+      <Section title="9. Copyright">
+        <p>
+          VectorScrub does not publish anything its customers enter. Your details are kept private to
+          your account, so the service does not host public user content. We do not copy broker
+          listings except for the short text we need to decide whether a page is about you, and we do
+          not republish it.
+        </p>
+        {agent ? (
+          <>
+            <p>
+              If you believe material in the service infringes your copyright, send a notice that meets
+              17 U.S.C. 512(c)(3) to our designated agent (registered with the U.S. Copyright Office as{" "}
+              {agent.registration}):
+            </p>
+            <p className="text-white">
+              {agent.name}
+              <br />
+              {agent.address}
+              <br />
+              <a href={`mailto:${agent.email}`} className="text-brand-blue-400 underline">{agent.email}</a>
+            </p>
+          </>
+        ) : (
+          <p>
+            If you believe material in the service infringes your copyright, write to <Contact /> with
+            the work, where you found it in VectorScrub, and how to reach you.
+          </p>
+        )}
+      </Section>
+
+      <Section title="10. Changes and contact">
         <p>
           If we change these terms in a way that matters, we will tell you before the change applies
           to you, and you may cancel if you do not agree. Questions, problems, and data requests: <Contact />.

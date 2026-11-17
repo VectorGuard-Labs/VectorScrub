@@ -30,6 +30,10 @@ pub struct AppConfig {
     /// Login/register limit per client IP: sustained attempts/minute and burst capacity.
     pub rate_limit_auth_per_minute: u64,
     pub rate_limit_auth_burst: u32,
+    /// Prefix of the Redis keys the rate limiter uses (`RATE_LIMIT_KEY_PREFIX`, default `vs`).
+    /// Instances that share a Redis share their limits; give each environment that shares one
+    /// Redis its own prefix.
+    pub rate_limit_key_prefix: String,
     /// Scan job recovery (see jobs/recovery.rs).
     pub scan_recovery_interval_secs: u64,
     pub scan_stale_after_secs: i64,
@@ -310,6 +314,15 @@ impl AppConfig {
             rate_limit_general_burst: env_parse(&get, "RATE_LIMIT_GENERAL_BURST", 60)?,
             rate_limit_auth_per_minute: env_parse(&get, "RATE_LIMIT_AUTH_PER_MINUTE", 5)?,
             rate_limit_auth_burst: env_parse(&get, "RATE_LIMIT_AUTH_BURST", 5)?,
+            rate_limit_key_prefix: {
+                let p = get("RATE_LIMIT_KEY_PREFIX").map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+                let p = p.unwrap_or_else(|| "vs".to_string());
+                anyhow::ensure!(
+                    p.len() <= 32 && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                    "RATE_LIMIT_KEY_PREFIX may contain only letters, digits, '-' and '_' (at most 32)"
+                );
+                p
+            },
             scan_recovery_interval_secs: env_parse(&get, "SCAN_RECOVERY_INTERVAL_SECS", 60)?,
             scan_stale_after_secs: env_parse(&get, "SCAN_STALE_AFTER_SECS", 600)?,
             scan_redispatch_after_secs: env_parse(&get, "SCAN_REDISPATCH_AFTER_SECS", 600)?,
@@ -417,6 +430,18 @@ mod tests {
             let err = load(&v).unwrap_err().to_string();
             assert!(err.contains("MASTER_ENCRYPTION_KEY"), "{err}");
             assert!(!err.contains(bad) || bad.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_rate_limit_key_prefix_defaults_and_is_checked() {
+        assert_eq!(load(&good()).unwrap().rate_limit_key_prefix, "vs");
+        let mut v = good();
+        v.insert("RATE_LIMIT_KEY_PREFIX", " staging-1 ".into());
+        assert_eq!(load(&v).unwrap().rate_limit_key_prefix, "staging-1");
+        for bad in ["has space", "colon:no", &"x".repeat(33), "naïve"] {
+            v.insert("RATE_LIMIT_KEY_PREFIX", bad.to_string());
+            assert!(load(&v).is_err(), "{bad:?}");
         }
     }
 

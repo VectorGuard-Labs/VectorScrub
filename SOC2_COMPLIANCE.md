@@ -6,8 +6,8 @@
 |---------|----------------|
 | PII encrypted at rest with AES-256-GCM, per-customer keys derived from the master key | **Implemented** (key derivation is SHA-256 over master key, label and customer id; no AAD) |
 | Master key in an HSM (PyHSM), automatic 90-day rotation | **Not implemented.** Key is read from an environment variable; no rotation. The PyHSM module was removed. |
-| Passwords hashed with Argon2id; JWT HS256, 24 h expiry | **Implemented.** No refresh tokens, no session inactivity timeout, no MFA. |
-| Login lockout and per-IP rate limits | **Implemented** (in-memory limits are per instance) |
+| Passwords hashed with Argon2id; JWT HS256, 24 h expiry | **Implemented.** Sessions are server-side: logout and "sign out everywhere" revoke at once, 60-minute inactivity timeout, 24 h absolute. Optional TOTP two-factor with recovery codes for customers (not enforced). No refresh tokens. No MFA for staff because there is no staff login (operators use the CLI with database credentials). |
+| Login lockout and per-IP rate limits | **Implemented.** Per-IP limits are shared across instances through Redis; if Redis is down they degrade to per-instance in-memory limits. |
 | CSRF protection and security headers | **Implemented** (backend API responses and the Next.js pages; session in an `HttpOnly` cookie) |
 | SSRF protection when agents fetch third-party pages | **Implemented** (`agents/shared/safe_fetch.py`: public addresses only, connection pinned to the checked address, redirects re-validated and confined to the source domain, size-capped). Tested with mocks plus a live HTTPS check; not penetration-tested. |
 | Agents cannot hold backend secrets | **Implemented as a startup check** (agents refuse to start if the master key, JWT secret or database credentials are in their environment or `.env`). It cannot stop an operator from giving them other secrets. |
@@ -21,7 +21,10 @@
 | Idempotency keys | **Not implemented** |
 | Automated data retention / right-to-erasure | **Not implemented** (see `DATA_RETENTION.md`) |
 | Circuit breakers | **Partial:** Python agents only, per host, for page fetches |
-| Backups, DR, change management, vendor management, incident response | **Process items outside the code**; not evidenced here |
+| Dependency vulnerability scanning | **Implemented** in `.github/workflows/security.yml` (cargo audit, pip-audit, npm audit; weekly and on every change) plus Dependabot. Set-aside Rust advisories are listed with reasons in `backend/.cargo/audit.toml`. |
+| Backups and restore | **Scripted and drilled, not yet operated.** `infra/scripts/backup.sh`, `restore_verify.sh`, `vectorscrub verify-backup`; procedure and drill log in `docs/runbooks/backup-and-restore.md`. No production schedule, off-site copy or restore drill on real infrastructure is evidenced here. |
+| External penetration test | **Not done.** Scope and rules of engagement are prepared in `docs/security/PENTEST_BRIEF.md`. |
+| DR, change management, vendor management, incident response | **Process items outside the code**; not evidenced here |
 
 This document outlines VectorScrub's SOC 2 compliance framework, policies, and procedures.
 
@@ -74,7 +77,7 @@ Access Control Matrix:
 ```
 
 **Target controls (not verified; see the status table at the top):**
-- ☐ Multi-factor authentication (MFA) required for all access (target; none exists today)
+- ☐ Multi-factor authentication (MFA) required for all access (target; customers can opt in to TOTP, nothing is mandatory, and operator access to the database and CLI has no MFA of its own)
 - ☐ Role-based access control (RBAC) implemented
 - ☐ Least privilege principle enforced
 - ☐ Access reviews conducted quarterly
@@ -87,10 +90,10 @@ Access Control Matrix:
 ```bash
 # Backend authentication
 - JWT tokens with 24-hour expiration
-- Refresh tokens with 30-day expiration (target; today: a single 24 h session cookie/JWT, no refresh, no server-side revocation)
+- Refresh tokens with 30-day expiration (target; today: a single 24 h session cookie/JWT backed by a server-side session that can be revoked; no refresh)
 - Strong password policy (12+ characters, complexity)
 - Account lockout after 5 failed attempts
-- Session timeout after 30 minutes inactivity (target; not implemented)
+- Session timeout after inactivity (implemented at 60 minutes, not the 30 minutes this target names)
 
 # API authentication
 - Agent API keys rotated every 90 days

@@ -122,7 +122,9 @@ export default function PrivacyPage() {
       <Section title="8. Cookies">
         <p>
           We use one session cookie to keep you signed in, and a security token that protects form
-          submissions. We do not use advertising or analytics cookies.
+          submissions. We do not use advertising or analytics cookies, session recording or replay tools, or
+          third-party trackers, and the site loads no fonts, scripts or images from other companies. Your
+          browser talks only to us.
         </p>
       </Section>
 
@@ -137,9 +139,12 @@ export default function PrivacyPage() {
 
       <Section title="10. Children, changes, contact">
         <p>
-          VectorScrub is for adults and is not directed at anyone under 18. If we change this policy in a
+          VectorScrub is for adults and is not directed at anyone under 18. We ask you to confirm that you
+          are 18 or older when you create an account, and we do not knowingly collect information from
+          anyone younger. If you think a child has given us information, write to <Contact /> and we will
+          erase it. If we change this policy in a
           way that matters, we will tell you before the change applies to you. Read it together with the{" "}
-          <Link href="/terms" className="text-teal-400 underline">Terms of Service</Link>. Contact: <Contact />.
+          <Link href="/terms" className="text-brand-blue-400 underline">Terms of Service</Link>. Contact: <Contact />.
         </p>
       </Section>
     </LegalLayout>

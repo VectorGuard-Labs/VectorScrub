@@ -2,18 +2,46 @@
 
 @config "../../tailwind.config.ts";
 
-:root {
-  --vs-teal: #0d9488;
-  --vs-teal-light: #14b8a6;
-  --vs-dark: #030712;
+/*
+ * Company colors: red, white and blue. Change the hex values here to adjust the palette;
+ * components use these names (bg-brand-blue-400, bg-brand-red-600, ...), never raw hex.
+ *
+ * brand-blue: accents, links, icons, selected states.
+ * brand-red:  primary action buttons only. Status colors (critical/high/medium/low, errors)
+ *             keep Tailwind's own red/orange/yellow/green so severity stays readable.
+ *
+ * The dark grays are redefined as navy so every page surface is blue rather than black.
+ * Lighter grays (600 and up) are untouched; they are text colors.
+ */
+@theme {
+  --color-brand-blue-50: #eff6ff;
+  --color-brand-blue-100: #dbeafe;
+  --color-brand-blue-200: #bfdbfe;
+  --color-brand-blue-300: #93c5fd;
+  --color-brand-blue-400: #60a5fa;
+  --color-brand-blue-500: #3b82f6;
+  --color-brand-blue-600: #2563eb;
+  --color-brand-blue-700: #1d4ed8;
+  --color-brand-blue-800: #1e40af;
+  --color-brand-blue-900: #1e3a8a;
+  --color-brand-blue-950: #172554;
+
+  --color-brand-red-500: #ef4444;
+  --color-brand-red-600: #dc2626;
+  --color-brand-red-700: #b91c1c;
+
+  --color-gray-700: #22365f;
+  --color-gray-800: #15254a;
+  --color-gray-900: #0b1733;
+  --color-gray-950: #060d1f;
 }
 
 body {
-  background-color: var(--vs-dark);
+  background-color: var(--color-gray-950);
 }
 
 .gradient-brand {
-  background: linear-gradient(135deg, #0d9488 0%, #6366f1 100%);
+  background: linear-gradient(135deg, var(--color-brand-blue-600) 0%, var(--color-brand-red-600) 100%);
 }
 
 .score-ring {

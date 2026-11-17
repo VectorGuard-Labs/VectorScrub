@@ -31,13 +31,16 @@ fn request_token(parts: &Parts) -> Option<String> {
         })
 }
 
-/// Extractor that validates the session JWT (Bearer header or session cookie) and provides
-/// the customer's UUID and subscription tier to route handlers.
+/// Extractor that validates the session JWT (Bearer header or session cookie), checks that its
+/// server-side session is still live, and provides the customer's UUID and subscription tier to
+/// route handlers.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AuthenticatedCustomer {
     pub id: Uuid,
     pub tier: String,
+    /// The session this request belongs to; `POST /auth/logout` and the session list use it.
+    pub session_id: Uuid,
 }
 
 #[async_trait]
@@ -58,7 +61,18 @@ impl FromRequestParts<AppState> for AuthenticatedCustomer {
         let id = Uuid::parse_str(&claims.sub)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid session".to_string()))?;
 
-        Ok(AuthenticatedCustomer { id, tier: claims.tier })
+        let session_id = Uuid::parse_str(&claims.jti)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid session".to_string()))?;
+
+        // A valid signature is not enough: the session behind it must still be live (not signed
+        // out, not revoked, not idle too long). If that cannot be checked, the request is refused.
+        match crate::services::session::validate(&state.pool, session_id, id).await {
+            Ok(true) => {}
+            Ok(false) => return Err((StatusCode::UNAUTHORIZED, "Invalid or expired session".to_string())),
+            Err(e) => return Err(crate::api::error::internal_error(e)),
+        }
+
+        Ok(AuthenticatedCustomer { id, tier: claims.tier, session_id })
     }
 }
 

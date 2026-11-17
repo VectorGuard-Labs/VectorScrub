@@ -114,7 +114,7 @@ export default function ProfilePage() {
         </div>
 
         {success && (
-          <div className="mb-6 p-4 bg-teal-950 border border-teal-800 rounded-lg text-teal-400">
+          <div className="mb-6 p-4 bg-brand-blue-950 border border-brand-blue-800 rounded-lg text-brand-blue-400">
             Profile saved successfully! Redirecting to dashboard...
           </div>
         )}
@@ -137,7 +137,7 @@ export default function ProfilePage() {
               required
               value={formData.full_name}
               onChange={(e) => setFormData({ ...formData, full_name: e.target.value })}
-              className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+              className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
               placeholder="John Doe"
             />
           </div>
@@ -154,14 +154,14 @@ export default function ProfilePage() {
                 required
                 value={formData.street_address}
                 onChange={(e) => setFormData({ ...formData, street_address: e.target.value })}
-                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
                 placeholder="Street address"
               />
               <input
                 type="text"
                 value={formData.apt_suite}
                 onChange={(e) => setFormData({ ...formData, apt_suite: e.target.value })}
-                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
                 placeholder="Apt, suite, unit, etc. (optional)"
               />
               <div className="grid grid-cols-2 gap-2">
@@ -170,7 +170,7 @@ export default function ProfilePage() {
                   required
                   value={formData.city}
                   onChange={(e) => setFormData({ ...formData, city: e.target.value })}
-                  className="px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                  className="px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
                   placeholder="City"
                 />
                 <div className="grid grid-cols-2 gap-2">
@@ -180,7 +180,7 @@ export default function ProfilePage() {
                     maxLength={2}
                     value={formData.state}
                     onChange={(e) => setFormData({ ...formData, state: e.target.value.toUpperCase() })}
-                    className="px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                    className="px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
                     placeholder="State"
                   />
                   <input
@@ -189,7 +189,7 @@ export default function ProfilePage() {
                     maxLength={10}
                     value={formData.zip_code}
                     onChange={(e) => setFormData({ ...formData, zip_code: e.target.value })}
-                    className="px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                    className="px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
                     placeholder="ZIP"
                   />
                 </div>
@@ -209,7 +209,7 @@ export default function ProfilePage() {
                   type="text"
                   value={addr}
                   onChange={(e) => updateField("previous_addresses", idx, e.target.value)}
-                  className="flex-1 px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                  className="flex-1 px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
                   placeholder="Previous address"
                 />
                 {formData.previous_addresses.length > 1 && (
@@ -226,7 +226,7 @@ export default function ProfilePage() {
             <button
               type="button"
               onClick={() => addField("previous_addresses")}
-              className="flex items-center gap-2 text-sm text-teal-400 hover:text-teal-300"
+              className="flex items-center gap-2 text-sm text-brand-blue-400 hover:text-brand-blue-300"
             >
               <Plus className="w-4 h-4" />
               Add another address
@@ -245,7 +245,7 @@ export default function ProfilePage() {
                   type="tel"
                   value={phone}
                   onChange={(e) => updateField("phone_numbers", idx, e.target.value)}
-                  className="flex-1 px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                  className="flex-1 px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
                   placeholder="(555) 123-4567"
                 />
                 {formData.phone_numbers.length > 1 && (
@@ -262,7 +262,7 @@ export default function ProfilePage() {
             <button
               type="button"
               onClick={() => addField("phone_numbers")}
-              className="flex items-center gap-2 text-sm text-teal-400 hover:text-teal-300"
+              className="flex items-center gap-2 text-sm text-brand-blue-400 hover:text-brand-blue-300"
             >
               <Plus className="w-4 h-4" />
               Add another phone
@@ -281,7 +281,7 @@ export default function ProfilePage() {
                   type="email"
                   value={email}
                   onChange={(e) => updateField("email_addresses", idx, e.target.value)}
-                  className="flex-1 px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+                  className="flex-1 px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
                   placeholder="you@example.com"
                   required={idx === 0}
                 />
@@ -299,7 +299,7 @@ export default function ProfilePage() {
             <button
               type="button"
               onClick={() => addField("email_addresses")}
-              className="flex items-center gap-2 text-sm text-teal-400 hover:text-teal-300"
+              className="flex items-center gap-2 text-sm text-brand-blue-400 hover:text-brand-blue-300"
             >
               <Plus className="w-4 h-4" />
               Add another email
@@ -316,7 +316,7 @@ export default function ProfilePage() {
               type="date"
               value={formData.date_of_birth}
               onChange={(e) => setFormData({ ...formData, date_of_birth: e.target.value })}
-              className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-teal-500"
+              className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-brand-blue-500"
             />
           </div>
 
@@ -325,7 +325,7 @@ export default function ProfilePage() {
             <button
               type="submit"
               disabled={loading}
-              className="flex-1 bg-teal-600 hover:bg-teal-500 text-white px-6 py-3 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 bg-brand-red-600 hover:bg-brand-red-500 text-white px-6 py-3 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {loading ? "Saving..." : "Save Identity Profile"}
             </button>

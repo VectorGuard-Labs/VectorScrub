@@ -10,11 +10,15 @@ import type {
   CustomerProfile,
   Exposure,
   ExposureSummary,
+  MfaRequired,
+  MfaSetup,
+  MfaStatus,
   OptOutHealth,
   OptOutHealthKind,
   RemovalAuditEntry,
   RemovalRequest,
   ScanJob,
+  SessionInfo,
 } from "@/types";
 
 import { csrfFetch } from "@/lib/csrf";
@@ -81,6 +85,7 @@ export async function register(
   email: string,
   password: string,
   acceptedTermsVersion: string,
+  confirmedAdult: boolean,
   pilotConsents: { interview: boolean; story: boolean } = { interview: false, story: false }
 ): Promise<AuthResponse> {
   const res = await fetch(`${BASE}/auth/register`, {
@@ -91,6 +96,7 @@ export async function register(
       email,
       password,
       accepted_terms_version: acceptedTermsVersion,
+      confirmed_adult: confirmedAdult,
       pilot_interview_ok: pilotConsents.interview,
       pilot_story_ok: pilotConsents.story,
     }),
@@ -98,17 +104,28 @@ export async function register(
   return handleResponse<AuthResponse>(res, { authenticated: false });
 }
 
+/**
+ * Signs in. If the account has two-factor authentication on and no `mfaCode` was given, the
+ * server answers `{ mfa_required: true }` (password was right, no session yet): ask for the
+ * code and call again with it.
+ */
 export async function login(
   email: string,
-  password: string
-): Promise<AuthResponse> {
+  password: string,
+  mfaCode?: string
+): Promise<AuthResponse | MfaRequired> {
   const res = await fetch(`${BASE}/auth/login`, {
     method: "POST",
     headers: jsonHeaders(),
     credentials: "same-origin",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify(mfaCode ? { email, password, mfa_code: mfaCode } : { email, password }),
   });
-  return handleResponse<AuthResponse>(res, { authenticated: false });
+  return handleResponse<AuthResponse | MfaRequired>(res, { authenticated: false });
+}
+
+/** True when `login` answered "send the second factor". */
+export function needsMfa(r: AuthResponse | MfaRequired): r is MfaRequired {
+  return "mfa_required" in r;
 }
 
 /** Ends the session: the server expires the cookie. Never throws; signing out always "works". */
@@ -128,12 +145,71 @@ export async function logout(): Promise<void> {
  * 401 that must be shown on the form, not treated as an expired session, so this does not use
  * handleResponse's redirect.
  */
-export async function deleteAccount(password: string): Promise<void> {
+export async function deleteAccount(password: string, mfaCode?: string): Promise<void> {
   const res = await csrfFetch(`${BASE}/me`, {
     method: "DELETE",
     headers: jsonHeaders(),
+    body: JSON.stringify(mfaCode ? { password, mfa_code: mfaCode } : { password }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+}
+
+// Two-factor authentication and sessions. Wrong passwords and codes are 401s that belong on the
+// form, so the changing calls do not use handleResponse's "go and sign in again" redirect.
+async function checked<T>(res: Response): Promise<T> {
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+  return res.json() as Promise<T>;
+}
+
+export async function getMfaStatus(): Promise<MfaStatus> {
+  const res = await csrfFetch(`${BASE}/me/mfa`, { headers: jsonHeaders() });
+  return handleResponse<MfaStatus>(res);
+}
+
+export async function startMfaSetup(password: string): Promise<MfaSetup> {
+  const res = await csrfFetch(`${BASE}/me/mfa/setup`, {
+    method: "POST",
+    headers: jsonHeaders(),
     body: JSON.stringify({ password }),
   });
+  return checked<MfaSetup>(res);
+}
+
+/** Confirms setup with a code from the app. The recovery codes are returned once. */
+export async function enableMfa(code: string): Promise<string[]> {
+  const res = await csrfFetch(`${BASE}/me/mfa/enable`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ code }),
+  });
+  return (await checked<{ recovery_codes: string[] }>(res)).recovery_codes;
+}
+
+export async function disableMfa(password: string, code: string): Promise<void> {
+  const res = await csrfFetch(`${BASE}/me/mfa/disable`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ password, code }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+}
+
+export async function getSessions(): Promise<SessionInfo[]> {
+  const res = await csrfFetch(`${BASE}/me/sessions`, { headers: jsonHeaders() });
+  return handleResponse<SessionInfo[]>(res);
+}
+
+export async function endSession(id: string): Promise<void> {
+  const res = await csrfFetch(`${BASE}/me/sessions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: jsonHeaders(),
+  });
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+}
+
+/** Signs out of every browser and device, this one included. */
+export async function logoutEverywhere(): Promise<void> {
+  const res = await fetch(`${BASE}/auth/logout-all`, { method: "POST", credentials: "same-origin" });
   if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
 }
 

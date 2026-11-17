@@ -86,6 +86,36 @@ jobs:
           done
           infra/scripts/sqlx_prepare.sh --check
 
+      # Exercises the real backup and restore scripts end to end on a throwaway database: dump,
+      # encrypt, checksum, restore into a scratch database, and run `vectorscrub verify-backup`
+      # (which also opens encrypted rows with the key). Catches a script or schema change that
+      # would make a backup unrestorable. Needs the binary built by the first step above.
+      - name: Backup and restore drill
+        working-directory: .
+        env:
+          PGPASSWORD: ci
+        run: |
+          set -euo pipefail
+          psql -h localhost -U vectorscrub -d vectorscrub -q -c "CREATE DATABASE drill_src;"
+          key="$(openssl rand -base64 32)"
+          # Starting the service applies every migration to drill_src and creates its first rows.
+          DATABASE_URL=postgres://vectorscrub:ci@localhost:5432/drill_src REDIS_URL=redis://localhost:6379/13 \
+            JWT_SECRET="$(openssl rand -hex 32)" AGENT_API_KEY="$(openssl rand -hex 32)" \
+            MASTER_ENCRYPTION_KEY="$key" PORT=18080 backend/target/debug/vectorscrub > /tmp/backend.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 60); do
+            curl -fs http://127.0.0.1:18080/api/v1/health/ready >/dev/null && break
+            sleep 1
+          done
+          curl -fs http://127.0.0.1:18080/api/v1/health/ready >/dev/null || { cat /tmp/backend.log; exit 1; }
+          kill "$pid"
+          export GNUPGHOME="$(mktemp -d)"; chmod 700 "$GNUPGHOME"
+          gpg --batch --quiet --passphrase '' --quick-generate-key drill@ci.test default default never
+          DATABASE_URL=postgres://vectorscrub:ci@localhost:5432/drill_src \
+            BACKUP_DIR="$RUNNER_TEMP/bk" BACKUP_GPG_RECIPIENT=drill@ci.test infra/scripts/backup.sh
+          RESTORE_ADMIN_URL=postgres://vectorscrub:ci@localhost:5432/postgres MASTER_ENCRYPTION_KEY="$key" \
+            infra/scripts/restore_verify.sh "$(ls "$RUNNER_TEMP"/bk/*.gpg)"
+
   agents:
     name: Agents (Python)
     runs-on: ubuntu-latest
@@ -132,6 +162,10 @@ jobs:
       - run: npm ci
       - name: Type-check
         run: npm run typecheck
+
+      # The Privacy Policy promises no third-party fonts, scripts, trackers or session replay.
+      - name: No third-party content
+        run: npm run check:third-party
       - name: Build
         run: npm run build
 

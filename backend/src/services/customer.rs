@@ -48,8 +48,9 @@ pub async fn create_account(
         r#"
         INSERT INTO customers (id, email, password_hash, subscription_tier,
                                is_verified, is_active, created_at, updated_at,
-                               terms_version, terms_accepted_at, pilot_interview_ok, pilot_story_ok)
-        VALUES ($1, $2, $3, 'free', false, true, $4, $4, $5, $4, $6, $7)
+                               terms_version, terms_accepted_at, adult_confirmed_at,
+                               pilot_interview_ok, pilot_story_ok)
+        VALUES ($1, $2, $3, 'free', false, true, $4, $4, $5, $4, $4, $6, $7)
         RETURNING *
         "#,
     )

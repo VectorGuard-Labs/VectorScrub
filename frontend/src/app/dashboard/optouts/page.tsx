@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Shield, LogOut, ExternalLink, Mail, Info } from "lucide-react";
+import { LogOut, ExternalLink, Mail, Info } from "lucide-react";
 import { addOwnListing, getOptOutHealth, getResidenceState, listExposures, listRemovalRequests, listScans, logout } from "@/lib/api";
 import { formatDate, isAutomationBlocked } from "@/lib/utils";
 import { BROKER_OPT_OUTS, type BrokerOptOut } from "@/lib/brokers.generated";
@@ -159,7 +159,6 @@ export default function OptOutsPage() {
     <div className="min-h-screen">
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Shield className="text-teal-400 w-5 h-5" aria-hidden="true" />
           <span className="text-white font-bold">VectorScrub</span>
         </div>
         <div className="flex items-center gap-4">
@@ -249,18 +248,18 @@ export default function OptOutsPage() {
               placeholder="https://www.example.com/your-listing"
               value={newUrl}
               onChange={(e) => setNewUrl(e.target.value)}
-              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-teal-500"
+              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-brand-blue-500"
             />
             <button
               type="submit"
               disabled={adding || !newUrl.trim()}
-              className="px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white text-sm"
+              className="px-4 py-2 rounded-lg bg-brand-red-600 hover:bg-brand-red-500 disabled:opacity-50 text-white text-sm"
             >
               {adding ? "Adding\u2026" : "Track this listing"}
             </button>
           </form>
           {addMessage && (
-            <p role="status" className={`text-xs mt-2 ${addMessage.ok ? "text-teal-300" : "text-red-400"}`}>
+            <p role="status" className={`text-xs mt-2 ${addMessage.ok ? "text-brand-blue-300" : "text-red-400"}`}>
               {addMessage.text}
               {addMessage.ok && (
                 <>
@@ -301,7 +300,7 @@ export default function OptOutsPage() {
               href={DROP_URL}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-teal-400 hover:text-teal-300 text-sm font-medium"
+              className="inline-flex items-center gap-1.5 text-brand-blue-400 hover:text-brand-blue-300 text-sm font-medium"
             >
               Go to California DROP <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
             </a>
@@ -368,7 +367,7 @@ export default function OptOutsPage() {
                       {request && (request.status === "failed" || request.status === "submitted") && (
                         <>
                           {" "}
-                          <a href="/dashboard/removals" className="text-teal-400 underline">Removals page</a>
+                          <a href="/dashboard/removals" className="text-brand-blue-400 underline">Removals page</a>
                         </>
                       )}
                     </p>
@@ -403,7 +402,7 @@ export default function OptOutsPage() {
                     {b.method === "email" && b.optOutEmail ? (
                       <a
                         href={`mailto:${b.optOutEmail}?subject=${encodeURIComponent("Opt-Out Request")}`}
-                        className="inline-flex items-center gap-1.5 text-teal-400 hover:text-teal-300 font-medium"
+                        className="inline-flex items-center gap-1.5 text-brand-blue-400 hover:text-brand-blue-300 font-medium"
                       >
                         <Mail className="w-3.5 h-3.5" aria-hidden="true" /> Email {b.optOutEmail}
                       </a>
@@ -413,7 +412,7 @@ export default function OptOutsPage() {
                           href={b.optOutUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1.5 text-teal-400 hover:text-teal-300 font-medium"
+                          className="inline-flex items-center gap-1.5 text-brand-blue-400 hover:text-brand-blue-300 font-medium"
                         >
                           Open opt-out page <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
                         </a>

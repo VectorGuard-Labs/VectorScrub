@@ -168,6 +168,7 @@ pub fn test_config() -> crate::services::config::AppConfig {
         rate_limit_general_burst: 60,
         rate_limit_auth_per_minute: 5,
         rate_limit_auth_burst: 5,
+        rate_limit_key_prefix: "test".into(),
         scan_recovery_interval_secs: 60,
         scan_stale_after_secs: 600,
         scan_redispatch_after_secs: 600,

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Shield, LogOut, ExternalLink, Info } from "lucide-react";
+import { LogOut, ExternalLink, Info } from "lucide-react";
 import {
   ApiError,
   createDeletionCampaign,
@@ -110,7 +110,6 @@ export default function DeletionRequestsPage() {
     <div className="min-h-screen">
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Shield className="text-teal-400 w-5 h-5" aria-hidden="true" />
           <span className="text-white font-bold">VectorScrub</span>
         </div>
         <div className="flex items-center gap-4">
@@ -132,7 +131,7 @@ export default function DeletionRequestsPage() {
         ) : unavailable ? (
           <p className="text-gray-400 text-sm" data-testid="requests-unavailable">
             Sending deletion requests for you is not available yet. In the meantime, the{" "}
-            <Link href="/dashboard/optouts" className="text-teal-400 hover:text-teal-300 underline">
+            <Link href="/dashboard/optouts" className="text-brand-blue-400 hover:text-brand-blue-300 underline">
               manual opt-out guide
             </Link>{" "}
             shows how to ask each company yourself.
@@ -150,7 +149,7 @@ export default function DeletionRequestsPage() {
             {!info.plan_ok && (
               <p className="bg-gray-900 border border-gray-800 rounded-lg px-4 py-3 mb-6 text-sm text-gray-300">
                 Sending requests is part of the paid plan.{" "}
-                <Link href="/dashboard/billing" className="text-teal-400 hover:text-teal-300 underline">See plans</Link>
+                <Link href="/dashboard/billing" className="text-brand-blue-400 hover:text-brand-blue-300 underline">See plans</Link>
               </p>
             )}
 
@@ -158,7 +157,7 @@ export default function DeletionRequestsPage() {
               <div
                 role={error ? "alert" : "status"}
                 className={`rounded-lg px-4 py-3 mb-6 text-sm border ${
-                  error ? "bg-red-950 border-red-800 text-red-300" : "bg-teal-950 border-teal-800 text-teal-300"
+                  error ? "bg-red-950 border-red-800 text-red-300" : "bg-brand-blue-950 border-brand-blue-800 text-brand-blue-300"
                 }`}
               >
                 {error || message}
@@ -191,7 +190,7 @@ export default function DeletionRequestsPage() {
                     <div className="ml-7 mt-2 text-xs text-gray-500 space-y-1">
                       <p>
                         Would be emailed to <span className="text-gray-300">{c.address}</span>, the address{" "}
-                        <a href={c.source_url} target="_blank" rel="noopener noreferrer" className="text-teal-400 hover:text-teal-300 inline-flex items-center gap-1">
+                        <a href={c.source_url} target="_blank" rel="noopener noreferrer" className="text-brand-blue-400 hover:text-brand-blue-300 inline-flex items-center gap-1">
                           the company publishes <ExternalLink className="w-3 h-3" aria-hidden="true" />
                         </a>
                         . We last checked on {formatDate(c.verified_on)}.
@@ -237,7 +236,7 @@ export default function DeletionRequestsPage() {
                 tabIndex={0}
                 role="region"
                 aria-label="Authorization text"
-                className="bg-gray-900 border border-gray-700 rounded-lg p-4 text-sm text-gray-300 whitespace-pre-wrap max-h-64 overflow-y-auto focus:ring-2 focus:ring-teal-600 focus:outline-none"
+                className="bg-gray-900 border border-gray-700 rounded-lg p-4 text-sm text-gray-300 whitespace-pre-wrap max-h-64 overflow-y-auto focus:ring-2 focus:ring-brand-blue-600 focus:outline-none"
               >
                 {info.authorization.text}
               </div>
@@ -251,7 +250,7 @@ export default function DeletionRequestsPage() {
             <button
               onClick={() => void submit()}
               disabled={!canSubmit}
-              className="bg-teal-600 hover:bg-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
+              className="bg-brand-red-600 hover:bg-brand-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
             >
               {busy ? "Sending…" : picked.size === 0 ? "Send requests" : `Send ${picked.size} request${picked.size === 1 ? "" : "s"}`}
             </button>

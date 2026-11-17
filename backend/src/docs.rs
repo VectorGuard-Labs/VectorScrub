@@ -1,6 +1,8 @@
 use utoipa::OpenApi;
 
-use crate::api::auth::{AuthResponse, DeleteAccountRequest, LoginRequest};
+use crate::api::auth::{AuthResponse, DeleteAccountRequest, LoginRequest, MfaRequiredResponse};
+use crate::api::security::{MfaDisableRequest, MfaEnableRequest, MfaEnabledResponse, MfaSetupRequest, SessionView};
+use crate::services::mfa::{Setup as MfaSetup, Status as MfaStatus};
 use crate::services::optout_health::{OptOutPageStatus, PageKind, PublicOptOutHealth};
 use crate::services::scan::{PublicCoverage, PublicSourceStatus};
 use crate::services::billing::{BillingView, PlanView, SubscriptionView};
@@ -25,7 +27,14 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile, Subscriptio
         crate::api::auth::register,
         crate::api::auth::login,
         crate::api::auth::logout,
+        crate::api::auth::logout_all,
         crate::api::auth::delete_account,
+        crate::api::security::mfa_status,
+        crate::api::security::mfa_setup,
+        crate::api::security::mfa_enable,
+        crate::api::security::mfa_disable,
+        crate::api::security::list_sessions,
+        crate::api::security::revoke_session,
         crate::api::billing::get_billing,
         crate::api::billing::stripe_webhook,
         crate::api::public::coverage,
@@ -37,6 +46,14 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile, Subscriptio
             LoginRequest,
             DeleteAccountRequest,
             AuthResponse,
+            MfaRequiredResponse,
+            MfaSetupRequest,
+            MfaEnableRequest,
+            MfaEnabledResponse,
+            MfaDisableRequest,
+            MfaSetup,
+            MfaStatus,
+            SessionView,
             CustomerProfile,
             SubscriptionTier,
             BillingView,
@@ -79,5 +96,8 @@ mod tests {
         assert!(doc["components"]["schemas"].get("BillingView").is_some());
         assert!(paths.contains_key("/api/v1/public/coverage"));
         assert!(paths.contains_key("/api/v1/public/optout-health"));
+        for p in ["/api/v1/me/mfa", "/api/v1/me/mfa/setup", "/api/v1/me/mfa/enable", "/api/v1/me/mfa/disable", "/api/v1/me/sessions", "/api/v1/me/sessions/{id}", "/api/v1/auth/logout-all"] {
+            assert!(paths.contains_key(p), "{p} is not documented");
+        }
     }
 }

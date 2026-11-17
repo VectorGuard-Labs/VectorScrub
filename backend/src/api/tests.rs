@@ -35,7 +35,10 @@ fn relaxed() -> AppConfig {
     c
 }
 
-fn app_with(pool: PgPool, config: AppConfig, redis: &str) -> (Router, AppConfig) {
+fn app_with(pool: PgPool, mut config: AppConfig, redis: &str) -> (Router, AppConfig) {
+    // The rate limiter keeps its counters in Redis, which outlives a test and is shared by all of
+    // them: each app gets its own keys so no test inherits another's (or an earlier run's) counts.
+    config.rate_limit_key_prefix = format!("t{}", Uuid::new_v4().simple());
     let state = AppState {
         pool,
         redis: redis::Client::open(redis).expect("redis client"),
@@ -99,9 +102,13 @@ async fn send_from(
 fn agent(cfg: &AppConfig) -> Vec<(&'static str, String)> {
     vec![("x-agent-key", cfg.agent_api_key.clone())]
 }
-fn bearer(cfg: &AppConfig, customer: Uuid, tier: &str) -> Vec<(&'static str, String)> {
-    let t = auth_svc::issue_token(customer, tier, &cfg.jwt_secret).unwrap();
-    vec![("authorization", format!("Bearer {t}"))]
+/// A token for a customer, backed by a real live session (a token alone is not enough).
+async fn token(pool: &PgPool, cfg: &AppConfig, customer: Uuid, tier: &str) -> String {
+    let session = crate::services::session::create(pool, customer, Some("test-agent/1.0")).await.unwrap();
+    auth_svc::issue_token(customer, session, tier, &cfg.jwt_secret).unwrap()
+}
+async fn bearer(pool: &PgPool, cfg: &AppConfig, customer: Uuid, tier: &str) -> Vec<(&'static str, String)> {
+    vec![("authorization", format!("Bearer {}", token(pool, cfg, customer, tier).await))]
 }
 fn master() -> MasterKey {
     MasterKey::from_base64(&ts::master_key_b64()).unwrap()
@@ -113,7 +120,7 @@ fn master() -> MasterKey {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn internal_endpoints_need_the_exact_agent_key(pool: PgPool) {
-    let (app, cfg) = app(pool);
+    let (app, cfg) = app(pool.clone());
     let uri = "/internal/exposures/due-for-monitoring";
     assert_eq!(send(&app, "GET", uri, &[], None).await.status, StatusCode::UNAUTHORIZED);
     for wrong in ["", "wrong", &cfg.agent_api_key[..cfg.agent_api_key.len() - 1], &format!("{}x", cfg.agent_api_key)] {
@@ -122,7 +129,8 @@ async fn internal_endpoints_need_the_exact_agent_key(pool: PgPool) {
     }
     assert_eq!(send(&app, "GET", uri, &agent(&cfg), None).await.status, StatusCode::OK);
     // a customer JWT is not an agent key
-    let jwt = bearer(&cfg, Uuid::new_v4(), "premium");
+    let real = ts::customer(&pool, "premium", true).await;
+    let jwt = bearer(&pool, &cfg, real, "premium").await;
     assert_eq!(send(&app, "GET", uri, &jwt, None).await.status, StatusCode::UNAUTHORIZED);
 }
 
@@ -288,7 +296,7 @@ async fn a_removal_submission_can_be_claimed_once_and_only_by_the_agent(pool: Pg
     let r = ts::removal_request(&pool, c, e, "authorized", None).await;
     let uri = format!("/internal/removal-requests/{r}/claim");
 
-    let no_key = send(&app, "POST", &uri, &bearer(&cfg, c, "personal"), None).await;
+    let no_key = send(&app, "POST", &uri, &bearer(&pool, &cfg, c, "personal").await, None).await;
     assert_eq!(no_key.status, StatusCode::UNAUTHORIZED, "a customer token is not an agent key");
     assert_eq!(send(&app, "POST", &uri, &agent(&cfg), None).await.status, StatusCode::NO_CONTENT);
     assert_eq!(send(&app, "POST", &uri, &agent(&cfg), None).await.status, StatusCode::CONFLICT, "second worker is refused");
@@ -302,9 +310,9 @@ async fn authorizing_the_same_exposure_twice_is_a_conflict_not_an_error(pool: Pg
     let c = ts::customer(&pool, "personal", true).await;
     let e = ts::exposure(&pool, c, true, None).await;
     let uri = format!("/removal-requests/{e}/authorize");
-    let first = send(&app, "POST", &uri, &bearer(&cfg, c, "personal"), None).await;
+    let first = send(&app, "POST", &uri, &bearer(&pool, &cfg, c, "personal").await, None).await;
     assert_eq!(first.status, StatusCode::OK, "{}", first.body);
-    let second = send(&app, "POST", &uri, &bearer(&cfg, c, "personal"), None).await;
+    let second = send(&app, "POST", &uri, &bearer(&pool, &cfg, c, "personal").await, None).await;
     assert_eq!(second.status, StatusCode::CONFLICT);
 }
 
@@ -316,7 +324,7 @@ async fn authorizing_the_same_exposure_twice_is_a_conflict_not_an_error(pool: Pg
 async fn starting_a_scan_requires_an_identity_profile(pool: PgPool) {
     let (app, cfg) = app(pool.clone());
     let c = ts::customer(&pool, "premium", false).await;
-    let r = send(&app, "POST", "/scans", &bearer(&cfg, c, "premium"), None).await;
+    let r = send(&app, "POST", "/scans", &bearer(&pool, &cfg, c, "premium").await, None).await;
     assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(r.body.contains("identity"));
     let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM scan_jobs WHERE customer_id = $1").bind(c).fetch_one(&pool).await.unwrap();
@@ -335,7 +343,7 @@ async fn a_started_scan_puts_a_job_scoped_token_on_the_queue(pool: PgPool) {
     let mut conn = client.get_multiplexed_async_connection().await.expect("Redis must be running for this test (set TEST_REDIS_URL)");
     redis::cmd("DEL").arg(scan_svc::SCAN_QUEUE_KEY).query_async::<()>(&mut conn).await.unwrap();
 
-    let r = send(&app, "POST", "/scans", &bearer(&cfg, c, "premium"), None).await;
+    let r = send(&app, "POST", "/scans", &bearer(&pool, &cfg, c, "premium").await, None).await;
     assert_eq!(r.status, StatusCode::ACCEPTED);
     let job_id: Uuid = r.json()["job_id"].as_str().unwrap().parse().unwrap();
 
@@ -367,7 +375,7 @@ async fn if_redis_is_down_the_scan_is_accepted_and_recovered_not_lost(pool: PgPo
     let c = ts::customer(&pool, "premium", false).await;
     ts::identity(&pool, &master(), c, "Jane Smith").await;
 
-    let r = send(&app, "POST", "/scans", &bearer(&cfg, c, "premium"), None).await;
+    let r = send(&app, "POST", "/scans", &bearer(&pool, &cfg, c, "premium").await, None).await;
     assert_eq!(r.status, StatusCode::ACCEPTED, "the customer is not told it failed");
     let job_id: Uuid = r.json()["job_id"].as_str().unwrap().parse().unwrap();
 
@@ -385,8 +393,8 @@ async fn free_accounts_get_a_429_with_a_clear_message_when_over_their_scan_limit
     let (app, cfg) = app_with(pool.clone(), relaxed(), "redis://127.0.0.1:1/0");
     let c = ts::customer(&pool, "free", false).await;
     ts::identity(&pool, &master(), c, "Jane Smith").await;
-    assert_eq!(send(&app, "POST", "/scans", &bearer(&cfg, c, "free"), None).await.status, StatusCode::ACCEPTED);
-    let again = send(&app, "POST", "/scans", &bearer(&cfg, c, "free"), None).await;
+    assert_eq!(send(&app, "POST", "/scans", &bearer(&pool, &cfg, c, "free").await, None).await.status, StatusCode::ACCEPTED);
+    let again = send(&app, "POST", "/scans", &bearer(&pool, &cfg, c, "free").await, None).await;
     assert_eq!(again.status, StatusCode::TOO_MANY_REQUESTS);
     assert!(again.body.contains("Free accounts"));
 }
@@ -398,7 +406,7 @@ async fn free_accounts_get_a_429_with_a_clear_message_when_over_their_scan_limit
 const PASSWORD: &str = "correct horse battery staple";
 
 async fn register(app: &Router, email: &str) -> Reply {
-    send(app, "POST", "/auth/register", &[], Some(json!({ "email": email, "password": PASSWORD, "accepted_terms_version": crate::models::customer::TERMS_VERSION }))).await
+    send(app, "POST", "/auth/register", &[], Some(json!({ "email": email, "password": PASSWORD, "accepted_terms_version": crate::models::customer::TERMS_VERSION, "confirmed_adult": true }))).await
 }
 async fn login(app: &Router, email: &str, password: &str) -> Reply {
     send(app, "POST", "/auth/login", &[("user-agent", "test-agent/1.0".into())], Some(json!({ "email": email, "password": password }))).await
@@ -474,12 +482,12 @@ async fn requests_without_a_valid_session_are_refused_without_saying_why(pool: P
 async fn the_bearer_header_still_works_and_a_bad_one_is_not_rescued_by_a_cookie(pool: PgPool) {
     let (app, cfg) = app(pool.clone());
     let c = ts::customer(&pool, "personal", true).await;
-    let good = bearer(&cfg, c, "personal");
+    let good = bearer(&pool, &cfg, c, "personal").await;
     assert_eq!(send(&app, "GET", "/me", &good, None).await.status, StatusCode::OK);
 
     // a malformed Authorization header does not silently fall back to the cookie
     let other = ts::customer(&pool, "personal", true).await;
-    let cookie_token = auth_svc::issue_token(other, "personal", &cfg.jwt_secret).unwrap();
+    let cookie_token = token(&pool, &cfg, other, "personal").await;
     let r = send(&app, "GET", "/me", &[
         ("authorization", "Bearer not-a-token".into()),
         ("cookie", format!("vs_session={cookie_token}")),
@@ -670,7 +678,7 @@ async fn registering_a_taken_email_is_a_clean_conflict(pool: PgPool) {
 async fn registration_requires_accepting_the_current_terms_and_records_it(pool: PgPool) {
     let (app, _) = app(pool.clone());
     let body = |v: Option<&str>| match v {
-        Some(v) => json!({ "email": "t@example.com", "password": PASSWORD, "accepted_terms_version": v }),
+        Some(v) => json!({ "email": "t@example.com", "password": PASSWORD, "accepted_terms_version": v, "confirmed_adult": true }),
         None => json!({ "email": "t@example.com", "password": PASSWORD }),
     };
     for bad in [None, Some(""), Some("2020-01-old")] {
@@ -687,6 +695,35 @@ async fn registration_requires_accepting_the_current_terms_and_records_it(pool: 
         sqlx::query_as("SELECT terms_version, terms_accepted_at FROM customers").fetch_one(&pool).await.unwrap();
     assert_eq!(v.as_deref(), Some(crate::models::customer::TERMS_VERSION));
     assert!(at.is_some());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn registration_requires_an_adult_declaration_and_records_it(pool: PgPool) {
+    let (app, _) = app(pool.clone());
+    let terms = crate::models::customer::TERMS_VERSION;
+    let body = |adult: Option<Value>| {
+        let mut b = json!({ "email": "adult@example.com", "password": PASSWORD, "accepted_terms_version": terms });
+        if let Some(a) = adult { b["confirmed_adult"] = a; }
+        b
+    };
+    // missing, false, and values that are not a real "yes" are all refused, with a plain reason
+    for bad in [None, Some(json!(false)), Some(json!(null))] {
+        let r = send(&app, "POST", "/auth/register", &[], Some(body(bad.clone()))).await;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad:?}");
+        assert!(r.body.contains("18"), "{}", r.body);
+    }
+    for junk in [json!("true"), json!(1)] {
+        let r = send(&app, "POST", "/auth/register", &[], Some(body(Some(junk.clone())))).await;
+        assert!(r.status.is_client_error(), "{junk}: {}", r.status);
+    }
+    let none: i64 = sqlx::query_scalar("SELECT count(*) FROM customers").fetch_one(&pool).await.unwrap();
+    assert_eq!(none, 0, "a refused registration creates no account");
+
+    let ok = send(&app, "POST", "/auth/register", &[], Some(body(Some(json!(true))))).await;
+    assert_eq!(ok.status, StatusCode::CREATED, "{}", ok.body);
+    let at: Option<time::OffsetDateTime> = sqlx::query_scalar("SELECT adult_confirmed_at FROM customers").fetch_one(&pool).await.unwrap();
+    let at = at.expect("the declaration is recorded");
+    assert!((time::OffsetDateTime::now_utc() - at).whole_minutes() < 1);
 }
 
 // ===========================================================================
@@ -709,7 +746,7 @@ async fn login_and_register_share_a_strict_per_ip_limit(pool: PgPool) {
     assert_eq!(&statuses[3..], &[StatusCode::TOO_MANY_REQUESTS; 2]);
 
     // the same address cannot dodge it through register
-    assert_eq!(send(&app, "POST", "/auth/register", &[], Some(json!({ "email": "z@example.com", "password": PASSWORD, "accepted_terms_version": crate::models::customer::TERMS_VERSION }))).await.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(send(&app, "POST", "/auth/register", &[], Some(json!({ "email": "z@example.com", "password": PASSWORD, "accepted_terms_version": crate::models::customer::TERMS_VERSION, "confirmed_adult": true }))).await.status, StatusCode::TOO_MANY_REQUESTS);
     // a different client address has its own allowance
     let other = send_from(&app, "198.51.100.77:9", "POST", "/auth/login", &[], Some(json!({ "email": "a@example.com", "password": "whatever-it-is" }))).await;
     assert_ne!(other.status, StatusCode::TOO_MANY_REQUESTS);
@@ -726,7 +763,7 @@ async fn the_customer_api_has_a_general_limit_but_agents_and_probes_do_not(pool:
     cfg.rate_limit_general_per_second = 1;
     let (app, cfg) = app_with(pool.clone(), cfg, &redis_url());
     let c = ts::customer(&pool, "free", false).await;
-    let jwt = bearer(&cfg, c, "free");
+    let jwt = bearer(&pool, &cfg, c, "free").await;
 
     let mut statuses = Vec::new();
     for _ in 0..6 {
@@ -752,9 +789,11 @@ async fn the_customer_api_has_a_general_limit_but_agents_and_probes_do_not(pool:
 async fn internal_failures_do_not_leak_details_to_clients(pool: PgPool) {
     let (app, cfg) = app(pool.clone());
     let c = ts::customer(&pool, "free", false).await;
+    let session = bearer(&pool, &cfg, c, "free").await;
     pool.close().await; // every query from here on fails with a driver error
 
-    let r = send(&app, "GET", "/exposures", &bearer(&cfg, c, "free"), None).await;
+    // Even the session check fails: that is refused as an internal error, not waved through.
+    let r = send(&app, "GET", "/exposures", &session, None).await;
     assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(r.body, "Internal server error");
     for leak in ["pool", "closed", "sqlx", "postgres", "connection"] {
@@ -784,9 +823,9 @@ async fn a_customer_cannot_read_another_customers_scan(pool: PgPool) {
     let (app, cfg) = app(pool.clone());
     let (alice, mallory) = (ts::customer(&pool, "free", false).await, ts::customer(&pool, "free", false).await);
     let job = ts::scan_job(&pool, alice, "completed").await;
-    let own = send(&app, "GET", &format!("/scans/{job}"), &bearer(&cfg, alice, "free"), None).await;
+    let own = send(&app, "GET", &format!("/scans/{job}"), &bearer(&pool, &cfg, alice, "free").await, None).await;
     assert_eq!(own.status, StatusCode::OK);
-    let theirs = send(&app, "GET", &format!("/scans/{job}"), &bearer(&cfg, mallory, "free"), None).await;
+    let theirs = send(&app, "GET", &format!("/scans/{job}"), &bearer(&pool, &cfg, mallory, "free").await, None).await;
     assert_eq!(theirs.status, StatusCode::NOT_FOUND);
     let none = send(&app, "GET", &format!("/scans/{job}"), &[], None).await;
     assert_eq!(none.status, StatusCode::UNAUTHORIZED);
@@ -896,7 +935,7 @@ mod billing {
         assert_eq!(tier_of(&pool, c).await, "premium");
 
         // the customer's own billing page reflects it
-        let page = send(&app, "GET", "/me/billing", &bearer(&cfg, c, "premium"), None).await;
+        let page = send(&app, "GET", "/me/billing", &bearer(&pool, &cfg, c, "premium").await, None).await;
         assert_eq!(page.status, StatusCode::OK, "{}", page.body);
         assert_eq!(page.json()["subscription"]["tier"], "premium");
         assert_eq!(page.json()["plans"].as_array().unwrap().len(), 1);
@@ -914,7 +953,7 @@ mod billing {
         // posting the same payload without Stripe's signature gets nowhere.
         let (app, cfg) = app_with(pool.clone(), stripe_cfg(), &redis_url());
         let c = ts::customer(&pool, "free", false).await;
-        let t = auth_svc::issue_token(c, "free", &cfg.jwt_secret).unwrap();
+        let t = token(&pool, &cfg, c, "free").await;
         for body in [checkout_body(c), subscription_body("active", 101)] {
             let r = post_raw(&app, &body, None, Some(&format!("vs_session={t}"))).await;
             assert_eq!(r.status, StatusCode::BAD_REQUEST);
@@ -944,7 +983,7 @@ async fn every_date_in_a_response_is_an_rfc3339_string(pool: PgPool) {
     ts::exposure(&pool, c, true, None).await;
     let removed = ts::exposure(&pool, c, false, Some(3)).await;
     ts::removal_request(&pool, c, removed, "submitted", Some(2)).await;
-    let who = bearer(&cfg, c, "free");
+    let who = bearer(&pool, &cfg, c, "free").await;
 
     let is_date = |v: &Value| v.as_str().map(|s| time::OffsetDateTime::parse(s, &Rfc3339).is_ok()).unwrap_or(false);
 
@@ -1001,7 +1040,7 @@ async fn the_coverage_a_worker_reports_reaches_the_customer_with_the_completed_s
     }))).await;
     assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
 
-    let seen = send(&app, "GET", &format!("/scans/{job}"), &bearer(&cfg, c, "premium"), None).await.json();
+    let seen = send(&app, "GET", &format!("/scans/{job}"), &bearer(&pool, &cfg, c, "premium").await, None).await.json();
     assert_eq!(seen["job"]["status"], "completed");
     assert_eq!(seen["job"]["coverage"], report);
     assert_eq!(seen["job"]["sources_queued"], 6);
@@ -1055,7 +1094,7 @@ async fn starting_a_scan_by_hand_restarts_the_clock_the_rescan_scheduler_counts_
     let before: Option<time::OffsetDateTime> = sqlx::query_scalar("SELECT last_scan_at FROM customers WHERE id = $1").bind(c).fetch_one(&pool).await.unwrap();
     assert!(before.is_none());
 
-    let r = send(&app, "POST", "/scans", &bearer(&cfg, c, "premium"), None).await;
+    let r = send(&app, "POST", "/scans", &bearer(&pool, &cfg, c, "premium").await, None).await;
     assert_eq!(r.status, StatusCode::ACCEPTED, "{}", r.body);
 
     let after: Option<time::OffsetDateTime> = sqlx::query_scalar("SELECT last_scan_at FROM customers WHERE id = $1").bind(c).fetch_one(&pool).await.unwrap();
@@ -1082,7 +1121,7 @@ async fn the_last_scan_shown_is_when_the_scan_finished_not_when_it_was_queued(po
     let failed = ts::scan_job(&pool, c, "failed").await;
     sqlx::query("UPDATE scan_jobs SET queued_at = NOW(), completed_at = NOW() WHERE id = $1").bind(failed).execute(&pool).await.unwrap();
 
-    let summary = send(&app, "GET", "/exposures/summary", &bearer(&cfg, c, "free"), None).await.json();
+    let summary = send(&app, "GET", "/exposures/summary", &bearer(&pool, &cfg, c, "free").await, None).await.json();
     let shown = time::OffsetDateTime::parse(summary["summary"]["last_scan_at"].as_str().unwrap(), &Rfc3339).unwrap();
     let age = (time::OffsetDateTime::now_utc() - shown).whole_minutes();
     assert!((55..=65).contains(&age), "about 1 hour ago (finished), not 2 days ago (queued): {age} minutes");
@@ -1095,8 +1134,8 @@ async fn the_last_scan_shown_is_when_the_scan_finished_not_when_it_was_queued(po
 mod plan_limits {
     use super::*;
 
-    async fn authorize(app: &Router, cfg: &AppConfig, c: Uuid, tier: &str, exposure: Uuid) -> Reply {
-        send(app, "POST", &format!("/removal-requests/{exposure}/authorize"), &bearer(cfg, c, tier), None).await
+    async fn authorize(pool: &PgPool, app: &Router, cfg: &AppConfig, c: Uuid, tier: &str, exposure: Uuid) -> Reply {
+        send(app, "POST", &format!("/removal-requests/{exposure}/authorize"), &bearer(pool, cfg, c, tier).await, None).await
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1105,11 +1144,11 @@ mod plan_limits {
         let c = ts::customer(&pool, "free", false).await;
         for n in 1..=3 {
             let e = ts::exposure(&pool, c, true, None).await;
-            let r = authorize(&app, &cfg, c, "free", e).await;
+            let r = authorize(&pool, &app, &cfg, c, "free", e).await;
             assert_eq!(r.status, StatusCode::OK, "opt-out {n}: {}", r.body);
         }
         let e4 = ts::exposure(&pool, c, true, None).await;
-        let r = authorize(&app, &cfg, c, "free", e4).await;
+        let r = authorize(&pool, &app, &cfg, c, "free", e4).await;
         assert_eq!(r.status, StatusCode::FORBIDDEN);
         // (plain text here; middleware::apply turns it into {"message": ...} in the running app)
         assert!(r.body.contains("Upgrade to Personal") && r.body.contains("3 opt-out"), "{}", r.body);
@@ -1126,7 +1165,7 @@ mod plan_limits {
             ts::removal_request(&pool, c, e, "failed", None).await;
         }
         let e = ts::exposure(&pool, c, true, None).await;
-        assert_eq!(authorize(&app, &cfg, c, "free", e).await.status, StatusCode::OK, "failed requests do not count");
+        assert_eq!(authorize(&pool, &app, &cfg, c, "free", e).await.status, StatusCode::OK, "failed requests do not count");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1135,10 +1174,10 @@ mod plan_limits {
         let (paid, other_free) = (ts::customer(&pool, "personal", true).await, ts::customer(&pool, "free", false).await);
         for _ in 0..5 {
             let e = ts::exposure(&pool, paid, true, None).await;
-            assert_eq!(authorize(&app, &cfg, paid, "personal", e).await.status, StatusCode::OK);
+            assert_eq!(authorize(&pool, &app, &cfg, paid, "personal", e).await.status, StatusCode::OK);
         }
         let e = ts::exposure(&pool, other_free, true, None).await;
-        assert_eq!(authorize(&app, &cfg, other_free, "free", e).await.status, StatusCode::OK);
+        assert_eq!(authorize(&pool, &app, &cfg, other_free, "free", e).await.status, StatusCode::OK);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1149,16 +1188,16 @@ mod plan_limits {
         for _ in 0..6 {
             exposures.push(ts::exposure(&pool, c, true, None).await);
         }
-        let replies = futures_util_join(&app, &cfg, c, &exposures).await;
+        let replies = futures_util_join(&pool, &app, &cfg, c, &exposures).await;
         let ok = replies.iter().filter(|s| **s == StatusCode::OK).count();
         assert_eq!(ok, 3, "exactly the allowance, however the requests interleave: {replies:?}");
     }
 
-    async fn futures_util_join(app: &Router, cfg: &AppConfig, c: Uuid, exposures: &[Uuid]) -> Vec<StatusCode> {
+    async fn futures_util_join(pool: &PgPool, app: &Router, cfg: &AppConfig, c: Uuid, exposures: &[Uuid]) -> Vec<StatusCode> {
         let mut handles = vec![];
         for e in exposures {
-            let (app, cfg, e) = (app.clone(), cfg.clone(), *e);
-            handles.push(tokio::spawn(async move { authorize(&app, &cfg, c, "free", e).await.status }));
+            let (pool, app, cfg, e) = (pool.clone(), app.clone(), cfg.clone(), *e);
+            handles.push(tokio::spawn(async move { authorize(&pool, &app, &cfg, c, "free", e).await.status }));
         }
         let mut out = vec![];
         for h in handles {
@@ -1292,7 +1331,7 @@ mod optout_health {
         let body = Some(json!({ "checks": [check("spokeo.com", "reachable", Some(200))] }));
         assert_eq!(send(&app, "PUT", "/internal/optout-health", &[], body.clone()).await.status, StatusCode::UNAUTHORIZED);
         let c = ts::customer(&pool, "premium", true).await;
-        assert_eq!(send(&app, "PUT", "/internal/optout-health", &bearer(&cfg, c, "premium"), body).await.status,
+        assert_eq!(send(&app, "PUT", "/internal/optout-health", &bearer(&pool, &cfg, c, "premium").await, body).await.status,
             StatusCode::UNAUTHORIZED, "a customer session is not an agent key");
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM optout_health").fetch_one(&pool).await.unwrap();
         assert_eq!(n, 0);
@@ -1394,7 +1433,7 @@ mod residence {
     async fn it_returns_only_the_state_of_the_saved_address(pool: PgPool) {
         let (app, cfg) = app(pool.clone());
         let c = ts::customer(&pool, "free", false).await;
-        let who = bearer(&cfg, c, "free");
+        let who = bearer(&pool, &cfg, c, "free").await;
 
         assert_eq!(send(&app, "GET", "/me/residence", &who, None).await.json()["state"], Value::Null, "no identity yet");
 
@@ -1420,10 +1459,10 @@ mod residence {
         save(&pool, alice, "1 Main St, Los Angeles, CA 90001").await;
         save(&pool, bob, "1 Main St, Austin, TX 78701").await;
         assert_eq!(send(&app, "GET", "/me/residence", &[], None).await.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(send(&app, "GET", "/me/residence", &bearer(&cfg, alice, "free"), None).await.json()["state"], "CA");
-        assert_eq!(send(&app, "GET", "/me/residence", &bearer(&cfg, bob, "free"), None).await.json()["state"], "TX");
+        assert_eq!(send(&app, "GET", "/me/residence", &bearer(&pool, &cfg, alice, "free").await, None).await.json()["state"], "CA");
+        assert_eq!(send(&app, "GET", "/me/residence", &bearer(&pool, &cfg, bob, "free").await, None).await.json()["state"], "TX");
         // there is no way to name another customer
-        let r = send(&app, "GET", &format!("/me/residence?customer_id={bob}"), &bearer(&cfg, alice, "free"), None).await;
+        let r = send(&app, "GET", &format!("/me/residence?customer_id={bob}"), &bearer(&pool, &cfg, alice, "free").await, None).await;
         assert_eq!(r.json()["state"], "CA", "a query parameter changes nothing");
     }
 }
@@ -1522,8 +1561,8 @@ mod deletion_requests {
                 "authorization_version": deletion::AUTHORIZATION_VERSION })
     }
 
-    async fn campaign(app: &Router, cfg: &AppConfig, c: Uuid, b: Value) -> Reply {
-        send(app, "POST", "/deletion-campaigns", &bearer(cfg, c, "personal"), Some(b)).await
+    async fn campaign(pool: &PgPool, app: &Router, cfg: &AppConfig, c: Uuid, b: Value) -> Reply {
+        send(app, "POST", "/deletion-campaigns", &bearer(pool, cfg, c, "personal").await, Some(b)).await
     }
 
     async fn status_of(pool: &PgPool, id: Uuid) -> String {
@@ -1540,11 +1579,11 @@ mod deletion_requests {
     async fn everything_is_off_until_it_is_switched_on(pool: PgPool) {
         let (app, cfg) = app(pool.clone());           // the default config
         let c = californian(&pool).await;
-        let who = bearer(&cfg, c, "personal");
+        let who = bearer(&pool, &cfg, c, "personal").await;
         for (method, uri) in [("GET", "/deletion-requests/info"), ("GET", "/deletion-requests")] {
             assert_eq!(send(&app, method, uri, &who, None).await.status, StatusCode::NOT_FOUND, "{uri}");
         }
-        assert_eq!(campaign(&app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::NOT_FOUND);
         let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await;
         assert_eq!((q.status, q.json()["requests"].clone()), (StatusCode::OK, json!([])), "the worker just sees nothing");
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM deletion_requests").fetch_one(&pool).await.unwrap();
@@ -1558,7 +1597,7 @@ mod deletion_requests {
         assert_eq!(send(&app, "GET", "/deletion-requests/info", &[], None).await.status, StatusCode::UNAUTHORIZED);
         assert_eq!(send(&app, "POST", "/deletion-campaigns", &[], Some(body(&["whitepages"], false))).await.status, StatusCode::UNAUTHORIZED);
         assert_eq!(send(&app, "GET", "/internal/deletion-requests", &[], None).await.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(send(&app, "GET", "/internal/deletion-requests", &bearer(&cfg, c, "personal"), None).await.status,
+        assert_eq!(send(&app, "GET", "/internal/deletion-requests", &bearer(&pool, &cfg, c, "personal").await, None).await.status,
             StatusCode::UNAUTHORIZED, "a customer session is not an agent key");
     }
 
@@ -1572,7 +1611,7 @@ mod deletion_requests {
         save_identity(&pool, tx, "1 Main St, Austin, TX 78701").await;
         let nowhere = ts::customer(&pool, "free", false).await;
 
-        let j = send(&app, "GET", "/deletion-requests/info", &bearer(&cfg, ca, "personal"), None).await.json();
+        let j = send(&app, "GET", "/deletion-requests/info", &bearer(&pool, &cfg, ca, "personal").await, None).await.json();
         assert_eq!(j["authorization"]["version"], deletion::AUTHORIZATION_VERSION);
         assert!(j["authorization"]["text"].as_str().unwrap().contains("will not share my phone numbers or date of birth"));
         assert_eq!(j["plan_ok"], true);
@@ -1581,11 +1620,11 @@ mod deletion_requests {
         assert!(w["evidence"].as_str().unwrap().contains("privacyrequest@whitepages.com"));
         assert!(w["source_url"].as_str().unwrap().starts_with("https://www.whitepages.com/"));
 
-        let j = send(&app, "GET", "/deletion-requests/info", &bearer(&cfg, tx, "personal"), None).await.json();
+        let j = send(&app, "GET", "/deletion-requests/info", &bearer(&pool, &cfg, tx, "personal").await, None).await.json();
         assert_eq!(j["channels"][0]["eligible"], false);
         assert!(j["channels"][0]["ineligible_reason"].as_str().unwrap().contains("other states"));
 
-        let j = send(&app, "GET", "/deletion-requests/info", &bearer(&cfg, nowhere, "free"), None).await.json();
+        let j = send(&app, "GET", "/deletion-requests/info", &bearer(&pool, &cfg, nowhere, "free").await, None).await.json();
         assert_eq!((j["plan_ok"].clone(), j["channels"][0]["eligible"].clone()), (json!(false), json!(false)));
         assert!(j["channels"][0]["ineligible_reason"].as_str().unwrap().contains("could not tell your state"));
     }
@@ -1596,7 +1635,7 @@ mod deletion_requests {
     async fn an_authorized_campaign_queues_one_request_per_company_and_keeps_the_exact_text_accepted(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        let r = campaign(&app, &cfg, c, body(&["whitepages", "whitepages"], true)).await;      // listed twice
+        let r = campaign(&pool, &app, &cfg, c, body(&["whitepages", "whitepages"], true)).await;      // listed twice
         assert_eq!(r.status, StatusCode::ACCEPTED, "{}", r.body);
         assert_eq!(r.json()["requests"].as_array().unwrap().len(), 1, "a company is never queued twice");
 
@@ -1611,7 +1650,7 @@ mod deletion_requests {
         assert_eq!(audit["channels"], json!(["whitepages", "whitepages"]));
         assert!(!audit.to_string().contains("Jane") && !audit.to_string().contains("Evergreen"), "no personal data in the audit trail");
 
-        let list = send(&app, "GET", "/deletion-requests", &bearer(&cfg, c, "personal"), None).await.json();
+        let list = send(&app, "GET", "/deletion-requests", &bearer(&pool, &cfg, c, "personal").await, None).await.json();
         assert_eq!((list["requests"][0]["status"].clone(), list["requests"][0]["company"].clone()), (json!("queued"), json!("Whitepages, Inc")));
     }
 
@@ -1642,7 +1681,7 @@ mod deletion_requests {
             ("too many companies", c, "personal", json!({ "channel_ids": (0..51).map(|i| format!("c{i}")).collect::<Vec<_>>(),
                 "include_address": false, "consent": true, "authorization_version": deletion::AUTHORIZATION_VERSION }), StatusCode::UNPROCESSABLE_ENTITY),
         ] {
-            let r = send(&app, "POST", "/deletion-campaigns", &bearer(&cfg, who, tier), Some(b)).await;
+            let r = send(&app, "POST", "/deletion-campaigns", &bearer(&pool, &cfg, who, tier).await, Some(b)).await;
             assert_eq!(r.status, want, "{what}: {}", r.body);
         }
         let n: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM deletion_requests) + (SELECT count(*) FROM deletion_campaigns)")
@@ -1654,26 +1693,26 @@ mod deletion_requests {
     async fn a_company_is_not_asked_twice_within_ninety_days_but_a_plain_failure_does_not_count(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        assert_eq!(campaign(&app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::ACCEPTED);
-        let again = campaign(&app, &cfg, c, body(&["whitepages"], false)).await;
+        assert_eq!(campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::ACCEPTED);
+        let again = campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;
         assert_eq!(again.status, StatusCode::CONFLICT, "still queued");
         assert!(again.body.contains("90 days"));
         let id = only_request(&pool, c).await;
 
         sqlx::query("UPDATE deletion_requests SET status = 'sent', sent_at = NOW() WHERE id = $1").bind(id).execute(&pool).await.unwrap();
-        assert_eq!(campaign(&app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::CONFLICT, "sent");
+        assert_eq!(campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::CONFLICT, "sent");
 
         sqlx::query("UPDATE deletion_requests SET status = 'failed', error = 'SMTP is not configured' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
-        assert_eq!(campaign(&app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::ACCEPTED, "it plainly never left");
+        assert_eq!(campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::ACCEPTED, "it plainly never left");
 
         sqlx::query("UPDATE deletion_requests SET status = 'failed', error = $2 WHERE campaign_id = (SELECT campaign_id FROM deletion_requests ORDER BY queued_at LIMIT 1) AND id = $1")
             .bind(id).bind(format!("{} sending was interrupted", deletion::ABANDONED_MARKER)).execute(&pool).await.unwrap();
         sqlx::query("UPDATE deletion_requests SET status = 'failed', error = 'x' WHERE id <> $1").bind(id).execute(&pool).await.unwrap();
-        assert_eq!(campaign(&app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::CONFLICT,
+        assert_eq!(campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::CONFLICT,
             "an interrupted send may have gone out, so the cooldown holds");
 
         sqlx::query("UPDATE deletion_requests SET queued_at = NOW() - interval '91 days'").execute(&pool).await.unwrap();
-        assert_eq!(campaign(&app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::ACCEPTED, "after the cooldown");
+        assert_eq!(campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::ACCEPTED, "after the cooldown");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1682,8 +1721,8 @@ mod deletion_requests {
         let c = californian(&pool).await;
         let mut handles = vec![];
         for _ in 0..6 {
-            let (app, cfg) = (app.clone(), cfg.clone());
-            handles.push(tokio::spawn(async move { campaign(&app, &cfg, c, body(&["whitepages"], false)).await.status }));
+            let (pool, app, cfg) = (pool.clone(), app.clone(), cfg.clone());
+            handles.push(tokio::spawn(async move { campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await.status }));
         }
         let mut accepted = 0;
         for h in handles {
@@ -1706,9 +1745,9 @@ mod deletion_requests {
         save_identity(&pool, unknown, "12 Rue de Rivoli, Paris, France").await;
 
         let eligible_for = |who: Uuid| {
-            let (app, cfg) = (app.clone(), cfg.clone());
+            let (pool, app, cfg) = (pool.clone(), app.clone(), cfg.clone());
             async move {
-                let j = send(&app, "GET", "/deletion-requests/info", &bearer(&cfg, who, "personal"), None).await.json();
+                let j = send(&app, "GET", "/deletion-requests/info", &bearer(&pool, &cfg, who, "personal").await, None).await.json();
                 let mut ids: Vec<String> = j["channels"].as_array().unwrap().iter()
                     .filter(|c| c["eligible"] == true).map(|c| c["id"].as_str().unwrap().to_string()).collect();
                 ids.sort();
@@ -1726,25 +1765,25 @@ mod deletion_requests {
     async fn a_company_that_needs_the_address_is_not_sent_without_it(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        let info = send(&app, "GET", "/deletion-requests/info", &bearer(&cfg, c, "personal"), None).await.json();
+        let info = send(&app, "GET", "/deletion-requests/info", &bearer(&pool, &cfg, c, "personal").await, None).await.json();
         let needs: Vec<&str> = info["channels"].as_array().unwrap().iter()
             .filter(|ch| ch["requires_address"] == true).map(|ch| ch["id"].as_str().unwrap()).collect();
         assert_eq!(needs, vec!["stirista"]);
 
-        let no = campaign(&app, &cfg, c, body(&["realsource", "stirista"], false)).await;
+        let no = campaign(&pool, &app, &cfg, c, body(&["realsource", "stirista"], false)).await;
         assert_eq!(no.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", no.body);
         assert!(no.body.contains("needs your address"));
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM deletion_requests").fetch_one(&pool).await.unwrap();
         assert_eq!(n, 0, "nothing was queued, not even the company that did not need it");
-        assert_eq!(campaign(&app, &cfg, c, body(&["realsource"], false)).await.status, StatusCode::ACCEPTED, "one that does not need it is fine");
-        assert_eq!(campaign(&app, &cfg, c, body(&["stirista"], true)).await.status, StatusCode::ACCEPTED);
+        assert_eq!(campaign(&pool, &app, &cfg, c, body(&["realsource"], false)).await.status, StatusCode::ACCEPTED, "one that does not need it is fine");
+        assert_eq!(campaign(&pool, &app, &cfg, c, body(&["stirista"], true)).await.status, StatusCode::ACCEPTED);
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn the_queue_carries_each_companys_own_address_and_subject_line(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        campaign(&app, &cfg, c, body(&["dealmachine", "realsource", "stirista", "recruitbot", "snovio", "whitepages"], true)).await;
+        campaign(&pool, &app, &cfg, c, body(&["dealmachine", "realsource", "stirista", "recruitbot", "snovio", "whitepages"], true)).await;
         let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await.json();
         let by: std::collections::BTreeMap<String, (String, Value)> = q["requests"].as_array().unwrap().iter()
             .map(|r| (r["channel_id"].as_str().unwrap().to_string(), (r["to_address"].as_str().unwrap().to_string(), r["subject"].clone()))).collect();
@@ -1762,9 +1801,9 @@ mod deletion_requests {
         let (app, cfg) = enabled_app(pool.clone());
         let tx = ts::customer(&pool, "personal", true).await;
         save_identity(&pool, tx, "1 Main St, Austin, TX 78701").await;
-        let r = campaign(&app, &cfg, tx, body(&["realsource", "recruitbot"], false)).await;
+        let r = campaign(&pool, &app, &cfg, tx, body(&["realsource", "recruitbot"], false)).await;
         assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
-        assert_eq!(campaign(&app, &cfg, tx, body(&["realsource", "dealmachine"], false)).await.status, StatusCode::ACCEPTED);
+        assert_eq!(campaign(&pool, &app, &cfg, tx, body(&["realsource", "dealmachine"], false)).await.status, StatusCode::ACCEPTED);
     }
 
     // ---- the worker ------------------------------------------------------------------------
@@ -1773,7 +1812,7 @@ mod deletion_requests {
     async fn the_worker_gets_the_address_from_the_catalog_and_claims_each_request_once(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        campaign(&app, &cfg, c, body(&["whitepages"], true)).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages"], true)).await;
         let id = only_request(&pool, c).await;
 
         let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await.json();
@@ -1795,7 +1834,7 @@ mod deletion_requests {
     async fn identity_is_released_only_for_a_claimed_request_and_only_what_the_customer_agreed_to_share(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        campaign(&app, &cfg, c, body(&["whitepages"], false)).await;                // address NOT shared
+        campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;                // address NOT shared
         let id = only_request(&pool, c).await;
         let ident = format!("/internal/deletion-requests/{id}/identity");
 
@@ -1822,7 +1861,7 @@ mod deletion_requests {
     async fn the_address_goes_out_only_when_the_customer_ticked_the_box(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        campaign(&app, &cfg, c, body(&["whitepages"], true)).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages"], true)).await;
         let id = only_request(&pool, c).await;
         send(&app, "POST", &format!("/internal/deletion-requests/{id}/claim"), &agent(&cfg), None).await;
         let j = send(&app, "POST", &format!("/internal/deletion-requests/{id}/identity"), &agent(&cfg), None).await.json();
@@ -1834,7 +1873,7 @@ mod deletion_requests {
     async fn a_result_can_only_be_recorded_once_for_a_request_being_sent_and_a_send_is_audited(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        campaign(&app, &cfg, c, body(&["whitepages"], false)).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;
         let id = only_request(&pool, c).await;
         let result = format!("/internal/deletion-requests/{id}/result");
         let ok = json!({ "sent": true, "message_id": "<abc@vectorscrub.example>" });
@@ -1853,7 +1892,7 @@ mod deletion_requests {
     async fn a_request_the_worker_died_on_is_failed_not_sent_again(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        campaign(&app, &cfg, c, body(&["whitepages"], false)).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;
         let id = only_request(&pool, c).await;
         send(&app, "POST", &format!("/internal/deletion-requests/{id}/claim"), &agent(&cfg), None).await;
         sqlx::query("UPDATE deletion_requests SET claimed_at = NOW() - interval '2 hours' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
@@ -1871,8 +1910,8 @@ mod deletion_requests {
     async fn a_customer_who_downgrades_or_is_closed_after_authorizing_is_not_sent_to(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let (downgraded, closed) = (californian(&pool).await, californian(&pool).await);
-        campaign(&app, &cfg, downgraded, body(&["whitepages"], false)).await;
-        campaign(&app, &cfg, closed, body(&["whitepages"], false)).await;
+        campaign(&pool, &app, &cfg, downgraded, body(&["whitepages"], false)).await;
+        campaign(&pool, &app, &cfg, closed, body(&["whitepages"], false)).await;
         sqlx::query("UPDATE customers SET subscription_tier = 'free' WHERE id = $1").bind(downgraded).execute(&pool).await.unwrap();
         sqlx::query("UPDATE customers SET is_active = false WHERE id = $1").bind(closed).execute(&pool).await.unwrap();
         let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await.json();
@@ -1883,7 +1922,7 @@ mod deletion_requests {
     async fn a_company_that_left_the_catalog_is_failed_instead_of_sent_to(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        campaign(&app, &cfg, c, body(&["whitepages"], false)).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;
         sqlx::query("UPDATE deletion_requests SET channel_id = 'retired-company'").execute(&pool).await.unwrap();
         let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await.json();
         assert_eq!(q["requests"], json!([]));
@@ -1897,11 +1936,11 @@ mod deletion_requests {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
         let other = californian(&pool).await;
-        campaign(&app, &cfg, c, body(&["whitepages"], false)).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;
         let id = only_request(&pool, c).await;
         let outcome = |who: Uuid, what: &str| {
-            let (app, cfg, what) = (app.clone(), cfg.clone(), what.to_string());
-            async move { send(&app, "POST", &format!("/deletion-requests/{id}/outcome"), &bearer(&cfg, who, "personal"), Some(json!({ "outcome": what }))).await.status }
+            let (pool, app, cfg, what) = (pool.clone(), app.clone(), cfg.clone(), what.to_string());
+            async move { send(&app, "POST", &format!("/deletion-requests/{id}/outcome"), &bearer(&pool, &cfg, who, "personal").await, Some(json!({ "outcome": what }))).await.status }
         };
 
         assert_eq!(outcome(c, "removed").await, StatusCode::CONFLICT, "nothing was sent yet, so nothing can have been answered");
@@ -1921,9 +1960,9 @@ mod deletion_requests {
     async fn the_dashboard_says_when_a_company_is_overdue_and_shows_a_failure_in_plain_words(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
-        campaign(&app, &cfg, c, body(&["whitepages"], false)).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;
         let id = only_request(&pool, c).await;
-        let who = bearer(&cfg, c, "personal");
+        let who = bearer(&pool, &cfg, c, "personal").await;
         sqlx::query("UPDATE deletion_requests SET status = 'sent', sent_at = NOW() - interval '30 days' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
         assert_eq!(send(&app, "GET", "/deletion-requests", &who, None).await.json()["requests"][0]["follow_up_due"], false);
         sqlx::query("UPDATE deletion_requests SET sent_at = NOW() - interval '46 days' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
@@ -1936,9 +1975,9 @@ mod deletion_requests {
     async fn a_customer_sees_only_their_own_requests(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let (a, b) = (californian(&pool).await, californian(&pool).await);
-        campaign(&app, &cfg, a, body(&["whitepages"], false)).await;
-        assert_eq!(send(&app, "GET", "/deletion-requests", &bearer(&cfg, a, "personal"), None).await.json()["requests"].as_array().unwrap().len(), 1);
-        assert_eq!(send(&app, "GET", "/deletion-requests", &bearer(&cfg, b, "personal"), None).await.json()["requests"], json!([]));
+        campaign(&pool, &app, &cfg, a, body(&["whitepages"], false)).await;
+        assert_eq!(send(&app, "GET", "/deletion-requests", &bearer(&pool, &cfg, a, "personal").await, None).await.json()["requests"].as_array().unwrap().len(), 1);
+        assert_eq!(send(&app, "GET", "/deletion-requests", &bearer(&pool, &cfg, b, "personal").await, None).await.json()["requests"], json!([]));
     }
 }
 
@@ -1969,7 +2008,7 @@ async fn a_failed_removal_shows_the_reason_the_executor_recorded(pool: PgPool) {
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     audit(r_two, "failed", json!({ "error": "The site's opt-out page no longer exists at the address we have (HTTP 404)." })).await;
 
-    let list = send(&app, "GET", "/removal-requests", &bearer(&cfg, c, "personal"), None).await.json();
+    let list = send(&app, "GET", "/removal-requests", &bearer(&pool, &cfg, c, "personal").await, None).await.json();
     let by: std::collections::HashMap<String, Value> = list["requests"].as_array().unwrap().iter()
         .map(|r| (r["id"].as_str().unwrap().to_string(), r["failure_reason"].clone())).collect();
     assert!(by[&r_blocked.to_string()].as_str().unwrap().contains("blocked our automated browser"));
@@ -1978,7 +2017,7 @@ async fn a_failed_removal_shows_the_reason_the_executor_recorded(pool: PgPool) {
 
     // another customer never sees it
     let stranger = ts::customer(&pool, "personal", true).await;
-    let theirs = send(&app, "GET", "/removal-requests", &bearer(&cfg, stranger, "personal"), None).await.json();
+    let theirs = send(&app, "GET", "/removal-requests", &bearer(&pool, &cfg, stranger, "personal").await, None).await.json();
     assert_eq!(theirs["requests"], json!([]));
 }
 
@@ -1994,12 +2033,12 @@ mod done_by_hand {
         (ts::removal_request(pool, c, e, "failed", None).await, e)
     }
 
-    async fn mark(app: &Router, cfg: &AppConfig, c: Uuid, id: Uuid) -> Reply {
-        mark_with(app, cfg, c, id, json!({ "email_confirmation": "not_required" })).await
+    async fn mark(pool: &PgPool, app: &Router, cfg: &AppConfig, c: Uuid, id: Uuid) -> Reply {
+        mark_with(pool, app, cfg, c, id, json!({ "email_confirmation": "not_required" })).await
     }
 
-    async fn mark_with(app: &Router, cfg: &AppConfig, c: Uuid, id: Uuid, body: Value) -> Reply {
-        send(app, "POST", &format!("/removal-requests/{id}/done-by-hand"), &bearer(cfg, c, "personal"), Some(body)).await
+    async fn mark_with(pool: &PgPool, app: &Router, cfg: &AppConfig, c: Uuid, id: Uuid, body: Value) -> Reply {
+        send(app, "POST", &format!("/removal-requests/{id}/done-by-hand"), &bearer(pool, cfg, c, "personal").await, Some(body)).await
     }
 
     async fn row(pool: &PgPool, id: Uuid) -> (String, String, bool, bool, bool) {
@@ -2026,14 +2065,14 @@ mod done_by_hand {
             json!({ "email_confirmation": "confirmed", "submitted_on": fmt(today - time::Duration::days(90)) }),
             json!({ "email_confirmation": "confirmed", "submitted_on": "yesterday" }),
         ] {
-            let r = mark_with(&app, &cfg, c, id, body.clone()).await;
+            let r = mark_with(&pool, &app, &cfg, c, id, body.clone()).await;
             assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {}", r.body);
         }
         assert_eq!(row(&pool, id).await.0, "failed", "nothing changed");
 
         // a submission from 5 days ago is due for its first look straight away, and dated as reported
         let five = today - time::Duration::days(5);
-        let r = mark_with(&app, &cfg, c, id, json!({ "email_confirmation": "confirmed", "submitted_on": fmt(five) })).await;
+        let r = mark_with(&pool, &app, &cfg, c, id, json!({ "email_confirmation": "confirmed", "submitted_on": fmt(five) })).await;
         assert_eq!(r.status, StatusCode::OK, "{}", r.body);
         let j = r.json();
         assert_eq!(j["request"]["manual_email_confirmation"], "confirmed");
@@ -2064,13 +2103,13 @@ mod done_by_hand {
 
         // another site, or junk, is refused and changes nothing
         for bad in [json!("https://www.othersite.example/p1"), json!("not a link"), json!("http://www.example.com/x")] {
-            let r = mark_with(&app, &cfg, c, id, json!({ "email_confirmation": "confirmed", "listing_url": bad })).await;
+            let r = mark_with(&pool, &app, &cfg, c, id, json!({ "email_confirmation": "confirmed", "listing_url": bad })).await;
             assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
         }
         assert_eq!(row(&pool, id).await.0, "failed");
 
         let profile = format!("https://www.{site}/Smith-Jane/California/Town/p152826921");
-        let r = mark_with(&app, &cfg, c, id, json!({ "email_confirmation": "confirmed", "listing_url": profile })).await;
+        let r = mark_with(&pool, &app, &cfg, c, id, json!({ "email_confirmation": "confirmed", "listing_url": profile })).await;
         assert_eq!(r.status, StatusCode::OK, "{}", r.body);
         assert_eq!(r.json()["request"]["source_url"], profile.as_str());
 
@@ -2095,7 +2134,7 @@ mod done_by_hand {
         let e = ts::exposure(&pool, c, true, None).await;
         let site: String = sqlx::query_scalar("SELECT source_name FROM exposures WHERE id = $1").bind(e).fetch_one(&pool).await.unwrap();
         let id = ts::removal_request(&pool, c, e, "submitted", Some(3)).await;
-        let who = bearer(&cfg, c, "personal");
+        let who = bearer(&pool, &cfg, c, "personal").await;
         let post = |url: String| { let (app, who) = (app.clone(), who.clone()); async move {
             send(&app, "POST", &format!("/removal-requests/{id}/listing-link"), &who, Some(json!({ "listing_url": url }))).await
         } };
@@ -2111,7 +2150,7 @@ mod done_by_hand {
         assert_eq!(audited, 1);
 
         let other = ts::customer(&pool, "personal", true).await;
-        let r = send(&app, "POST", &format!("/removal-requests/{id}/listing-link"), &bearer(&cfg, other, "personal"), Some(json!({ "listing_url": profile }))).await;
+        let r = send(&app, "POST", &format!("/removal-requests/{id}/listing-link"), &bearer(&pool, &cfg, other, "personal").await, Some(json!({ "listing_url": profile }))).await;
         assert_eq!(r.status, StatusCode::NOT_FOUND, "not someone else's request");
 
         sqlx::query("UPDATE removal_requests SET status = 'verified_removed' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
@@ -2137,7 +2176,7 @@ mod done_by_hand {
             sqlx::query("INSERT INTO removal_audit_log (removal_request_id, customer_id, action, actor, details, recorded_at) VALUES ($1, $2, $3, 'verification_agent', '{}', NOW() - make_interval(secs => $4))")
                 .bind(r).bind(c).bind(action).bind(secs as f64).execute(&pool).await.unwrap();
         }
-        let list = send(&app, "GET", "/removal-requests", &bearer(&cfg, c, "personal"), None).await.json();
+        let list = send(&app, "GET", "/removal-requests", &bearer(&pool, &cfg, c, "personal").await, None).await.json();
         let item = &list["requests"][0];
         assert_eq!(item["last_check_result"], "inconclusive", "the most recent check wins");
         assert!(item["last_check_at"].is_string());
@@ -2147,7 +2186,7 @@ mod done_by_hand {
     async fn asking_for_help_is_limited_to_manual_action_and_is_idempotent(pool: PgPool) {
         let (app, cfg) = app(pool.clone());
         let c = ts::customer(&pool, "personal", true).await;
-        let who = bearer(&cfg, c, "personal");
+        let who = bearer(&pool, &cfg, c, "personal").await;
         let ask = |id: Uuid| {
             let (app, who) = (app.clone(), who.clone());
             async move { send(&app, "POST", &format!("/removal-requests/{id}/request-assistance"), &who, None).await }
@@ -2169,7 +2208,7 @@ mod done_by_hand {
 
         // someone else's request is not theirs to ask about
         let other = ts::customer(&pool, "personal", true).await;
-        let r = send(&app, "POST", &format!("/removal-requests/{failed}/request-assistance"), &bearer(&cfg, other, "personal"), None).await;
+        let r = send(&app, "POST", &format!("/removal-requests/{failed}/request-assistance"), &bearer(&pool, &cfg, other, "personal").await, None).await;
         assert_eq!(r.status, StatusCode::NOT_FOUND);
 
         // at most three open at once
@@ -2196,7 +2235,7 @@ mod done_by_hand {
         let c = ts::customer(&pool, "personal", true).await;
         let (id, _) = failed_request(&pool, c).await;
 
-        let r = mark(&app, &cfg, c, id).await;
+        let r = mark(&pool, &app, &cfg, c, id).await;
         assert_eq!(r.status, StatusCode::OK, "{}", r.body);
         assert_eq!(r.json()["request"]["status"], "submitted");
         assert!(r.json()["message"].as_str().unwrap().contains("3, 7, 14 and 30"));
@@ -2216,7 +2255,7 @@ mod done_by_hand {
         let (app, cfg) = app(pool.clone());
         let c = ts::customer(&pool, "personal", true).await;
         let (id, exposure) = failed_request(&pool, c).await;
-        mark(&app, &cfg, c, id).await;
+        mark(&pool, &app, &cfg, c, id).await;
 
         let due = |app: &Router, cfg: &AppConfig| {
             let (app, cfg) = (app.clone(), cfg.clone());
@@ -2252,7 +2291,7 @@ mod done_by_hand {
         let (app, cfg) = app(pool.clone());
         let c = ts::customer(&pool, "personal", true).await;
         let (id, _) = failed_request(&pool, c).await;
-        mark(&app, &cfg, c, id).await;
+        mark(&pool, &app, &cfg, c, id).await;
         sqlx::query("UPDATE removal_requests SET submitted_at = NOW() - interval '46 days', next_check_at = NOW() - interval '1 minute' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
         send(&app, "POST", &format!("/internal/removal-requests/{id}/verification-result"), &agent(&cfg),
             Some(json!({ "customer_id": c, "outcome": "still_present" }))).await;
@@ -2266,13 +2305,13 @@ mod done_by_hand {
         for status in ["authorized", "submitted", "acknowledged", "verified_removed", "rejected", "unverifiable", "reappeared"] {
             let e = ts::exposure(&pool, c, true, None).await;
             let id = ts::removal_request(&pool, c, e, status, Some(1)).await;
-            let r = mark(&app, &cfg, c, id).await;
+            let r = mark(&pool, &app, &cfg, c, id).await;
             assert_eq!(r.status, StatusCode::CONFLICT, "{status}: {}", r.body);
             assert!(r.body.contains("Only a request that failed"), "{}", r.body);
         }
         let (id, _) = failed_request(&pool, c).await;
-        assert_eq!(mark(&app, &cfg, c, id).await.status, StatusCode::OK);
-        assert_eq!(mark(&app, &cfg, c, id).await.status, StatusCode::CONFLICT, "a second tap does nothing");
+        assert_eq!(mark(&pool, &app, &cfg, c, id).await.status, StatusCode::OK);
+        assert_eq!(mark(&pool, &app, &cfg, c, id).await.status, StatusCode::CONFLICT, "a second tap does nothing");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -2280,8 +2319,8 @@ mod done_by_hand {
         let (app, cfg) = app(pool.clone());
         let (owner, stranger) = (ts::customer(&pool, "personal", true).await, ts::customer(&pool, "personal", true).await);
         let (id, _) = failed_request(&pool, owner).await;
-        assert_eq!(mark(&app, &cfg, stranger, id).await.status, StatusCode::NOT_FOUND, "someone else's request");
-        assert_eq!(mark(&app, &cfg, owner, Uuid::new_v4()).await.status, StatusCode::NOT_FOUND, "no such request");
+        assert_eq!(mark(&pool, &app, &cfg, stranger, id).await.status, StatusCode::NOT_FOUND, "someone else's request");
+        assert_eq!(mark(&pool, &app, &cfg, owner, Uuid::new_v4()).await.status, StatusCode::NOT_FOUND, "no such request");
         let anon = send(&app, "POST", &format!("/removal-requests/{id}/done-by-hand"), &[], None).await;
         assert_eq!(anon.status, StatusCode::UNAUTHORIZED);
         assert_eq!(row(&pool, id).await.0, "failed", "nothing changed");
@@ -2294,8 +2333,8 @@ mod done_by_hand {
         let e = ts::exposure(&pool, c, true, None).await;
         let first = ts::removal_request(&pool, c, e, "failed", None).await;
         let second = ts::removal_request(&pool, c, e, "failed", None).await;       // the three failed Spokeo attempts look like this
-        assert_eq!(mark(&app, &cfg, c, first).await.status, StatusCode::OK);
-        let r = mark(&app, &cfg, c, second).await;
+        assert_eq!(mark(&pool, &app, &cfg, c, first).await.status, StatusCode::OK);
+        let r = mark(&pool, &app, &cfg, c, second).await;
         assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
         assert!(r.body.contains("already in progress"));
         assert_eq!(row(&pool, second).await.0, "failed");
@@ -2304,7 +2343,7 @@ mod done_by_hand {
         let e2 = ts::exposure(&pool, c, true, None).await;
         let old = ts::removal_request(&pool, c, e2, "failed", None).await;
         ts::removal_request(&pool, c, e2, "authorized", None).await;
-        assert_eq!(mark(&app, &cfg, c, old).await.status, StatusCode::CONFLICT);
+        assert_eq!(mark(&pool, &app, &cfg, c, old).await.status, StatusCode::CONFLICT);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -2313,7 +2352,7 @@ mod done_by_hand {
         let c = ts::customer(&pool, "personal", true).await;
         let e = ts::exposure(&pool, c, false, Some(3)).await;                       // already removed
         let id = ts::removal_request(&pool, c, e, "failed", None).await;
-        let r = mark(&app, &cfg, c, id).await;
+        let r = mark(&pool, &app, &cfg, c, id).await;
         assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
         assert!(r.body.contains("no longer active"));
         assert_eq!(row(&pool, id).await.0, "failed");
@@ -2326,8 +2365,8 @@ mod done_by_hand {
         let (id, _) = failed_request(&pool, c).await;
         let mut handles = vec![];
         for _ in 0..6 {
-            let (app, cfg) = (app.clone(), cfg.clone());
-            handles.push(tokio::spawn(async move { mark(&app, &cfg, c, id).await.status }));
+            let (pool, app, cfg) = (pool.clone(), app.clone(), cfg.clone());
+            handles.push(tokio::spawn(async move { mark(&pool, &app, &cfg, c, id).await.status }));
         }
         let mut ok = 0;
         for h in handles {
@@ -2350,7 +2389,7 @@ mod account_erasure {
     async fn signed_up(app: &Router, pool: &PgPool, cfg: &AppConfig, email: &str) -> (Uuid, Vec<(&'static str, String)>) {
         assert_eq!(register(app, email).await.status, StatusCode::CREATED);
         let id: Uuid = sqlx::query_scalar("SELECT id FROM customers WHERE email = $1").bind(email).fetch_one(pool).await.unwrap();
-        (id, bearer(cfg, id, "free"))
+        (id, bearer(pool, cfg, id, "free").await)
     }
 
     async fn delete(app: &Router, who: &[(&'static str, String)], password: &str) -> Reply {
@@ -2515,7 +2554,7 @@ mod sealed_links {
         let stored: String = sqlx::query_scalar("SELECT source_url FROM exposures WHERE customer_id = $1").bind(c).fetch_one(&pool).await.unwrap();
         assert!(stored.starts_with("enc1:") && !stored.to_lowercase().contains("jane"), "{stored}");
 
-        let who = bearer(&cfg, c, "free");
+        let who = bearer(&pool, &cfg, c, "free").await;
         let list = send(&app, "GET", "/exposures", &who, None).await.json();
         assert_eq!(list["exposures"][0]["source_url"], URL);
         let exposure_id = list["exposures"][0]["id"].as_str().unwrap().to_string();
@@ -2575,7 +2614,7 @@ mod sealed_links {
         let kept: String = sqlx::query_scalar("SELECT source_url FROM exposures WHERE id = $1").bind(e2).fetch_one(&pool).await.unwrap();
         assert_eq!(kept, sealed_already, "an already-sealed row is left alone");
 
-        let who = bearer(&cfg, c, "free");
+        let who = bearer(&pool, &cfg, c, "free").await;
         let list = send(&app, "GET", "/removal-requests", &who, None).await.json();
         assert_eq!(list["requests"][0]["source_url"], URL);
     }
@@ -2589,7 +2628,7 @@ mod pilot_registration {
     use super::*;
 
     fn body(email: &str, interview: Option<bool>, story: Option<bool>) -> Value {
-        let mut b = json!({ "email": email, "password": PASSWORD, "accepted_terms_version": crate::models::customer::TERMS_VERSION });
+        let mut b = json!({ "email": email, "password": PASSWORD, "accepted_terms_version": crate::models::customer::TERMS_VERSION, "confirmed_adult": true });
         if let Some(i) = interview { b["pilot_interview_ok"] = json!(i); }
         if let Some(s) = story { b["pilot_story_ok"] = json!(s); }
         b
@@ -2642,15 +2681,15 @@ mod own_listings {
 
     const LINK: &str = "https://www.radaris.com/p/Jane/Smith/";
 
-    async fn add(app: &Router, cfg: &AppConfig, c: Uuid, tier: &str, url: &str) -> Reply {
-        send(app, "POST", "/me/listings", &bearer(cfg, c, tier), Some(json!({ "source_url": url }))).await
+    async fn add(pool: &PgPool, app: &Router, cfg: &AppConfig, c: Uuid, tier: &str, url: &str) -> Reply {
+        send(app, "POST", "/me/listings", &bearer(pool, cfg, c, tier).await, Some(json!({ "source_url": url }))).await
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn an_added_listing_is_tracked_as_manual_action_sealed_and_reported_like_any_other(pool: PgPool) {
         let (app, cfg) = app(pool.clone());
         let c = ts::customer(&pool, "personal", true).await;
-        let r = add(&app, &cfg, c, "personal", LINK).await;
+        let r = add(&pool, &app, &cfg, c, "personal", LINK).await;
         assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
         let e = &r.json()["exposure"];
         assert_eq!(e["source_name"], "radaris.com");
@@ -2664,14 +2703,14 @@ mod own_listings {
         assert!(stored_e.starts_with("enc1:") && stored_r.starts_with("enc1:"), "sealed at rest");
         assert!(!stored_e.to_lowercase().contains("smith"));
 
-        let list = send(&app, "GET", "/removal-requests", &bearer(&cfg, c, "personal"), None).await.json();
+        let list = send(&app, "GET", "/removal-requests", &bearer(&pool, &cfg, c, "personal").await, None).await.json();
         let req = &list["requests"][0];
         assert_eq!(req["status"], "failed", "= manual action required");
         assert!(req["failure_reason"].as_str().unwrap().contains("added this listing yourself"));
         let id = req["id"].as_str().unwrap();
 
         // the usual self-report, then the usual verification
-        let rep = send(&app, "POST", &format!("/removal-requests/{id}/done-by-hand"), &bearer(&cfg, c, "personal"), Some(json!({ "email_confirmation": "not_required" }))).await;
+        let rep = send(&app, "POST", &format!("/removal-requests/{id}/done-by-hand"), &bearer(&pool, &cfg, c, "personal").await, Some(json!({ "email_confirmation": "not_required" }))).await;
         assert_eq!(rep.status, StatusCode::OK, "{}", rep.body);
         sqlx::query("UPDATE removal_requests SET next_check_at = NOW() - interval '1 minute'").execute(&pool).await.unwrap();
         let due = send(&app, "GET", "/internal/removal-requests/due-for-verification", &agent(&cfg), None).await.json();
@@ -2688,15 +2727,15 @@ mod own_listings {
         let (app, cfg) = app(pool.clone());
         let c = ts::customer(&pool, "free", false).await;
         for bad in ["radaris.com/p", "http://radaris.com/p", "https://10.0.0.5/p", "https://localhost/p", "https://u:p@radaris.com/p"] {
-            assert_eq!(add(&app, &cfg, c, "free", bad).await.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+            assert_eq!(add(&pool, &app, &cfg, c, "free", bad).await.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
         }
-        assert_eq!(add(&app, &cfg, c, "free", LINK).await.status, StatusCode::CREATED);
-        assert_eq!(add(&app, &cfg, c, "free", "https://radaris.com/other").await.status, StatusCode::CONFLICT, "one per site");
+        assert_eq!(add(&pool, &app, &cfg, c, "free", LINK).await.status, StatusCode::CREATED);
+        assert_eq!(add(&pool, &app, &cfg, c, "free", "https://radaris.com/other").await.status, StatusCode::CONFLICT, "one per site");
         for i in 1..crate::services::listing::MAX_OWN_LISTINGS_FREE {
-            let r = add(&app, &cfg, c, "free", &format!("https://site{i}.example.com/p")).await;
+            let r = add(&pool, &app, &cfg, c, "free", &format!("https://site{i}.example.com/p")).await;
             assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
         }
-        let over = add(&app, &cfg, c, "free", "https://one-more.example.com/p").await;
+        let over = add(&pool, &app, &cfg, c, "free", "https://one-more.example.com/p").await;
         assert_eq!(over.status, StatusCode::CONFLICT);
         assert!(over.body.contains("up to 5"), "{}", over.body);
         assert_eq!(send(&app, "POST", "/me/listings", &[], Some(json!({ "source_url": LINK }))).await.status, StatusCode::UNAUTHORIZED);
@@ -2706,7 +2745,7 @@ mod own_listings {
     async fn by_hand_opt_outs_do_not_use_up_the_free_allowance(pool: PgPool) {
         let (app, cfg) = app(pool.clone());
         let c = ts::customer(&pool, "free", false).await;
-        let who = bearer(&cfg, c, "free");
+        let who = bearer(&pool, &cfg, c, "free").await;
         // one by-hand removal in progress, which used to count towards the three
         let e = ts::exposure(&pool, c, true, None).await;
         let r = ts::removal_request(&pool, c, e, "submitted", Some(3)).await;
@@ -2739,5 +2778,363 @@ mod own_listings {
         assert_eq!(j["verified_removals"], 1, "a customer-added listing is not counted");
         assert_eq!(j["verified_sources"], json!([name]));
         assert!(!body.body.contains(&c.to_string()));
+    }
+}
+
+// ===========================================================================
+// Sessions and two-factor authentication
+// ===========================================================================
+
+mod security {
+    use super::*;
+    use crate::services::{session, totp};
+
+    fn who(token: &str) -> Vec<(&'static str, String)> {
+        vec![("authorization", format!("Bearer {token}"))]
+    }
+
+    async fn new_account(app: &Router, email: &str) -> String {
+        let r = register(app, email).await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+        session_cookie_value(&r)
+    }
+
+    async fn sign_in(app: &Router, email: &str) -> String {
+        let r = login(app, email, PASSWORD).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        session_cookie_value(&r)
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    /// What the customer's authenticator app shows, `steps_ahead` 30-second steps from now.
+    fn app_code(secret: &str, steps_ahead: u64) -> String {
+        totp::code_for_step(&totp::base32_decode(secret), totp::step_at(unix_now()) + steps_ahead)
+    }
+
+    async fn code_status(app: &Router, token: &str) -> StatusCode {
+        send(app, "GET", "/me", &who(token), None).await.status
+    }
+
+    /// Switch two-factor on for the session `token`; returns (secret, recovery codes, the code used).
+    async fn turn_on(app: &Router, token: &str) -> (String, Vec<String>, String) {
+        let r = send(app, "POST", "/me/mfa/setup", &who(token), Some(json!({ "password": PASSWORD }))).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        let secret = r.json()["secret"].as_str().unwrap().to_string();
+        let code = app_code(&secret, 0);
+        let r = send(app, "POST", "/me/mfa/enable", &who(token), Some(json!({ "code": code }))).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        let codes = r.json()["recovery_codes"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        (secret, codes, code)
+    }
+
+    async fn login_with(app: &Router, email: &str, code: &str) -> Reply {
+        send(app, "POST", "/auth/login", &[], Some(json!({ "email": email, "password": PASSWORD, "mfa_code": code }))).await
+    }
+
+    async fn session_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM sessions").fetch_one(pool).await.unwrap()
+    }
+
+    // ---- sessions ----------------------------------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn logging_out_ends_the_session_even_for_a_copied_token(pool: PgPool) {
+        let (app, _) = app(pool);
+        let token = new_account(&app, "out@example.com").await;
+        assert_eq!(code_status(&app, &token).await, StatusCode::OK);
+        assert_eq!(send(&app, "POST", "/auth/logout", &who(&token), None).await.status, StatusCode::NO_CONTENT);
+        assert_eq!(code_status(&app, &token).await, StatusCode::UNAUTHORIZED, "the token no longer works anywhere");
+        // and logging out again, or with a dead token, is still fine
+        assert_eq!(send(&app, "POST", "/auth/logout", &who(&token), None).await.status, StatusCode::NO_CONTENT);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_correctly_signed_token_with_no_live_session_is_refused(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let (a, b) = (ts::customer(&pool, "free", false).await, ts::customer(&pool, "free", false).await);
+
+        let unknown_session = auth_svc::issue_token(a, Uuid::new_v4(), "free", &cfg.jwt_secret).unwrap();
+        assert_eq!(code_status(&app, &unknown_session).await, StatusCode::UNAUTHORIZED);
+
+        // someone else's session id does not unlock this customer
+        let b_session = session::create(&pool, b, None).await.unwrap();
+        let borrowed = auth_svc::issue_token(a, b_session, "free", &cfg.jwt_secret).unwrap();
+        assert_eq!(code_status(&app, &borrowed).await, StatusCode::UNAUTHORIZED);
+
+        let genuine = token(&pool, &cfg, a, "free").await;
+        assert_eq!(code_status(&app, &genuine).await, StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_idle_session_is_refused_and_a_busy_one_is_not(pool: PgPool) {
+        let (app, cfg) = app(pool.clone());
+        let c = ts::customer(&pool, "free", false).await;
+        let t = token(&pool, &cfg, c, "free").await;
+        let age = |mins: i64| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("UPDATE sessions SET last_seen_at = NOW() - make_interval(mins => $1::int)")
+                    .bind(mins as i32).execute(&pool).await.unwrap();
+            }
+        };
+        age(session::IDLE_TIMEOUT_MINUTES - 5).await;
+        assert_eq!(code_status(&app, &t).await, StatusCode::OK);
+        age(session::IDLE_TIMEOUT_MINUTES + 5).await;
+        assert_eq!(code_status(&app, &t).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_session_cookie_is_subject_to_the_same_checks(pool: PgPool) {
+        let (app, _) = app(pool);
+        let t = new_account(&app, "cookie@example.com").await;
+        let by_cookie = |t: &str| vec![("cookie", format!("vs_session={t}"))];
+        assert_eq!(send(&app, "GET", "/me", &by_cookie(&t), None).await.status, StatusCode::OK);
+        send(&app, "POST", "/auth/logout", &by_cookie(&t), None).await;
+        assert_eq!(send(&app, "GET", "/me", &by_cookie(&t), None).await.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn signing_out_everywhere_ends_every_session(pool: PgPool) {
+        let (app, _) = app(pool);
+        let t1 = new_account(&app, "all@example.com").await;
+        let t2 = sign_in(&app, "all@example.com").await;
+        let other = new_account(&app, "bystander@example.com").await;
+        assert_eq!(send(&app, "POST", "/auth/logout-all", &[], None).await.status, StatusCode::UNAUTHORIZED);
+        let r = send(&app, "POST", "/auth/logout-all", &who(&t1), None).await;
+        assert_eq!(r.status, StatusCode::NO_CONTENT);
+        assert!(session_set_cookie(&r).unwrap().contains("Max-Age=0"));
+        assert_eq!(code_status(&app, &t1).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(code_status(&app, &t2).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(code_status(&app, &other).await, StatusCode::OK, "other customers are untouched");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn sessions_can_be_listed_and_one_ended_but_only_your_own(pool: PgPool) {
+        let (app, _) = app(pool);
+        let t1 = new_account(&app, "list@example.com").await;
+        let t2 = sign_in(&app, "list@example.com").await;
+        let stranger = new_account(&app, "stranger@example.com").await;
+
+        assert_eq!(send(&app, "GET", "/me/sessions", &[], None).await.status, StatusCode::UNAUTHORIZED);
+        let listed = send(&app, "GET", "/me/sessions", &who(&t1), None).await.json();
+        let rows = listed.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().filter(|r| r["current"] == true).count(), 1);
+        assert!(rows.iter().any(|r| r["user_agent"] == "test-agent/1.0"));
+        let other_id = rows.iter().find(|r| r["current"] == false).unwrap()["id"].as_str().unwrap().to_string();
+
+        // a stranger can neither see nor end it
+        let stranger_view = send(&app, "GET", "/me/sessions", &who(&stranger), None).await.json();
+        assert_eq!(stranger_view.as_array().unwrap().len(), 1);
+        assert_eq!(send(&app, "DELETE", &format!("/me/sessions/{other_id}"), &who(&stranger), None).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(code_status(&app, &t2).await, StatusCode::OK);
+
+        assert_eq!(send(&app, "DELETE", &format!("/me/sessions/{other_id}"), &who(&t1), None).await.status, StatusCode::NO_CONTENT);
+        assert_eq!(code_status(&app, &t2).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(code_status(&app, &t1).await, StatusCode::OK);
+        assert_eq!(send(&app, "DELETE", &format!("/me/sessions/{other_id}"), &who(&t1), None).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(send(&app, "GET", "/me/sessions", &who(&t1), None).await.json().as_array().unwrap().len(), 1);
+    }
+
+    // ---- two-factor setup --------------------------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn setup_needs_a_session_and_the_password_and_protects_nothing_yet(pool: PgPool) {
+        let (app, _) = app(pool);
+        let t = new_account(&app, "setup@example.com").await;
+        let body = |p: &str| Some(json!({ "password": p }));
+        assert_eq!(send(&app, "POST", "/me/mfa/setup", &[], body(PASSWORD)).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(send(&app, "POST", "/me/mfa/setup", &who(&t), body("not the password")).await.status, StatusCode::UNAUTHORIZED);
+
+        let r = send(&app, "POST", "/me/mfa/setup", &who(&t), body(PASSWORD)).await;
+        assert_eq!(r.status, StatusCode::OK);
+        let j = r.json();
+        assert!(j["otpauth_uri"].as_str().unwrap().starts_with("otpauth://totp/VectorScrub:setup%40example.com?"), "{j}");
+        assert!(j["otpauth_uri"].as_str().unwrap().contains(j["secret"].as_str().unwrap()));
+
+        // started, not confirmed: the account still signs in with the password alone
+        assert_eq!(send(&app, "GET", "/me/mfa", &who(&t), None).await.json(), json!({ "enabled": false, "recovery_codes_remaining": 0 }));
+        assert_eq!(login(&app, "setup@example.com", PASSWORD).await.status, StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn enabling_needs_a_right_code_returns_recovery_codes_and_ends_other_sessions(pool: PgPool) {
+        let (app, _) = app(pool.clone());
+        let t = new_account(&app, "enable@example.com").await;
+        let elsewhere = sign_in(&app, "enable@example.com").await;
+
+        let enable = |code: String, t: String| {
+            let app = app.clone();
+            async move { send(&app, "POST", "/me/mfa/enable", &who(&t), Some(json!({ "code": code }))).await }
+        };
+        assert_eq!(enable("123456".into(), t.clone()).await.status, StatusCode::UNPROCESSABLE_ENTITY, "not started");
+
+        let setup = send(&app, "POST", "/me/mfa/setup", &who(&t), Some(json!({ "password": PASSWORD }))).await.json();
+        let secret = setup["secret"].as_str().unwrap().to_string();
+        let right = app_code(&secret, 0);
+        let wrong = if right == "000000" { "111111" } else { "000000" };
+        assert_eq!(enable(wrong.into(), t.clone()).await.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(send(&app, "GET", "/me/mfa", &who(&t), None).await.json()["enabled"], false);
+
+        let r = enable(right.clone(), t.clone()).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        let codes = r.json()["recovery_codes"].clone();
+        assert_eq!(codes.as_array().unwrap().len(), 10);
+        assert_eq!(send(&app, "GET", "/me/mfa", &who(&t), None).await.json(), json!({ "enabled": true, "recovery_codes_remaining": 10 }));
+
+        assert_eq!(code_status(&app, &t).await, StatusCode::OK, "the session that turned it on carries on");
+        assert_eq!(code_status(&app, &elsewhere).await, StatusCode::UNAUTHORIZED, "other sessions must sign in again");
+
+        // it cannot be restarted or re-confirmed while on, which would swap the secret
+        assert_eq!(send(&app, "POST", "/me/mfa/setup", &who(&t), Some(json!({ "password": PASSWORD }))).await.status, StatusCode::CONFLICT);
+        assert_eq!(enable(right, t.clone()).await.status, StatusCode::CONFLICT);
+
+        let audited: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'mfa.enable'").fetch_one(&pool).await.unwrap();
+        assert_eq!(audited, 1);
+    }
+
+    // ---- signing in with two-factor ----------------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_password_alone_does_not_open_an_account_with_two_factor(pool: PgPool) {
+        let (app, _) = app(pool.clone());
+        let t = new_account(&app, "mfa@example.com").await;
+        let (secret, _, enable_code) = turn_on(&app, &t).await;
+        let before = session_count(&pool).await;
+
+        let r = login(&app, "mfa@example.com", PASSWORD).await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert_eq!(r.json(), json!({ "mfa_required": true }));
+        assert!(session_set_cookie(&r).is_none(), "no cookie");
+        assert_eq!(session_count(&pool).await, before, "and no session");
+
+        // a wrong password is still just a wrong password, and says nothing about two-factor
+        let r = login(&app, "mfa@example.com", "wrong password here").await;
+        assert_eq!((r.status, r.body.as_str()), (StatusCode::UNAUTHORIZED, "Invalid email or password"));
+
+        // a wrong code is refused with no cookie
+        let wrong = if app_code(&secret, 1) == "000000" { "111111" } else { "000000" };
+        let r = login_with(&app, "mfa@example.com", wrong).await;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+        assert!(session_set_cookie(&r).is_none());
+
+        // the code that confirmed setup was spent; it cannot open the account
+        assert_eq!(login_with(&app, "mfa@example.com", &enable_code).await.status, StatusCode::UNAUTHORIZED);
+
+        // a fresh code works, once
+        let fresh = app_code(&secret, 1);
+        let r = login_with(&app, "mfa@example.com", &fresh).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(code_status(&app, &session_cookie_value(&r)).await, StatusCode::OK);
+        assert_eq!(login_with(&app, "mfa@example.com", &fresh).await.status, StatusCode::UNAUTHORIZED, "replay");
+
+        let method: String = sqlx::query_scalar(
+            "SELECT details->>'second_factor' FROM audit_log WHERE action = 'user.login' AND status = 'success' ORDER BY timestamp DESC LIMIT 1",
+        )
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(method, "totp");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_code_sent_to_an_account_without_two_factor_is_ignored(pool: PgPool) {
+        let (app, _) = app(pool);
+        new_account(&app, "plain@example.com").await;
+        assert_eq!(login_with(&app, "plain@example.com", "123456").await.status, StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn wrong_codes_count_toward_the_same_lockout_as_wrong_passwords(pool: PgPool) {
+        let (app, _) = app(pool);
+        let t = new_account(&app, "guess@example.com").await;
+        let (secret, _, _) = turn_on(&app, &t).await;
+        let right = app_code(&secret, 1);
+        let wrong = if right == "000000" { "111111" } else { "000000" };
+        for _ in 0..5 {
+            assert_eq!(login_with(&app, "guess@example.com", wrong).await.status, StatusCode::UNAUTHORIZED);
+        }
+        let r = login_with(&app, "guess@example.com", &right).await;
+        assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "locked: even the right code is refused");
+        assert!(r.headers.contains_key("retry-after"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_recovery_code_signs_in_once_and_is_audited(pool: PgPool) {
+        let (app, _) = app(pool.clone());
+        let t = new_account(&app, "recover@example.com").await;
+        let (_, codes, _) = turn_on(&app, &t).await;
+
+        let r = login_with(&app, "recover@example.com", &codes[0]).await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(login_with(&app, "recover@example.com", &codes[0]).await.status, StatusCode::UNAUTHORIZED, "spent");
+        let lower = codes[1].to_lowercase();
+        assert_eq!(login_with(&app, "recover@example.com", &lower).await.status, StatusCode::OK, "case does not matter");
+
+        let used: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'mfa.recovery_code_used'").fetch_one(&pool).await.unwrap();
+        assert_eq!(used, 2);
+        let token = session_cookie_value(&r);
+        assert_eq!(send(&app, "GET", "/me/mfa", &who(&token), None).await.json()["recovery_codes_remaining"], 8);
+    }
+
+    // ---- turning it off, and the other things that ask for it --------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn turning_it_off_needs_the_password_and_a_code_and_ends_other_sessions(pool: PgPool) {
+        let (app, _) = app(pool);
+        let t = new_account(&app, "off@example.com").await;
+        let (secret, codes, _) = turn_on(&app, &t).await;
+        let elsewhere = {
+            // a recovery code, so the authenticator code for the next step is still unspent
+            let r = login_with(&app, "off@example.com", &codes[0]).await;
+            assert_eq!(r.status, StatusCode::OK);
+            session_cookie_value(&r)
+        };
+        let off = |password: &str, code: &str| {
+            let (app, t, password, code) = (app.clone(), t.clone(), password.to_string(), code.to_string());
+            async move { send(&app, "POST", "/me/mfa/disable", &who(&t), Some(json!({ "password": password, "code": code }))).await.status }
+        };
+        let right = app_code(&secret, 1);
+        assert_eq!(off("not the password", &right).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(off(PASSWORD, "000000").await, StatusCode::UNAUTHORIZED);
+        assert_eq!(send(&app, "GET", "/me/mfa", &who(&t), None).await.json()["enabled"], true, "still on");
+
+        assert_eq!(off(PASSWORD, &right).await, StatusCode::NO_CONTENT);
+        assert_eq!(send(&app, "GET", "/me/mfa", &who(&t), None).await.json()["enabled"], false);
+        assert_eq!(code_status(&app, &elsewhere).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(code_status(&app, &t).await, StatusCode::OK);
+        assert_eq!(login(&app, "off@example.com", PASSWORD).await.status, StatusCode::OK, "password alone works again");
+        assert_eq!(off(PASSWORD, &right).await, StatusCode::CONFLICT, "it was already off");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn erasing_an_account_with_two_factor_needs_a_code_too(pool: PgPool) {
+        let (app, _) = app(pool.clone());
+        let t = new_account(&app, "erase@example.com").await;
+        let (secret, _, _) = turn_on(&app, &t).await;
+        let delete = |body: Value| {
+            let (app, t) = (app.clone(), t.clone());
+            async move { send(&app, "DELETE", "/me", &who(&t), Some(body)).await }
+        };
+        let r = delete(json!({ "password": PASSWORD })).await;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED, "a stolen session and a known password are not enough");
+        assert!(r.body.contains("authenticator"), "{}", r.body);
+        assert_eq!(delete(json!({ "password": PASSWORD, "mfa_code": "000000" })).await.status, StatusCode::UNAUTHORIZED);
+        let n = |pool: PgPool| async move { sqlx::query_scalar::<_, i64>("SELECT count(*) FROM customers").fetch_one(&pool).await.unwrap() };
+        assert_eq!(n(pool.clone()).await, 1);
+
+        let r = delete(json!({ "password": PASSWORD, "mfa_code": app_code(&secret, 1) })).await;
+        assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+        assert_eq!(n(pool).await, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_security_endpoints_are_not_reachable_without_a_session(pool: PgPool) {
+        let (app, _) = app(pool);
+        for (m, u) in [("GET", "/me/mfa"), ("POST", "/me/mfa/enable"), ("POST", "/me/mfa/disable"), ("GET", "/me/sessions")] {
+            let r = send(&app, m, u, &[], Some(json!({ "code": "123456", "password": PASSWORD }))).await;
+            assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{m} {u}");
+        }
     }
 }
