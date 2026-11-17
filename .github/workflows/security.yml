@@ -38,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@1.120.0
 
       # Pinned, and cached so that the install (a few minutes of compiling) happens once.
       - uses: actions/cache@v4
