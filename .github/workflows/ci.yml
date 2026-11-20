@@ -78,7 +78,9 @@ jobs:
           SQLX_OFFLINE: "false"
           DATABASE_URL: postgres://vectorscrub:ci@localhost:5432/prepare
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          # The runner's default client is newer than the postgres:16 service, and a newer pg_dump
+          # writes settings (transaction_timeout) that a 16 server rejects on restore. Use 16.
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-16
           export PGPASSWORD=ci
           psql -h localhost -U vectorscrub -d vectorscrub -q -c "CREATE DATABASE prepare;"
           for f in backend/migrations/*.sql; do
@@ -94,6 +96,7 @@ jobs:
         working-directory: .
         env:
           PGPASSWORD: ci
+          PG_BIN_DIR: /usr/lib/postgresql/16/bin
         run: |
           set -euo pipefail
           psql -h localhost -U vectorscrub -d vectorscrub -q -c "CREATE DATABASE drill_src;"
@@ -123,6 +126,16 @@ jobs:
     defaults:
       run:
         working-directory: agents
+    services:
+      # The per-broker rate limiter and the scan lock run on Redis.
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      TEST_REDIS_URL: redis://localhost:6379/14
     steps:
       - uses: actions/checkout@v4
 
@@ -211,7 +224,7 @@ jobs:
       # between two runs with no change here, because the database of known issues keeps growing:
       # fix by rebuilding on a newer base image or updating the dependency.
       - name: Scan the backend image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: vectorscrub-backend
           severity: CRITICAL,HIGH
@@ -220,7 +233,7 @@ jobs:
           format: table
 
       - name: Scan the agents image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: vectorscrub-agents
           severity: CRITICAL,HIGH
@@ -229,7 +242,7 @@ jobs:
           format: table
 
       - name: Scan the frontend image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: vectorscrub-frontend
           severity: CRITICAL,HIGH

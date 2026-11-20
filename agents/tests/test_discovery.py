@@ -165,7 +165,11 @@ async def test_run_still_returns_just_the_candidates(identity, monkeypatch):
 
 # ---- sources that can only be searched by hand --------------------------------------------------
 
-MANUAL = {"peoplefinder.com", "intelius.com", "peoplelooker.com", "ownerly.com", "instantcheckmate.com"}
+MANUAL = {
+    "peoplefinder.com", "intelius.com", "peoplelooker.com", "ownerly.com", "instantcheckmate.com",
+    # Business-contact sites: a profile page needs an account, so there is nothing to fetch.
+    "zoominfo.com", "contactout.com", "rocketreach.co",
+}
 
 
 def test_the_sources_without_a_name_addressable_search_are_flagged_manual():

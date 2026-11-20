@@ -27,6 +27,9 @@ os.environ.update(
     MONITORING_REQUEST_DELAY_SECONDS="0",
     REMOVAL_REQUEST_DELAY_SECONDS="0",
     SCAN_HEARTBEAT_SECONDS="1",
+    # The per-broker rate limiter and the scan lock use Redis. Tests get a scratch database
+    # (TEST_REDIS_URL, default /14), never the developer's working one.
+    REDIS_URL=os.environ.get("TEST_REDIS_URL", "redis://127.0.0.1:6379/14"),
 )
 
 from shared import config as _config  # noqa: E402
@@ -85,6 +88,39 @@ def _fresh_circuit_breakers():
     circuit_breaker._circuit_breakers.clear()
     yield
     circuit_breaker._circuit_breakers.clear()
+
+
+def _clear_scratch_redis() -> None:
+    """Drop the rate-limit windows and locks earlier tests left in the scratch database."""
+    import redis
+
+    try:
+        r = redis.Redis.from_url(os.environ["REDIS_URL"], socket_connect_timeout=1)
+        for pattern in ("ratelimit:*", "lock:*"):
+            keys = list(r.scan_iter(match=pattern, count=500))
+            if keys:
+                r.delete(*keys)
+        r.close()
+    except redis.ConnectionError:
+        pass  # tests that need Redis will report it themselves
+
+
+@pytest.fixture(autouse=True)
+async def _fresh_redis_clients():
+    """The rate limiter and metrics collector are process-global and cache a Redis client,
+    which belongs to the event loop that created it. Each test runs in its own loop, so give
+    each test fresh instances and close them after."""
+    from shared import metrics, rate_limiter
+
+    _clear_scratch_redis()
+    rate_limiter._global_limiter = None
+    metrics._global_collector = None
+    yield
+    for holder, name in ((rate_limiter, "_global_limiter"), (metrics, "_global_collector")):
+        instance = getattr(holder, name)
+        if instance is not None:
+            await instance.close()
+        setattr(holder, name, None)
 
 
 class FakeChatModel:
