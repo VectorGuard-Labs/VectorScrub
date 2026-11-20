@@ -41,7 +41,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90.0
 
       # Pinned, and cached so that the install (a few minutes of compiling) happens once.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: audit-bin
         with:
           path: ~/.cargo/bin/cargo-audit
@@ -58,7 +58,7 @@ jobs:
       # Licenses, wildcard versions and where crates come from (backend/deny.toml). A dependency
       # under a copyleft or missing license, or from outside crates.io, stops the build until a
       # person decides.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: deny-bin
         with:
           path: ~/.cargo/bin/cargo-deny
