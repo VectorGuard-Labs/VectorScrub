@@ -21,7 +21,9 @@ env:
 jobs:
   backend:
     name: Backend (Rust)
-    runs-on: ubuntu-latest
+    # 24.04 ships postgresql-client-16, matching the postgres:16 service below (the backup
+    # drill needs pg_dump/pg_restore of the server's major version). 26.04 has only newer ones.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:

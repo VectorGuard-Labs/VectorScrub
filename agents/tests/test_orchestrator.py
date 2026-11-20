@@ -247,6 +247,27 @@ async def test_transient_heartbeat_failures_do_not_kill_the_scan(orch, monkeypat
     assert orch.backend.scan_updates[-1]["status"] == "completed"
 
 
+async def test_no_heartbeat_follows_the_final_status_even_while_the_lock_is_released(orch, monkeypatch):
+    # The backend refuses a heartbeat for a job that is no longer running, and the worker
+    # reads that as a lost job. Releasing the lock takes a Redis round trip after the final
+    # status, so heartbeats must already have stopped by then.
+    from shared.distributed_lock import DistributedLock
+
+    real_release = DistributedLock.release
+    released = []
+
+    async def slow_release(self):
+        await asyncio.sleep(0.3)   # six heartbeat intervals
+        await real_release(self)
+        released.append(1)
+
+    monkeypatch.setattr(DistributedLock, "release", slow_release)
+    await orch.process_job(payload())
+
+    assert released, "the lock release ran to the end, not cancelled by a refused heartbeat"
+    assert orch.backend.scan_updates[-1]["status"] == "completed"
+
+
 async def test_shutting_down_mid_scan_leaves_the_job_for_recovery(orch, monkeypatch):
     class Hang:
         def __init__(self, tier): pass

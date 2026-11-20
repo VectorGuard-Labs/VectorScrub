@@ -26,6 +26,7 @@ This is the main entry point for the Python agent layer.
 import asyncio
 import json
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import redis.asyncio as aioredis
@@ -149,7 +150,18 @@ class Orchestrator:
             return
         log.info("job_started", job_id=job_id, customer_id=customer_id, tier=payload.tier, attempt=attempt)
 
-        work = asyncio.create_task(self._run_scan_pipeline(payload, attempt))
+        beat: asyncio.Task | None = None
+
+        async def stop_heartbeat() -> None:
+            # Called just before the final status is sent. A heartbeat that landed after it
+            # would be refused (the job is no longer running) and read as a lost job, which
+            # cancels the pipeline while it releases its lock. asyncio.wait does not re-raise
+            # the heartbeat's cancellation, but this task's own cancellation still propagates.
+            if beat is not None and not beat.done():
+                beat.cancel()
+                await asyncio.wait([beat])
+
+        work = asyncio.create_task(self._run_scan_pipeline(payload, attempt, stop_heartbeat))
         beat = asyncio.create_task(self._heartbeat(job_id, attempt, work))
         try:
             await work
@@ -167,7 +179,9 @@ class Orchestrator:
         finally:
             beat.cancel()
 
-    async def _run_scan_pipeline(self, payload: ScanJobPayload, attempt: int) -> None:
+    async def _run_scan_pipeline(
+        self, payload: ScanJobPayload, attempt: int, stop_heartbeat: Callable[[], Awaitable[None]]
+    ) -> None:
         job_id = str(payload.job_id)
         customer_id = str(payload.customer_id)
 
@@ -186,6 +200,7 @@ class Orchestrator:
                 customer_id=customer_id,
                 job_id=job_id,
             )
+            await stop_heartbeat()
             await self.backend.update_scan_status(
                 job_id,
                 ScanJobStatus.FAILED,
@@ -235,6 +250,7 @@ class Orchestrator:
                     confirmed=len(confirmed_exposures),
                     sources_unchecked=unchecked,
                 )
+                await stop_heartbeat()
                 await self.backend.update_scan_status(
                     job_id,
                     ScanJobStatus.FAILED,
@@ -262,6 +278,7 @@ class Orchestrator:
                 sources_unchecked=unchecked,
             )
 
+            await stop_heartbeat()
             await self.backend.update_scan_status(
                 job_id,
                 ScanJobStatus.COMPLETED,
@@ -278,6 +295,7 @@ class Orchestrator:
             # Type only: exception text from HTTP/LLM libraries can embed URLs, and the URLs
             # embed the customer's name. This message is stored on the job and shown to them.
             log.error("job_failed", job_id=job_id, error_type=type(exc).__name__)
+            await stop_heartbeat()
             await self.backend.update_scan_status(
                 job_id,
                 ScanJobStatus.FAILED,
