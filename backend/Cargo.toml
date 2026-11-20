@@ -65,7 +65,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
 # Config
-config = "0.14"
+config = "0.15"
 dotenvy = "0.15"
 
 # Error handling
