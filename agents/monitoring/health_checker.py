@@ -135,7 +135,7 @@ class BrokerHealthChecker:
             result.error_type = "http_error"
             result.error_message = f"HTTP {exc.response.status_code}"
 
-        except httpx.SSLError as exc:
+        except httpx.SSLError:
             result.has_ssl_error = True
             result.error_type = "ssl_error"
             result.error_message = "SSL certificate error"

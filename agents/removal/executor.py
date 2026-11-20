@@ -30,14 +30,12 @@ from tenacity import (
 
 from shared.models import RemovalProcedure, IdentityContext
 from removal.handlers import get_handler
-from shared.browser_stealth import BrowserStealth, get_fingerprint_rotator
 from shared.captcha_session import get_captcha_session_manager
 from shared.backend_client import BackendClient
 from shared.config import get_config
 from shared.evidence_storage import get_evidence_storage
 from shared.metrics import get_metrics_collector
 from shared.rate_limiter import get_rate_limiter
-from removal.handlers import get_handler
 
 log = structlog.get_logger()
 
@@ -264,22 +262,22 @@ class RemovalExecutor:
         # Get site-specific handler (get_handler returns an instance, not a class)
         handler = get_handler(procedure.source_name, procedure.handler_class)
 
-        # Phase 3: Browser fingerprinting improvements
-        fingerprint_rotator = get_fingerprint_rotator()
-        user_agent = fingerprint_rotator.get_user_agent_for_broker(procedure.source_name)
-
         async with async_playwright() as p:
+            # An ordinary, openly automated Chromium. It keeps the browser's own user agent (which
+            # says it is headless), reports `navigator.webdriver` truthfully, and does nothing to
+            # look like a person. A site that refuses it is reported as refusing (see
+            # `_refusal_reason`), and the customer is pointed to the manual guide. Making the
+            # browser pass as human would defeat the sites' own bot protection, which this
+            # product does not do (see README, "Removal automation is honest").
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
-                    "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
-                    "--no-sandbox",
+                    "--no-sandbox",  # the container's own isolation replaces Chromium's sandbox
                 ]
             )
             try:
-                # Use stealth context instead of plain new_page
-                context = await BrowserStealth.configure_stealth_context(browser, user_agent)
+                context = await browser.new_context()
                 page = await context.new_page()
 
                 # Navigate to opt-out page

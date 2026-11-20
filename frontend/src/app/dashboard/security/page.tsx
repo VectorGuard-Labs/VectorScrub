@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import {
+  changePassword,
   disableMfa,
   enableMfa,
   endSession,
@@ -88,6 +89,7 @@ export default function SecurityPage() {
           </p>
         )}
 
+        <PasswordSection mfaEnabled={Boolean(mfa?.enabled)} onChanged={refresh} />
         {mfa && <MfaSection status={mfa} onChanged={refresh} />}
         <SessionsSection sessions={sessions} onChanged={refresh} />
       </div>
@@ -323,6 +325,76 @@ function SessionsSection({ sessions, onChanged }: { sessions: SessionInfo[]; onC
           {error}
         </p>
       )}
+    </section>
+  );
+}
+
+function PasswordSection({ mfaEnabled, onChanged }: { mfaEnabled: boolean; onChanged: () => Promise<void> }) {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [again, setAgain] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    setDone(false);
+    if (next !== again) {
+      setError("The two new passwords are not the same.");
+      return;
+    }
+    if (next.length < 12) {
+      setError("Use at least 12 characters. A few random words make a good password.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await changePassword(current, next, code.trim() || undefined);
+      setCurrent("");
+      setNext("");
+      setAgain("");
+      setCode("");
+      setDone(true);
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not change the password. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="bg-gray-900 border border-gray-800 rounded-2xl p-6 mb-8" data-testid="password-section">
+      <h2 className="text-lg font-semibold text-white mb-2">Password</h2>
+      <p className="text-gray-400 text-sm mb-4">
+        Changing it signs you out everywhere else.
+      </p>
+      <form onSubmit={submit} className="space-y-3">
+        <label htmlFor="pw-current" className="block text-xs text-gray-400">Current password</label>
+        <input id="pw-current" type="password" autoComplete="current-password" required value={current}
+          onChange={(e) => setCurrent(e.target.value)} className={INPUT} />
+        <label htmlFor="pw-new" className="block text-xs text-gray-400">New password (at least 12 characters)</label>
+        <input id="pw-new" type="password" autoComplete="new-password" required minLength={12} value={next}
+          onChange={(e) => setNext(e.target.value)} className={INPUT} />
+        <label htmlFor="pw-again" className="block text-xs text-gray-400">New password again</label>
+        <input id="pw-again" type="password" autoComplete="new-password" required value={again}
+          onChange={(e) => setAgain(e.target.value)} className={INPUT} />
+        {mfaEnabled && (
+          <>
+            <label htmlFor="pw-code" className="block text-xs text-gray-400">Code from your authenticator app</label>
+            <input id="pw-code" type="text" inputMode="numeric" autoComplete="one-time-code" required value={code}
+              onChange={(e) => setCode(e.target.value)} className={INPUT} />
+          </>
+        )}
+        <button type="submit" disabled={busy || !current || !next || !again} className={PRIMARY}>
+          {busy ? "Changing…" : "Change password"}
+        </button>
+        {done && <p role="status" className="text-green-300 text-sm">Password changed. Your other sessions were signed out.</p>}
+        {error && <p role="alert" className="text-red-400 text-sm">{error}</p>}
+      </form>
     </section>
   );
 }

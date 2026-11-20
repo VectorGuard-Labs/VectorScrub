@@ -161,6 +161,20 @@ async function checked<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** Changes the password. Ends the customer's other sessions. A wrong password is a 401 for the form. */
+export async function changePassword(currentPassword: string, newPassword: string, mfaCode?: string): Promise<void> {
+  const res = await csrfFetch(`${BASE}/me/password`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(
+      mfaCode
+        ? { current_password: currentPassword, new_password: newPassword, mfa_code: mfaCode }
+        : { current_password: currentPassword, new_password: newPassword }
+    ),
+  });
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+}
+
 export async function getMfaStatus(): Promise<MfaStatus> {
   const res = await csrfFetch(`${BASE}/me/mfa`, { headers: jsonHeaders() });
   return handleResponse<MfaStatus>(res);

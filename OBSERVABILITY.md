@@ -66,6 +66,11 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:8080']
     metrics_path: '/api/v1/metrics'
+    # The endpoint is closed unless METRICS_TOKEN is set on the backend (it answers 404 outside
+    # development without one). Put the same value in this file, readable by Prometheus only.
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/vectorscrub-metrics-token
 ```
 
 3. **Access Prometheus UI:**

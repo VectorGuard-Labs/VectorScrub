@@ -8,6 +8,14 @@ customers.
 
 Last checked against the code: 2026-11-18.
 
+## Decisions recorded (owner, 2026-11-18)
+
+- **Age (18):** counsel will confirm it, together with the review of the legal pages and the refund wording.
+- **Existing accounts:** nothing to do. The service is a prototype and no real customer has registered, so no account lacks the age confirmation. **Revisit this before the first real customer is let in**: any account created before that point should be deleted rather than carried forward.
+- **Postal address:** `VectorGuard Labs, 915 Wilshire Blvd, 7th Floor, Los Angeles, CA 90017`, set as `POSTAL_ADDRESS` in the local `.env` and `frontend/.env.local`, and shown in the page footers. **Set the same value in the production environment** (it is passed through `infra/docker/docker-compose.yml`; the `.env` files are not committed). Confirm you can actually receive mail there: a suite address that is a mail drop counts only if it is a CMRA/PO-box-style address you have access to.
+- **DMCA agent:** the owner will register it; until the four `DMCA_AGENT_*` values are set, the page sends notices to the contact email.
+- **Marketing email:** none will be sent for now. Nothing in the code can send one.
+
 ## 1. Age gate
 
 - **Done in code.** Registration needs a tick on "I am 18 years old or older". The API refuses a
@@ -18,10 +26,7 @@ Last checked against the code: 2026-11-18.
   `2026-11-pilot-3`.
 - **Limits.** It is a declaration. No date of birth is asked at signup (data minimisation). Accounts
   created before this change have no `adult_confirmed_at`.
-- **You:** decide the age (18 is used because a paid subscription is a contract and the service handles
-  sensitive data; COPPA's line is 13 and US state laws put teen protections at 16, so 18 clears all of
-  them). Have counsel confirm. Decide what to do about existing accounts: either leave them (they
-  accepted earlier terms), or ask them to confirm on next sign-in (not built).
+- **Age:** 18 is used because a paid subscription is a contract and the service handles sensitive data; COPPA's line is 13 and US state laws put teen protections at 16, so 18 clears all of them. Counsel to confirm (see Decisions). Existing accounts: none are real (see Decisions).
 - **Process:** if anyone reports a minor's account, run `vectorscrub erase-account <email>` and note the
   date.
 
@@ -68,7 +73,7 @@ Last checked against the code: 2026-11-18.
     only a hash of the address). EU/UK/Canada need prior consent.
   - Send marketing from a different address and sending domain than security mail, with SPF, DKIM,
     DMARC.
-- **You:** set `POSTAL_ADDRESS` (a street address or registered PO box/CMRA you can receive mail at).
+- **Done:** `POSTAL_ADDRESS` is set locally (see Decisions); set it in production too.
 
 ## 5. Renewal terms beside the Subscribe button
 

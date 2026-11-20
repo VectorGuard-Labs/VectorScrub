@@ -11,7 +11,6 @@ use uuid::Uuid;
 use validator::Validate;
 
 use super::error::internal_error;
-use crate::crypto::MasterKey;
 use crate::db::AppState;
 use crate::middleware::auth_extractor::AgentAuth;
 use crate::models::customer::CleartextIdentity;
@@ -156,7 +155,7 @@ pub async fn record_exposure(
     }
 
     // The link can contain the person's name: store it sealed with their key.
-    let sealed_url = url_vault::seal(&master(&state)?, req.customer_id, &req.source_url).map_err(internal_error)?;
+    let sealed_url = url_vault::seal(&state.keys, req.customer_id, &req.source_url).await.map_err(internal_error)?;
     exposure_svc::record_exposure(
         &state.pool,
         req.customer_id,
@@ -218,10 +217,6 @@ fn access_error(e: AccessError) -> (StatusCode, String) {
     }
 }
 
-fn master(state: &AppState) -> Result<MasterKey, (StatusCode, String)> {
-    MasterKey::from_base64(&state.config.master_key_b64).map_err(internal_error)
-}
-
 /// POST /api/v1/internal/identity
 /// Identity for a scan job. Requires the job-scoped token that was minted when the job
 /// was dispatched, and the job must still be queued or running.
@@ -234,7 +229,7 @@ pub async fn scan_identity(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let identity = identity_access::release_for_scan(
         &state.pool,
-        &master(&state)?,
+        &state.keys,
         req.customer_id,
         req.job_id,
         &req.identity_token,
@@ -252,7 +247,7 @@ pub async fn removal_identity(
     State(state): State<AppState>,
     Path(request_id): Path<Uuid>,
 ) -> Result<Json<IdentityResponse>, (StatusCode, String)> {
-    let identity = identity_access::release_for_removal(&state.pool, &master(&state)?, request_id)
+    let identity = identity_access::release_for_removal(&state.pool, &state.keys, request_id)
         .await
         .map_err(access_error)?;
     Ok(Json(IdentityResponse::from(&identity)))
@@ -266,7 +261,7 @@ pub async fn monitoring_identity(
     State(state): State<AppState>,
     Path(exposure_id): Path<Uuid>,
 ) -> Result<Json<IdentityResponse>, (StatusCode, String)> {
-    let identity = identity_access::release_for_monitoring(&state.pool, &master(&state)?, exposure_id)
+    let identity = identity_access::release_for_monitoring(&state.pool, &state.keys, exposure_id)
         .await
         .map_err(access_error)?;
     Ok(Json(IdentityResponse::from(&identity)))
@@ -347,7 +342,7 @@ pub async fn exposures_due_for_monitoring(
     let mut exposures = monitoring_svc::list_exposures_due_for_monitoring(&state.pool, q.limit())
         .await
         .map_err(db_error)?;
-    url_vault::open_all(&master(&state)?, &mut exposures).map_err(internal_error)?;
+    url_vault::open_all(&state.keys, &mut exposures).await.map_err(internal_error)?;
     Ok(Json(DueExposuresResponse { exposures }))
 }
 
@@ -375,7 +370,7 @@ pub async fn removals_due_for_verification(
     let mut requests = monitoring_svc::list_removals_due_for_verification(&state.pool, q.limit())
         .await
         .map_err(db_error)?;
-    url_vault::open_all(&master(&state)?, &mut requests).map_err(internal_error)?;
+    url_vault::open_all(&state.keys, &mut requests).await.map_err(internal_error)?;
     Ok(Json(DueVerificationsResponse { requests }))
 }
 

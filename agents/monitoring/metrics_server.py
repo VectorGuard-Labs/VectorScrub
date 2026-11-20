@@ -193,10 +193,14 @@ def main():
     import os
 
     port = int(os.environ.get("METRICS_PORT", "9090"))
-    log.info("starting_metrics_server", port=port)
+    # Loopback unless an operator says otherwise: these endpoints have no authentication, so they
+    # must not listen on every interface by default. Set METRICS_HOST=0.0.0.0 only on a network
+    # that nothing untrusted can reach.
+    host = os.environ.get("METRICS_HOST", "127.0.0.1")
+    log.info("starting_metrics_server", host=host, port=port)
 
     app = create_app()
-    web.run_app(app, host="0.0.0.0", port=port)
+    web.run_app(app, host=host, port=port)
 
 
 if __name__ == "__main__":

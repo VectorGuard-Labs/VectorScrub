@@ -7,7 +7,6 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::error::internal_error;
-use crate::crypto::MasterKey;
 use crate::db::AppState;
 use crate::middleware::auth_extractor::AuthenticatedCustomer;
 use crate::services::scan::ScanError;
@@ -33,12 +32,11 @@ pub async fn initiate(
         ));
     }
 
-    let master = MasterKey::from_base64(&state.config.master_key_b64).map_err(internal_error)?;
 
     let job = scan_svc::initiate_scan(
         &state.pool,
         &state.redis,
-        &master,
+        &state.keys,
         auth.id,
         &customer.subscription_tier,
     )

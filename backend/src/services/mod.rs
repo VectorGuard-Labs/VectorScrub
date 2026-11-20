@@ -11,6 +11,8 @@ pub mod customer;
 pub mod deletion;
 pub mod exposure;
 pub mod identity_access;
+pub mod keys;
+pub mod kms_migrate;
 pub mod login_throttle;
 pub mod mfa;
 pub mod monitoring;

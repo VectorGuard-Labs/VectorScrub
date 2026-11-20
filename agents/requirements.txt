@@ -26,6 +26,10 @@ redis==5.2.1
 spacy==3.8.18
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
 
+# Encrypts stored evidence (shared/evidence_storage.py). It was imported but never declared, so a
+# container built from this file could not start.
+cryptography==50.0.0
+
 # Data handling
 pydantic==2.11.4
 pydantic-settings==2.8.1

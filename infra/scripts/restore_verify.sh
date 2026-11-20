@@ -18,9 +18,13 @@
 # Settings (environment):
 #   RESTORE_ADMIN_URL         libpq URL of a Postgres server where a database may be created.
 #                             Its database part is only used to connect (normally "postgres").
-#   MASTER_ENCRYPTION_KEY     the master key the backup was made under. Required, unless
-#                             RESTORE_SKIP_DECRYPT_CHECK=1, in which case the result is only
-#                             "restores", NOT "usable", and the script says so.
+#   KEY_PROVIDER, PYHSM_SOCKET, PYHSM_IPC_SECRET (or PYHSM_IPC_SECRET_FILE), PYHSM_KEY_ID
+#                             the key service the backup's customer keys belong to. For the drill
+#                             to mean anything, point these at a PyHSM started from the RESTORED
+#                             KEYSTORE BACKUP (see docs/runbooks/key-service.md), not at the live
+#                             one. With KEY_PROVIDER=env (development) set MASTER_ENCRYPTION_KEY.
+#                             Required, unless RESTORE_SKIP_DECRYPT_CHECK=1, in which case the
+#                             result is only "restores", NOT "usable", and the script says so.
 #   VECTORSCRUB_BIN           the backend binary (default: `vectorscrub` on PATH, then
 #                             backend/target/release/vectorscrub, then .../debug/vectorscrub).
 #   PG_BIN_DIR                directory holding psql/pg_restore, if PATH has older ones.
@@ -35,8 +39,13 @@ die() { echo "restore-verify: $*" >&2; exit 1; }
 backup="$1"
 [[ -f "$backup" ]] || die "no such file: $backup"
 [[ -n "${RESTORE_ADMIN_URL:-}" ]] || die "set RESTORE_ADMIN_URL (a server where a scratch database may be created)"
-if [[ "${RESTORE_SKIP_DECRYPT_CHECK:-0}" != "1" && -z "${MASTER_ENCRYPTION_KEY:-}" ]]; then
-  die "set MASTER_ENCRYPTION_KEY (or RESTORE_SKIP_DECRYPT_CHECK=1 to only test that the file restores)"
+if [[ "${RESTORE_SKIP_DECRYPT_CHECK:-0}" != "1" ]]; then
+  provider="$(printf '%s' "${KEY_PROVIDER:-env}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$provider" == "pyhsm" ]]; then
+    [[ -n "${PYHSM_IPC_SECRET:-}${PYHSM_IPC_SECRET_FILE:-}" ]] || die "KEY_PROVIDER=pyhsm needs PYHSM_IPC_SECRET (or PYHSM_IPC_SECRET_FILE) and PYHSM_SOCKET"
+  else
+    [[ -n "${MASTER_ENCRYPTION_KEY:-}" ]] || die "set the key service (KEY_PROVIDER=pyhsm, PYHSM_SOCKET, PYHSM_IPC_SECRET) or MASTER_ENCRYPTION_KEY, or RESTORE_SKIP_DECRYPT_CHECK=1 to only test that the file restores"
+  fi
 fi
 
 PSQL="${PG_BIN_DIR:+$PG_BIN_DIR/}psql"

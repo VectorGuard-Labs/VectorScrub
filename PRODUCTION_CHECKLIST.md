@@ -34,7 +34,7 @@ Verify all required variables are set:
 - [ ] `DATABASE_URL` - PostgreSQL connection string
 - [ ] `REDIS_URL` - Redis connection string (with password)
 - [ ] `JWT_SECRET` - Strong random secret (48+ bytes)
-- [ ] `MASTER_ENCRYPTION_KEY` - AES key (32 bytes base64)
+- [ ] `PYHSM_IPC_SECRET` and the PyHSM keystore password (`PYHSM_PASSWORD_FILE`). No `MASTER_ENCRYPTION_KEY` in production.
 - [ ] `AGENT_API_KEY` - Internal API authentication
 - [ ] `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` - LLM provider
 - [ ] `SMTP_HOST`, `SMTP_USERNAME`, `SMTP_PASSWORD` - Email service
@@ -45,7 +45,7 @@ Verify all required variables are set:
 
 - [ ] `OTLP_ENDPOINT` - OpenTelemetry for distributed tracing
 - [ ] `DROP_API_KEY` - California DROP integration
-- [ ] `MASTER_ENCRYPTION_KEY` injected from a secrets manager (there is no HSM/KMS integration in the code)
+- [ ] PyHSM IPC secret and keystore password injected from a secrets manager; `vectorscrub kms status` shows the key present; keystore backup taken and the recovery drill run (`docs/runbooks/key-service.md`)
 - [ ] `JWT_SECRET` and `AGENT_API_KEY` each at least 32 characters (startup rejects shorter)
 - [ ] `TRUST_PROXY_HEADERS=true` only if the proxy overwrites `X-Forwarded-For`/`X-Real-IP`; `/metrics` restricted at the proxy
 
@@ -102,7 +102,7 @@ Verify all required variables are set:
 
 ### Backup & Recovery
 
-Procedure, scripts and the drill log: [docs/runbooks/backup-and-restore.md](docs/runbooks/backup-and-restore.md). The master key is part of the backup: without it the data cannot be opened.
+Procedure, scripts and the drill log: [docs/runbooks/backup-and-restore.md](docs/runbooks/backup-and-restore.md). The PyHSM keystore is part of the backup: without it the data cannot be opened.
 
 - [ ] Database backup tested and working
 - [ ] Backup restoration tested (`restore_verify.sh` reports "usable" against the off-site copy, with the key from the secrets manager)

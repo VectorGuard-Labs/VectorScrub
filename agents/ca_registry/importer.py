@@ -328,7 +328,7 @@ def diff_registries(old: list[dict], new: list[CaBroker]) -> RegistryDiff:
     new_by = {b.id: asdict(b) for b in new}
     added = sorted(new_by[i]["name"] for i in new_by.keys() - old_by.keys())
     removed = sorted(old_by[i]["name"] for i in old_by.keys() - new_by.keys())
-    sites = rights = deletion = same = 0
+    deletion = same = 0
     sites_names: list[str] = []
     rights_names: list[str] = []
     for i in new_by.keys() & old_by.keys():

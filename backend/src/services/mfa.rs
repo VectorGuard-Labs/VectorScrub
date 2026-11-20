@@ -5,7 +5,7 @@
 //! and returns the recovery codes once. From then on login needs `verify` to succeed, and
 //! `disable` removes everything.
 //!
-//! The secret is encrypted with the customer's own key (same scheme as their identity data).
+//! The secret is encrypted with the customer's own data key (same scheme as their identity data, its own field key).
 //! Recovery codes are stored only as hashes: they are 50 random bits, single use, and every
 //! failed attempt goes through the login lockout (see api/auth.rs), so an unsalted SHA-256 is
 //! enough. Both checks are atomic in the database, so two simultaneous requests cannot spend
@@ -18,7 +18,8 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::crypto::{self, MasterKey};
+use crate::crypto::envelope::purpose;
+use crate::services::keys::KeyService;
 use crate::services::totp;
 
 /// Shown in the authenticator app next to the account.
@@ -91,13 +92,13 @@ pub async fn status(pool: &PgPool, customer_id: Uuid) -> Result<Status, sqlx::Er
 /// it off is a separate, deliberate step.
 pub async fn begin_setup(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
     account_label: &str,
 ) -> Result<Setup, MfaError> {
     let secret = totp::generate_secret();
-    let key = crypto::derive_customer_key(master, customer_id);
-    let blob = crypto::encrypt(&key, &secret).map_err(|e| MfaError::Crypto(e.to_string()))?;
+    let ck = keys.customer(customer_id).await.map_err(|e| MfaError::Crypto(e.to_string()))?;
+    let blob = ck.seal(purpose::MFA_SECRET, &secret).map_err(|e| MfaError::Crypto(e.to_string()))?;
     let r = sqlx::query(
         "INSERT INTO customer_mfa (customer_id, secret_enc) VALUES ($1, $2) \
          ON CONFLICT (customer_id) DO UPDATE \
@@ -117,7 +118,7 @@ pub async fn begin_setup(
 /// Load and decrypt the customer's secret, with the newest step already used.
 async fn load_secret(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
     enabled: bool,
 ) -> Result<Option<(Vec<u8>, i64)>, MfaError> {
@@ -130,8 +131,8 @@ async fn load_secret(
     .fetch_optional(pool)
     .await?;
     let Some((blob, last)) = row else { return Ok(None) };
-    let key = crypto::derive_customer_key(master, customer_id);
-    let secret = crypto::decrypt(&key, &blob).map_err(|e| MfaError::Crypto(e.to_string()))?;
+    let ck = keys.customer(customer_id).await.map_err(|e| MfaError::Crypto(e.to_string()))?;
+    let secret = ck.open(purpose::MFA_SECRET, &blob).map_err(|e| MfaError::Crypto(e.to_string()))?;
     Ok(Some((secret, last)))
 }
 
@@ -156,11 +157,11 @@ fn hash_recovery(code: &str) -> String {
 /// codes. This is the only time they are shown.
 pub async fn confirm_setup(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
     code: &str,
 ) -> Result<Vec<String>, MfaError> {
-    let Some((secret, last)) = load_secret(pool, master, customer_id, false).await? else {
+    let Some((secret, last)) = load_secret(pool, keys, customer_id, false).await? else {
         return Err(if is_enabled(pool, customer_id).await? { MfaError::AlreadyEnabled } else { MfaError::NotStarted });
     };
     let step = totp::verify(&secret, code, now_unix(), last).ok_or(MfaError::BadCode)?;
@@ -197,13 +198,13 @@ pub async fn confirm_setup(
 /// digits) or a recovery code (which is spent). `Ok(None)` means the code was wrong.
 pub async fn verify(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
     code: &str,
 ) -> Result<Option<Verified>, MfaError> {
     let normalized = normalize_recovery(code);
     if normalized.len() == totp::DIGITS && normalized.bytes().all(|b| b.is_ascii_digit()) {
-        let Some((secret, last)) = load_secret(pool, master, customer_id, true).await? else {
+        let Some((secret, last)) = load_secret(pool, keys, customer_id, true).await? else {
             return Ok(None);
         };
         let Some(step) = totp::verify(&secret, &normalized, now_unix(), last) else {
@@ -249,8 +250,8 @@ mod tests {
     use super::*;
     use crate::test_support as ts;
 
-    fn master() -> MasterKey {
-        MasterKey::from_base64(&ts::master_key_b64()).unwrap()
+    fn master(pool: &PgPool) -> KeyService {
+        ts::key_service(pool.clone())
     }
 
     /// The code the customer's app would show now, from the secret `begin_setup` returned.
@@ -260,8 +261,8 @@ mod tests {
 
     async fn enabled_customer(pool: &PgPool) -> (Uuid, Setup, Vec<String>) {
         let c = ts::customer(pool, "free", false).await;
-        let setup = begin_setup(pool, &master(), c, "a@example.com").await.unwrap();
-        let codes = confirm_setup(pool, &master(), c, &app_code(&setup)).await.unwrap();
+        let setup = begin_setup(pool, &master(pool), c, "a@example.com").await.unwrap();
+        let codes = confirm_setup(pool, &master(pool), c, &app_code(&setup)).await.unwrap();
         (c, setup, codes)
     }
 
@@ -287,20 +288,20 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn setup_protects_nothing_until_a_code_is_confirmed(pool: PgPool) {
         let c = ts::customer(&pool, "free", false).await;
-        let setup = begin_setup(&pool, &master(), c, "a@example.com").await.unwrap();
+        let setup = begin_setup(&pool, &master(&pool), c, "a@example.com").await.unwrap();
         assert!(!is_enabled(&pool, c).await.unwrap());
-        assert_eq!(verify(&pool, &master(), c, &app_code(&setup)).await.unwrap(), None, "not on yet");
+        assert_eq!(verify(&pool, &master(&pool), c, &app_code(&setup)).await.unwrap(), None, "not on yet");
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn confirming_with_a_wrong_code_leaves_it_off(pool: PgPool) {
         let c = ts::customer(&pool, "free", false).await;
-        let setup = begin_setup(&pool, &master(), c, "a@example.com").await.unwrap();
+        let setup = begin_setup(&pool, &master(&pool), c, "a@example.com").await.unwrap();
         let right = app_code(&setup);
         let wrong = if right == "123456" { "654321" } else { "123456" };
-        assert!(matches!(confirm_setup(&pool, &master(), c, wrong).await, Err(MfaError::BadCode)));
+        assert!(matches!(confirm_setup(&pool, &master(&pool), c, wrong).await, Err(MfaError::BadCode)));
         assert!(!is_enabled(&pool, c).await.unwrap());
-        assert!(matches!(confirm_setup(&pool, &master(), ts::customer(&pool, "free", false).await, &right).await, Err(MfaError::NotStarted)));
+        assert!(matches!(confirm_setup(&pool, &master(&pool), ts::customer(&pool, "free", false).await, &right).await, Err(MfaError::NotStarted)));
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -335,40 +336,40 @@ mod tests {
         sqlx::query("UPDATE customer_mfa SET last_used_step = 0 WHERE customer_id = $1")
             .bind(c).execute(&pool).await.unwrap();
         let code = app_code(&setup);
-        assert_eq!(verify(&pool, &master(), c, &code).await.unwrap(), Some(Verified::Totp));
-        assert_eq!(verify(&pool, &master(), c, &code).await.unwrap(), None, "the same code twice is a replay");
+        assert_eq!(verify(&pool, &master(&pool), c, &code).await.unwrap(), Some(Verified::Totp));
+        assert_eq!(verify(&pool, &master(&pool), c, &code).await.unwrap(), None, "the same code twice is a replay");
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn the_code_used_to_confirm_setup_cannot_be_used_to_log_in(pool: PgPool) {
         let c = ts::customer(&pool, "free", false).await;
-        let setup = begin_setup(&pool, &master(), c, "a@example.com").await.unwrap();
+        let setup = begin_setup(&pool, &master(&pool), c, "a@example.com").await.unwrap();
         let code = app_code(&setup);
-        confirm_setup(&pool, &master(), c, &code).await.unwrap();
-        assert_eq!(verify(&pool, &master(), c, &code).await.unwrap(), None);
+        confirm_setup(&pool, &master(&pool), c, &code).await.unwrap();
+        assert_eq!(verify(&pool, &master(&pool), c, &code).await.unwrap(), None);
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn a_wrong_or_malformed_code_is_refused(pool: PgPool) {
         let (c, _, _) = enabled_customer(&pool).await;
         for bad in ["", "000000x", "12345", "ABCDE-FGHJK", "not a code", "'; DROP TABLE customers;--"] {
-            assert_eq!(verify(&pool, &master(), c, bad).await.unwrap(), None, "{bad:?}");
+            assert_eq!(verify(&pool, &master(&pool), c, bad).await.unwrap(), None, "{bad:?}");
         }
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn a_recovery_code_works_exactly_once(pool: PgPool) {
         let (c, _, codes) = enabled_customer(&pool).await;
-        assert_eq!(verify(&pool, &master(), c, &codes[0]).await.unwrap(), Some(Verified::RecoveryCode));
-        assert_eq!(verify(&pool, &master(), c, &codes[0]).await.unwrap(), None, "spent");
-        assert_eq!(verify(&pool, &master(), c, &codes[1].to_lowercase().replace('-', " ")).await.unwrap(), Some(Verified::RecoveryCode));
+        assert_eq!(verify(&pool, &master(&pool), c, &codes[0]).await.unwrap(), Some(Verified::RecoveryCode));
+        assert_eq!(verify(&pool, &master(&pool), c, &codes[0]).await.unwrap(), None, "spent");
+        assert_eq!(verify(&pool, &master(&pool), c, &codes[1].to_lowercase().replace('-', " ")).await.unwrap(), Some(Verified::RecoveryCode));
         assert_eq!(status(&pool, c).await.unwrap().recovery_codes_remaining, RECOVERY_CODE_COUNT as i64 - 2);
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn simultaneous_uses_of_one_recovery_code_succeed_once(pool: PgPool) {
         let (c, _, codes) = enabled_customer(&pool).await;
-        let m = master();
+        let m = master(&pool);
         let (a, b, d, e) = tokio::join!(
             verify(&pool, &m, c, &codes[0]),
             verify(&pool, &m, c, &codes[0]),
@@ -384,7 +385,7 @@ mod tests {
         let (c, setup, _) = enabled_customer(&pool).await;
         sqlx::query("UPDATE customer_mfa SET last_used_step = 0 WHERE customer_id = $1")
             .bind(c).execute(&pool).await.unwrap();
-        let (m, code) = (master(), app_code(&setup));
+        let (m, code) = (master(&pool), app_code(&setup));
         let (a, b, d, e) = tokio::join!(
             verify(&pool, &m, c, &code),
             verify(&pool, &m, c, &code),
@@ -399,25 +400,25 @@ mod tests {
     async fn one_customers_recovery_code_does_not_work_for_another(pool: PgPool) {
         let (_, _, codes) = enabled_customer(&pool).await;
         let (other, _, _) = enabled_customer(&pool).await;
-        assert_eq!(verify(&pool, &master(), other, &codes[0]).await.unwrap(), None);
+        assert_eq!(verify(&pool, &master(&pool), other, &codes[0]).await.unwrap(), None);
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn setup_cannot_be_restarted_while_on(pool: PgPool) {
         let (c, setup, _) = enabled_customer(&pool).await;
-        assert!(matches!(begin_setup(&pool, &master(), c, "a@example.com").await, Err(MfaError::AlreadyEnabled)));
-        assert!(matches!(confirm_setup(&pool, &master(), c, &app_code(&setup)).await, Err(MfaError::AlreadyEnabled)));
+        assert!(matches!(begin_setup(&pool, &master(&pool), c, "a@example.com").await, Err(MfaError::AlreadyEnabled)));
+        assert!(matches!(confirm_setup(&pool, &master(&pool), c, &app_code(&setup)).await, Err(MfaError::AlreadyEnabled)));
         assert!(is_enabled(&pool, c).await.unwrap());
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn restarting_an_unconfirmed_setup_replaces_the_secret(pool: PgPool) {
         let c = ts::customer(&pool, "free", false).await;
-        let first = begin_setup(&pool, &master(), c, "a@example.com").await.unwrap();
-        let second = begin_setup(&pool, &master(), c, "a@example.com").await.unwrap();
+        let first = begin_setup(&pool, &master(&pool), c, "a@example.com").await.unwrap();
+        let second = begin_setup(&pool, &master(&pool), c, "a@example.com").await.unwrap();
         assert_ne!(first.secret, second.secret);
-        assert!(confirm_setup(&pool, &master(), c, &app_code(&first)).await.is_err(), "the old secret no longer works");
-        assert!(confirm_setup(&pool, &master(), c, &app_code(&second)).await.is_ok());
+        assert!(confirm_setup(&pool, &master(&pool), c, &app_code(&first)).await.is_err(), "the old secret no longer works");
+        assert!(confirm_setup(&pool, &master(&pool), c, &app_code(&second)).await.is_ok());
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -425,18 +426,18 @@ mod tests {
         let (c, _, codes) = enabled_customer(&pool).await;
         disable(&pool, c).await.unwrap();
         assert!(!is_enabled(&pool, c).await.unwrap());
-        assert_eq!(verify(&pool, &master(), c, &codes[0]).await.unwrap(), None);
+        assert_eq!(verify(&pool, &master(&pool), c, &codes[0]).await.unwrap(), None);
         let rows: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM customer_mfa) + (SELECT count(*) FROM mfa_recovery_codes)")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(rows, 0);
         // and it can be set up again from scratch
-        assert!(begin_setup(&pool, &master(), c, "a@example.com").await.is_ok());
+        assert!(begin_setup(&pool, &master(&pool), c, "a@example.com").await.is_ok());
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn a_secret_cannot_be_read_with_the_wrong_master_key(pool: PgPool) {
         let (c, setup, _) = enabled_customer(&pool).await;
-        let other = MasterKey::from_base64(&ts::other_master_key_b64()).unwrap();
+        let other = ts::key_service_with_master(pool.clone(), &ts::other_master_key_b64());
         assert!(matches!(verify(&pool, &other, c, &app_code(&setup)).await, Err(MfaError::Crypto(_))));
     }
 

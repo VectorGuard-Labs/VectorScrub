@@ -85,7 +85,9 @@ REDIS_PASSWORD=<generated-strong-password>
 
 # API Security
 JWT_SECRET=<generated-48-byte-base64>
-MASTER_ENCRYPTION_KEY=<generated-32-byte-base64>
+PYHSM_IPC_SECRET=<openssl rand -hex 32>
+PYHSM_PASSWORD_FILE=/path/to/keystore-password-file   # mode 600; see docs/runbooks/key-service.md
+# MASTER_ENCRYPTION_KEY is not used in production
 AGENT_API_KEY=<generated-random-string>
 
 # Application
@@ -202,42 +204,22 @@ docker compose logs -f
 
 #### Step 4: Set Up Reverse Proxy (Nginx)
 
+Use the tested reference config in [`infra/nginx/`](infra/nginx/README.md). It terminates TLS,
+sends **everything** to the Next.js container (which proxies `/api/v1` to the backend), answers
+404 for `/api/v1/internal`, `/api/v1/metrics` and `/docs`, overwrites `X-Forwarded-For` with the
+real client address, and limits body size and request rates.
+
 ```bash
-# Install Nginx
-apt install nginx certbot python3-certbot-nginx -y
-
-# Create Nginx config
-cat > /etc/nginx/sites-available/vectorscrub <<'EOF'
-server {
-    listen 80;
-    server_name yourdomain.com www.yourdomain.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-EOF
-
-# Enable site
-ln -s /etc/nginx/sites-available/vectorscrub /etc/nginx/sites-enabled/
-nginx -t
-systemctl reload nginx
-
-# Get SSL certificate
-certbot --nginx -d yourdomain.com -d www.yourdomain.com
+apt install nginx certbot -y
+cp infra/nginx/vectorscrub.conf /etc/nginx/conf.d/
+cp infra/nginx/vectorscrub-proxy.inc /etc/nginx/vectorscrub-proxy.inc
+# edit the server name and certificate paths, get a certificate (certbot certonly --webroot ...)
+nginx -t && systemctl reload nginx
 ```
+
+Do not route `/api/` straight to the backend port, and do not use `$proxy_add_x_forwarded_for`
+for requests from the internet: either one hands clients the ability to reach the agent API or
+to choose their own IP address.
 
 ---
 
@@ -504,7 +486,8 @@ kubectl logs -f deployment/vectorscrub-backend -n vectorscrub-production
 
 ```bash
 # Metrics endpoint
-curl https://yourdomain.com/api/v1/metrics
+# Not public: the proxy answers 404. Scrape the backend from the host with the token:
+curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:8080/api/v1/metrics
 
 # Set up Prometheus scraping
 # Add to prometheus.yml:
@@ -525,7 +508,7 @@ scrape_configs:
 
 Use `infra/scripts/backup.sh` (encrypted, verified, copied off the machine, with a heartbeat) and
 test it with `infra/scripts/restore_verify.sh`. Setup, the monthly drill, and what a restore must
-not forget (the master key, erased accounts) are in
+not forget (the PyHSM keystore, erased accounts) are in
 [docs/runbooks/backup-and-restore.md](docs/runbooks/backup-and-restore.md). A plain
 `pg_dump | gzip` is not enough: it is unencrypted personal data, and nothing proves it restores.
 

@@ -8,7 +8,15 @@ pub struct AppConfig {
     pub database_url: String,
     pub redis_url: String,
     pub jwt_secret: String,
-    pub master_key_b64: String,
+    /// The old master key (`MASTER_ENCRYPTION_KEY`). Needed only (a) as the key-encryption key when
+    /// `KEY_PROVIDER=env` (development and tests), and (b) by the one-time migration of data
+    /// written before envelope encryption. With PyHSM it should be absent from the running service.
+    pub master_key_b64: Option<String>,
+    /// Where the key-encryption key lives. See `services::keys`.
+    pub key_provider: KeyProviderConfig,
+    /// How long an unwrapped customer data key stays in memory (`DEK_CACHE_TTL_SECS`, default 300,
+    /// 0 turns the cache off). Shorter means more calls to the key service.
+    pub dek_cache_ttl_secs: u64,
     pub agent_api_key: String,
     pub port: u16,
     pub db_pool_size: u32,
@@ -50,6 +58,59 @@ pub struct AppConfig {
     /// Used to keep a pilot small. The check is not atomic, so a burst of simultaneous
     /// registrations can overshoot by a few.
     pub max_accounts: Option<i64>,
+    /// Bearer token that unlocks `/api/v1/metrics` (`METRICS_TOKEN`, 32+ characters). With no token
+    /// the endpoint answers 404 everywhere except development, so metrics are never public by
+    /// accident.
+    pub metrics_token: Option<String>,
+    /// Serve the agent-only `/internal/*` routes on this separate port (`INTERNAL_PORT`) instead
+    /// of the public one. The public port then does not have those routes at all, so a proxy
+    /// misconfiguration cannot expose them. Unset: one port serves everything (development).
+    pub internal_port: Option<u16>,
+    /// Address the internal listener binds to (`INTERNAL_BIND`, default `0.0.0.0`). A container on
+    /// several networks listens on all of them when bound to every address, so compose binds it to
+    /// the backend's address on the agent-only network and nothing else can reach the port.
+    pub internal_bind: std::net::IpAddr,
+    /// After this many days, the email address, IP address and user agent are cleared from
+    /// `audit_log` rows (`AUDIT_IDENTIFIER_RETENTION_DAYS`, default 180, at least 30). What
+    /// happened and when is kept. Applies to rows of failed logins for emails that never had an
+    /// account too.
+    pub audit_identifier_retention_days: i64,
+}
+
+/// A secret that never appears in `{:?}` output (a derived `Debug` on the config would otherwise
+/// print it into any log line that formats the config).
+#[derive(Clone)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretString(<redacted>)")
+    }
+}
+
+/// Which service holds the key-encryption key that wraps every customer's data key.
+#[derive(Debug, Clone)]
+pub enum KeyProviderConfig {
+    /// A key derived from `MASTER_ENCRYPTION_KEY`, in this process. Development and tests only:
+    /// it is exactly the weakness the key service exists to remove. Refused in production unless
+    /// `KEY_PROVIDER_ALLOW_ENV=true`.
+    Env,
+    /// PyHSM, over its Unix socket. The key-encryption key never enters this process.
+    PyHsm {
+        socket: String,
+        ipc_secret: SecretString,
+        key_id: String,
+        timeout_ms: u64,
+    },
 }
 
 /// A paid plan. Ordered, so the highest of a customer's subscriptions is `max()`.
@@ -212,6 +273,95 @@ fn is_local_origin(origin: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]")
 }
 
+/// Does this Postgres connection URL ask for an encrypted connection? Accepts `sslmode=require`,
+/// `verify-ca` and `verify-full` (in the query string, any case). `prefer` and `allow` can fall back
+/// to plaintext and `disable` is plaintext, so none of them count.
+fn database_url_uses_tls(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else { return false };
+    query.split('&').any(|kv| {
+        kv.split_once('=').is_some_and(|(k, v)| {
+            k.eq_ignore_ascii_case("sslmode")
+                && matches!(v.to_ascii_lowercase().as_str(), "require" | "verify-ca" | "verify-full")
+        })
+    })
+}
+
+/// The settings that decide where customers' data keys come from. Separate from `AppConfig` so the
+/// operator commands (`vectorscrub kms ...`, `verify-backup`) can use them without the rest of the
+/// service's environment.
+#[derive(Debug, Clone)]
+pub struct KeySettings {
+    pub provider: KeyProviderConfig,
+    pub master_key_b64: Option<String>,
+    pub dek_cache_ttl_secs: u64,
+}
+
+impl KeySettings {
+    pub fn from_env() -> Result<Self> {
+        Self::from_lookup(&|key: &str| env::var(key).ok(), false)
+    }
+
+    pub fn from_lookup(get: &impl Fn(&str) -> Option<String>, production: bool) -> Result<Self> {
+        fn env_parse<T: std::str::FromStr>(get: &impl Fn(&str) -> Option<String>, key: &str, default: T) -> Result<T> {
+            match get(key) {
+                Some(v) => v.trim().parse::<T>().map_err(|_| anyhow::anyhow!("{key} has an invalid value")),
+                None => Ok(default),
+            }
+        }
+        let master_key_b64 = get("MASTER_ENCRYPTION_KEY").map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        if let Some(master) = &master_key_b64 {
+            crate::crypto::MasterKey::from_base64(master)
+                .context("MASTER_ENCRYPTION_KEY must be 32 bytes, base64-encoded")?;
+        }
+        let provider = match get("KEY_PROVIDER").map(|v| v.trim().to_ascii_lowercase()).filter(|v| !v.is_empty()).as_deref() {
+            None | Some("env") => {
+                anyhow::ensure!(
+                    master_key_b64.is_some(),
+                    "MASTER_ENCRYPTION_KEY is required when KEY_PROVIDER is env (the default). Use KEY_PROVIDER=pyhsm to keep the key out of this process"
+                );
+                if production {
+                    let allow: bool = env_parse(get, "KEY_PROVIDER_ALLOW_ENV", false)?;
+                    anyhow::ensure!(
+                        allow,
+                        "KEY_PROVIDER=env keeps the master key in this process's environment, which is what the key service exists to avoid. \
+                         Set KEY_PROVIDER=pyhsm in production (KEY_PROVIDER_ALLOW_ENV=true overrides, and is a decision to record)"
+                    );
+                }
+                KeyProviderConfig::Env
+            }
+            Some("pyhsm") => {
+                let secret = match get("PYHSM_IPC_SECRET").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+                    Some(s) => s,
+                    None => {
+                        let path = get("PYHSM_IPC_SECRET_FILE").filter(|v| !v.trim().is_empty())
+                            .context("KEY_PROVIDER=pyhsm needs PYHSM_IPC_SECRET (or PYHSM_IPC_SECRET_FILE)")?;
+                        std::fs::read_to_string(path.trim())
+                            .context("could not read PYHSM_IPC_SECRET_FILE")?
+                            .trim()
+                            .to_string()
+                    }
+                };
+                anyhow::ensure!(secret.len() >= MIN_SECRET_LEN, "PYHSM_IPC_SECRET must be at least {MIN_SECRET_LEN} characters");
+                let key_id = get("PYHSM_KEY_ID").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or_else(|| "vectorscrub-kek".into());
+                anyhow::ensure!(
+                    !key_id.is_empty() && key_id.len() <= 128
+                        && key_id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+                        && key_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+                    "PYHSM_KEY_ID must be 1-128 characters of letters, digits, '.', '_' or '-', starting with a letter or digit"
+                );
+                KeyProviderConfig::PyHsm {
+                    socket: get("PYHSM_SOCKET").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or_else(|| "/run/pyhsm/pyhsm.sock".into()),
+                    ipc_secret: SecretString::new(secret),
+                    key_id,
+                    timeout_ms: env_parse(get, "PYHSM_TIMEOUT_MS", 5000)?,
+                }
+            }
+            Some(_) => anyhow::bail!("KEY_PROVIDER must be env or pyhsm"),
+        };
+        Ok(Self { provider, master_key_b64, dek_cache_ttl_secs: env_parse(get, "DEK_CACHE_TTL_SECS", 300)? })
+    }
+}
+
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| env::var(key).ok())
@@ -270,7 +420,6 @@ impl AppConfig {
         };
 
         let jwt_secret = required("JWT_SECRET")?;
-        let master_key_b64 = required("MASTER_ENCRYPTION_KEY")?;
         let agent_api_key = required("AGENT_API_KEY")?;
 
         // Fail fast on weak or malformed secrets. Messages name the variable, never the value.
@@ -282,19 +431,45 @@ impl AppConfig {
             agent_api_key.len() >= MIN_SECRET_LEN,
             "AGENT_API_KEY must be at least {MIN_SECRET_LEN} characters (generate one with infra/scripts/gen_keys.sh)"
         );
-        crate::crypto::MasterKey::from_base64(&master_key_b64)
-            .context("MASTER_ENCRYPTION_KEY must be 32 bytes, base64-encoded")?;
+        let KeySettings { provider: key_provider, master_key_b64, dek_cache_ttl_secs } =
+            KeySettings::from_lookup(&get, environment == Environment::Production)?;
+
+        // In production the connections to Postgres and Redis must be encrypted, unless the
+        // operator says in so many words that they travel only over a private network they
+        // control (a single host, a private VPC). The override is deliberate and visible.
+        let database_url = required("DATABASE_URL")?;
+        let redis_url = get("REDIS_URL").unwrap_or_else(|| "redis://127.0.0.1:6379".into());
+        if environment == Environment::Production {
+            let allow_db: bool = env_parse(&get, "DATABASE_ALLOW_PLAINTEXT", false)?;
+            anyhow::ensure!(
+                allow_db || database_url_uses_tls(&database_url),
+                "DATABASE_URL must set sslmode=require (or verify-ca / verify-full) in production. \
+                 Set DATABASE_ALLOW_PLAINTEXT=true only if the database is reachable over a private network and nothing else"
+            );
+            let allow_redis: bool = env_parse(&get, "REDIS_ALLOW_PLAINTEXT", false)?;
+            anyhow::ensure!(
+                allow_redis || redis_url.starts_with("rediss://"),
+                "REDIS_URL must use rediss:// in production. \
+                 Set REDIS_ALLOW_PLAINTEXT=true only if Redis is reachable over a private network and nothing else"
+            );
+        }
+        let public_port: u16 = get("PORT")
+            .unwrap_or_else(|| "8080".into())
+            .parse()
+            .context("PORT must be a valid port number")?;
+        if let Some(v) = get("INTERNAL_PORT").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+            anyhow::ensure!(v.parse::<u16>().ok() != Some(public_port), "INTERNAL_PORT must differ from PORT");
+        }
 
         Ok(Self {
-            database_url: required("DATABASE_URL")?,
-            redis_url: get("REDIS_URL").unwrap_or_else(|| "redis://127.0.0.1:6379".into()),
+            database_url,
+            redis_url,
             jwt_secret,
             master_key_b64,
+            key_provider,
+            dek_cache_ttl_secs,
             agent_api_key,
-            port: get("PORT")
-                .unwrap_or_else(|| "8080".into())
-                .parse()
-                .context("PORT must be a valid port number")?,
+            port: public_port,
             db_pool_size: get("DB_POOL_SIZE")
                 .unwrap_or_else(|| "10".into())
                 .parse()
@@ -329,6 +504,30 @@ impl AppConfig {
             scan_max_attempts: env_parse(&get, "SCAN_MAX_ATTEMPTS", 3)?,
             stripe: StripeConfig::from_lookup(&get)?,
             deletion_requests_enabled: env_parse(&get, "DELETION_REQUESTS_ENABLED", false)?,
+            metrics_token: match get("METRICS_TOKEN").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+                Some(t) => {
+                    anyhow::ensure!(t.len() >= MIN_SECRET_LEN, "METRICS_TOKEN must be at least {MIN_SECRET_LEN} characters");
+                    Some(t)
+                }
+                None => None,
+            },
+            internal_port: match get("INTERNAL_PORT").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+                Some(v) => {
+                    let port: u16 = v.parse().context("INTERNAL_PORT must be a valid port number")?;
+                    anyhow::ensure!(port != 0, "INTERNAL_PORT must not be 0");
+                    Some(port)
+                }
+                None => None,
+            },
+            internal_bind: match get("INTERNAL_BIND").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+                Some(v) => v.parse().context("INTERNAL_BIND must be an IP address")?,
+                None => std::net::IpAddr::from([0, 0, 0, 0]),
+            },
+            audit_identifier_retention_days: {
+                let days: i64 = env_parse(&get, "AUDIT_IDENTIFIER_RETENTION_DAYS", 180)?;
+                anyhow::ensure!((30..=3650).contains(&days), "AUDIT_IDENTIFIER_RETENTION_DAYS must be between 30 and 3650");
+                days
+            },
             max_accounts: match get("MAX_ACCOUNTS").filter(|v| !v.trim().is_empty()) {
                 Some(v) => Some(v.trim().parse::<i64>().ok().filter(|n| *n >= 0).context("MAX_ACCOUNTS must be a whole number, 0 or more")?),
                 None => None,
@@ -366,6 +565,15 @@ mod tests {
             ("AGENT_API_KEY", "a".repeat(40)),
             ("MASTER_ENCRYPTION_KEY", B64.encode([5u8; 32])),
         ])
+    }
+    /// The transport settings a production deployment must have (encrypted Postgres and Redis).
+    fn encrypted_transport(v: &mut HashMap<&'static str, String>) {
+        v.insert("DATABASE_URL", "postgres://u:p@db.example.com/vs?sslmode=require".into());
+        v.insert("REDIS_URL", "rediss://:p@cache.example.com:6379".into());
+        // Production also needs the key service rather than a master key in the environment.
+        v.insert("KEY_PROVIDER", "pyhsm".into());
+        v.insert("PYHSM_IPC_SECRET", "p".repeat(40));
+        v.remove("MASTER_ENCRYPTION_KEY");
     }
     fn load(vars: &HashMap<&'static str, String>) -> Result<AppConfig> {
         AppConfig::from_lookup(|k| vars.get(k).cloned())
@@ -450,6 +658,7 @@ mod tests {
         let mut v = good();
         v.insert("TRUST_PROXY_HEADERS", "true".into());
         v.insert("RATE_LIMIT_AUTH_PER_MINUTE", " 12 ".into());
+        encrypted_transport(&mut v);
         v.insert("ENVIRONMENT", "production".into());
         v.insert("ALLOWED_ORIGINS", "https://app.example.com".into());
         let c = load(&v).unwrap();
@@ -465,6 +674,7 @@ mod tests {
 
     fn env_is(value: &str) -> Result<AppConfig> {
         let mut v = good();
+        encrypted_transport(&mut v);
         v.insert("ENVIRONMENT", value.to_string());
         v.insert("ALLOWED_ORIGINS", "https://app.example.com".into());
         load(&v)
@@ -515,6 +725,173 @@ mod tests {
     }
 
     #[test]
+    fn production_refuses_unencrypted_database_and_redis_connections() {
+        let prod = |db: &str, redis: &str| {
+            let mut v = good();
+            v.insert("ENVIRONMENT", "production".into());
+            v.insert("ALLOWED_ORIGINS", "https://app.example.com".into());
+            v.insert("DATABASE_URL", db.into());
+            v.insert("REDIS_URL", redis.into());
+            v.insert("KEY_PROVIDER", "pyhsm".into());
+            v.insert("PYHSM_IPC_SECRET", "p".repeat(40));
+            v
+        };
+        let tls_db = "postgres://u:p@db/vs?sslmode=verify-full";
+        let tls_redis = "rediss://:p@cache:6379";
+        assert!(load(&prod(tls_db, tls_redis)).is_ok());
+        assert!(load(&prod("postgres://u:p@db/vs?application_name=x&SSLMODE=Require", tls_redis)).is_ok(), "case and order do not matter");
+
+        for bad in [
+            "postgres://u:p@db/vs",
+            "postgres://u:p@db/vs?sslmode=disable",
+            "postgres://u:p@db/vs?sslmode=prefer",
+            "postgres://u:p@db/vs?sslmode=allow",
+            "postgres://u:p@db/vs?x=sslmode=require",
+            "postgres://u:p@db/vs?mysslmode=require",
+        ] {
+            let err = load(&prod(bad, tls_redis)).unwrap_err().to_string();
+            assert!(err.contains("DATABASE_URL") && err.contains("sslmode"), "{bad}: {err}");
+            assert!(!err.contains("u:p"), "the message never repeats the credentials");
+        }
+        let err = load(&prod(tls_db, "redis://:p@cache:6379")).unwrap_err().to_string();
+        assert!(err.contains("REDIS_URL") && err.contains("rediss://"), "{err}");
+
+        // The override exists, is explicit, and is per service.
+        let mut v = prod("postgres://u:p@db/vs", "redis://:p@cache:6379");
+        v.insert("DATABASE_ALLOW_PLAINTEXT", "true".into());
+        assert!(load(&v).is_err(), "Redis is still plaintext");
+        v.insert("REDIS_ALLOW_PLAINTEXT", "true".into());
+        assert!(load(&v).is_ok());
+        v.insert("REDIS_ALLOW_PLAINTEXT", "yes please".into());
+        assert!(load(&v).is_err(), "a malformed override is an error, not a yes");
+    }
+
+    #[test]
+    fn the_key_provider_is_env_by_default_and_production_refuses_that() {
+        let c = load(&good()).unwrap();
+        assert!(matches!(c.key_provider, KeyProviderConfig::Env) && c.master_key_b64.is_some());
+
+        let mut v = good();
+        v.insert("ENVIRONMENT", "production".into());
+        v.insert("ALLOWED_ORIGINS", "https://app.example.com".into());
+        v.insert("DATABASE_URL", "postgres://u:p@db/vs?sslmode=require".into());
+        v.insert("REDIS_URL", "rediss://:p@cache:6379".into());
+        let err = load(&v).unwrap_err().to_string();
+        assert!(err.contains("KEY_PROVIDER") && err.contains("pyhsm"), "{err}");
+        v.insert("KEY_PROVIDER_ALLOW_ENV", "true".into());
+        assert!(load(&v).is_ok(), "an explicit, recorded decision");
+        v.insert("KEY_PROVIDER_ALLOW_ENV", "maybe".into());
+        assert!(load(&v).is_err());
+    }
+
+    #[test]
+    fn the_env_provider_needs_the_master_key_and_pyhsm_does_not() {
+        let mut v = good();
+        v.remove("MASTER_ENCRYPTION_KEY");
+        let err = load(&v).unwrap_err().to_string();
+        assert!(err.contains("MASTER_ENCRYPTION_KEY"), "{err}");
+
+        v.insert("KEY_PROVIDER", " PyHSM ".into());
+        v.insert("PYHSM_IPC_SECRET", "s".repeat(MIN_SECRET_LEN));
+        let c = load(&v).unwrap();
+        assert!(c.master_key_b64.is_none());
+        match c.key_provider {
+            KeyProviderConfig::PyHsm { socket, key_id, timeout_ms, .. } => {
+                assert_eq!((socket.as_str(), key_id.as_str(), timeout_ms), ("/run/pyhsm/pyhsm.sock", "vectorscrub-kek", 5000));
+            }
+            other => panic!("{other:?}"),
+        }
+        // a malformed master key is still refused when present, even if unused
+        v.insert("MASTER_ENCRYPTION_KEY", "not base64!!".into());
+        assert!(load(&v).is_err());
+    }
+
+    #[test]
+    fn pyhsm_settings_are_checked_and_the_secret_is_never_printed() {
+        let mut v = good();
+        v.insert("KEY_PROVIDER", "pyhsm".into());
+        assert!(load(&v).unwrap_err().to_string().contains("PYHSM_IPC_SECRET"), "a secret is required");
+        v.insert("PYHSM_IPC_SECRET", "short".into());
+        assert!(load(&v).unwrap_err().to_string().contains("at least"));
+        v.insert("PYHSM_IPC_SECRET", "z".repeat(MIN_SECRET_LEN));
+        for bad in ["", "-starts-with-dash", "has space", "slash/no", &"k".repeat(129)] {
+            v.insert("PYHSM_KEY_ID", bad.to_string());
+            let r = load(&v);
+            // blank means the default; everything else here is refused
+            assert_eq!(r.is_ok(), bad.is_empty(), "{bad:?}");
+        }
+        v.insert("PYHSM_KEY_ID", "my.kek-2".into());
+        let c = load(&v).unwrap();
+        let shown = format!("{c:?}");
+        assert!(!shown.contains(&"z".repeat(MIN_SECRET_LEN)), "the IPC secret must not appear in debug output");
+        assert!(shown.contains("redacted"));
+        v.insert("KEY_PROVIDER", "kms".into());
+        assert!(load(&v).unwrap_err().to_string().contains("env or pyhsm"));
+    }
+
+    #[test]
+    fn the_ipc_secret_can_come_from_a_file() {
+        let path = std::env::temp_dir().join(format!("vs-ipc-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&path, format!("{}\n", "f".repeat(MIN_SECRET_LEN))).unwrap();
+        let mut v = good();
+        v.insert("KEY_PROVIDER", "pyhsm".into());
+        v.insert("PYHSM_IPC_SECRET_FILE", path.to_string_lossy().to_string());
+        assert!(load(&v).is_ok(), "trailing newline is trimmed");
+        v.insert("PYHSM_IPC_SECRET_FILE", "/nonexistent/secret".into());
+        assert!(load(&v).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn development_and_staging_do_not_require_encrypted_connections() {
+        assert!(load(&good()).is_ok());
+        let mut v = good();
+        v.insert("ENVIRONMENT", "staging".into());
+        v.insert("ALLOWED_ORIGINS", "https://staging.example.com".into());
+        assert!(load(&v).is_ok());
+    }
+
+    #[test]
+    fn metrics_token_internal_port_and_audit_retention_are_checked() {
+        let c = load(&good()).unwrap();
+        assert_eq!((c.metrics_token.clone(), c.internal_port, c.audit_identifier_retention_days), (None, None, 180));
+
+        let mut v = good();
+        v.insert("METRICS_TOKEN", "m".repeat(MIN_SECRET_LEN));
+        v.insert("INTERNAL_PORT", " 8081 ".into());
+        v.insert("AUDIT_IDENTIFIER_RETENTION_DAYS", "90".into());
+        let c = load(&v).unwrap();
+        assert_eq!((c.metrics_token.as_deref().map(str::len), c.internal_port, c.audit_identifier_retention_days), (Some(MIN_SECRET_LEN), Some(8081), 90));
+
+        for (key, bad) in [
+            ("METRICS_TOKEN", "short"),
+            ("INTERNAL_PORT", "0"),
+            ("INTERNAL_PORT", "8080"),
+            ("INTERNAL_PORT", "http"),
+            ("INTERNAL_BIND", "not-an-address"),
+            ("INTERNAL_PORT", "70000"),
+            ("AUDIT_IDENTIFIER_RETENTION_DAYS", "7"),
+            ("AUDIT_IDENTIFIER_RETENTION_DAYS", "99999"),
+            ("AUDIT_IDENTIFIER_RETENTION_DAYS", "soon"),
+        ] {
+            let mut v = good();
+            v.insert(key, bad.into());
+            let err = load(&v).unwrap_err().to_string();
+            assert!(err.contains(key), "{key}={bad}: {err}");
+            assert!(!err.contains(bad) || bad.len() < 6, "never echo the value");
+        }
+        assert_eq!(c.internal_bind, std::net::IpAddr::from([0, 0, 0, 0]));
+        let mut v = good();
+        v.insert("INTERNAL_BIND", " 172.30.77.10 ".into());
+        assert_eq!(load(&v).unwrap().internal_bind.to_string(), "172.30.77.10");
+        // blank means unset
+        let mut v = good();
+        v.insert("METRICS_TOKEN", "  ".into());
+        v.insert("INTERNAL_PORT", "".into());
+        assert!(load(&v).unwrap().metrics_token.is_none());
+    }
+
+    #[test]
     fn production_origins_must_be_https_and_not_local() {
         for bad in [
             "http://app.example.com",
@@ -523,12 +900,14 @@ mod tests {
             "https://app.example.com,http://localhost:3000",
         ] {
             let mut v = good();
+            encrypted_transport(&mut v);
             v.insert("ENVIRONMENT", "production".into());
             v.insert("ALLOWED_ORIGINS", bad.into());
             let err = load(&v).unwrap_err().to_string();
             assert!(err.contains("ALLOWED_ORIGINS"), "{bad}: {err}");
         }
         let mut v = good();
+        encrypted_transport(&mut v);
         v.insert("ENVIRONMENT", "production".into());
         v.insert("ALLOWED_ORIGINS", "https://app.example.com, https://www.example.com".into());
         assert_eq!(load(&v).unwrap().allowed_origins.len(), 2);

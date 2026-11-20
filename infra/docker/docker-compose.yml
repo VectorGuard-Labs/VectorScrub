@@ -1,8 +1,107 @@
 # Required secrets use ${VAR:?message}: compose stops with that message instead of starting
 # with an empty or well-known default. Generate them with infra/scripts/gen_keys.sh.
+# Hardening applied to every container below (see "x-hardening"): no new privileges, all Linux
+# capabilities dropped (a service adds back only what it proves it needs), memory and process
+# limits so one runaway container cannot take the host down, and a read-only root filesystem with
+# small writable tmpfs mounts where a program needs scratch space.
+#
+# Networks keep each service reachable only by the ones that need it:
+#   data       Postgres <-> backend. No route to anything else, and none to the internet.
+#   queue      Redis <-> backend and agents. Same.
+#   keys       none: PyHSM has no network at all. It listens on a Unix socket in a volume that only
+#              the backend mounts, so the key-encryption key is reachable from one container.
+#   agent_api  backend's INTERNAL_PORT <-> agents. The backend binds that port to its address on
+#              this network only (INTERNAL_BIND), so the web network cannot reach it.
+#   web        frontend, backend (public port) and agents. The only network with internet access:
+#              agents fetch broker pages, the frontend and backend answer the reverse proxy.
+# The agents are the component that parses untrusted web pages. They have no route to Postgres.
+# The key service. PyHSM holds the key-encryption key that wraps every customer's data key; the
+# backend asks it to wrap and unwrap and never holds the key itself. Build the image from the PyHSM
+# Build the image from the PyHSM repository with its own Dockerfile. PyHSM must be a version with
+# IPC authentication version 2 (the release after 2.3.7): the backend signs requests that way, and
+# PyHSM 2.3.7 and earlier refuse them (and vice versa).
+#   docker build -t pyhsm:2.4.0 /path/to/PyHSM
+# Before the first start, give the pyhsm_data and pyhsm_socket volumes to uid 1000 and run
+# `docker compose run --rm --no-deps backend kms init` (see docs/runbooks/key-service.md).
+# Secrets (create once, never commit; see docs/runbooks/key-service.md):
+#   PYHSM_PASSWORD_FILE   file holding the keystore password (mode 600: PyHSM refuses anything wider)
+#   PYHSM_IPC_SECRET      shared secret the backend uses to authenticate to PyHSM (openssl rand -hex 32)
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  pids_limit: 512
+
+secrets:
+  pyhsm-password:
+    file: ${PYHSM_PASSWORD_FILE:?PYHSM_PASSWORD_FILE is required (a file holding the PyHSM keystore password, mode 600)}
+
+networks:
+  data:
+    internal: true
+  queue:
+    internal: true
+  agent_api:
+    internal: true
+    # Fixed range so the backend can bind its internal listener to its own address here.
+    ipam:
+      config:
+        - subnet: 172.30.77.0/24
+  web: {}
+
+volumes:
+  postgres_data:
+  redis_data:
+  pyhsm_data: {}      # the keystore. BACK THIS UP (infra/scripts/backup_keystore.sh): without it the database is unreadable.
+  pyhsm_socket: {}    # the Unix socket, shared by PyHSM and the backend only
+
 services:
+  pyhsm:
+    image: ${PYHSM_IMAGE:-pyhsm:2.4.0}
+    <<: *hardening
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev,size=64m
+    mem_limit: 256m
+    network_mode: none
+    volumes:
+      - pyhsm_data:/data
+      - pyhsm_socket:/run/pyhsm
+    secrets:
+      - pyhsm-password
+    # --rate-limit is operations per key per minute. PyHSM's default (100) is far too low here:
+    # every customer data key is wrapped by ONE key, so a cache miss for any customer, and every
+    # step of a rotation (3 calls per customer), counts against it. It is also a brake on how
+    # fast a taken-over backend could unwrap keys in bulk, so set it to what you need, not to
+    # "unlimited". Sizing: docs/runbooks/key-service.md, "Rate limit".
+    command:
+      - vectorguard-pyhsm-server
+      - --store
+      - /data/keystore.enc
+      - --password-file
+      - /run/secrets/pyhsm-password
+      - --socket
+      - /run/pyhsm/pyhsm.sock
+      - --rate-limit
+      - "${PYHSM_RATE_LIMIT:-1200}"
+    environment:
+      # Used by the server, and by the image's health check (which must authenticate too).
+      PYHSM_IPC_SECRET: ${PYHSM_IPC_SECRET:?PYHSM_IPC_SECRET is required (openssl rand -hex 32)}
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
+    <<: *hardening
+    # The image starts as root to prepare the data directory, then runs the server as "postgres".
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    mem_limit: 2g
+    networks: [data]
     container_name: vectorscrub-postgres
     environment:
       POSTGRES_DB: vectorscrub
@@ -22,6 +121,13 @@ services:
 
   redis:
     image: redis:7-alpine
+    <<: *hardening
+    cap_add: [SETGID, SETUID]
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+    networks: [queue]
     container_name: vectorscrub-redis
     command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required (see infra/scripts/gen_keys.sh)}
     ports:
@@ -41,16 +147,42 @@ services:
       context: ../../backend
       dockerfile: ../infra/docker/Dockerfile.backend
     container_name: vectorscrub-backend
+    <<: *hardening
+    # PyHSM's socket is mode 600 and owned by uid 1000, so the backend runs as that uid too. It is
+    # the only container that mounts the socket volume.
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 1g
+    networks:
+      data: {}
+      queue: {}
+      web: {}
+      agent_api:
+        ipv4_address: 172.30.77.10
+    volumes:
+      - pyhsm_socket:/run/pyhsm
     depends_on:
+      pyhsm:
+        condition: service_started
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
+      # Customer data keys are wrapped by PyHSM. There is no master key in this container.
+      KEY_PROVIDER: pyhsm
+      DEK_CACHE_TTL_SECS: ${DEK_CACHE_TTL_SECS:-300}
+      PYHSM_SOCKET: /run/pyhsm/pyhsm.sock
+      PYHSM_IPC_SECRET: ${PYHSM_IPC_SECRET:?PYHSM_IPC_SECRET is required (openssl rand -hex 32)}
+      PYHSM_KEY_ID: ${PYHSM_KEY_ID:-vectorscrub-kek}
       DATABASE_URL: postgres://vectorscrub:${POSTGRES_PASSWORD}@postgres:5432/vectorscrub
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required, 32+ characters (see infra/scripts/gen_keys.sh)}
-      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?MASTER_ENCRYPTION_KEY is required (see infra/scripts/gen_keys.sh)}
+      # Only needed once, to move data written before envelope encryption:
+      #   MASTER_ENCRYPTION_KEY=<old key> docker compose run --rm backend kms migrate-legacy
+      # Leave it unset otherwise; the backend does not need it and should not have it.
       # The backend refuses to start without this (it used to be passed only to the agents, so the
       # stack as shipped could not boot).
       AGENT_API_KEY: ${AGENT_API_KEY:?AGENT_API_KEY is required, 32+ characters (see infra/scripts/gen_keys.sh)}
@@ -60,6 +192,22 @@ services:
       # Otherwise clients could pick their own IP and walk around the rate limits.
       TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
       PORT: "8080"
+      # The agent-only API is served on this second port, which only the agent_api network can
+      # reach. The public port has no /internal routes at all.
+      INTERNAL_PORT: "8081"
+      # Bound to the backend's address on the agent-only network. The backend is also on `web`,
+      # and a listener bound to every address would be reachable from there too.
+      INTERNAL_BIND: 172.30.77.10
+      # Bearer token Prometheus presents to scrape /api/v1/metrics. Unset: metrics are off
+      # outside development. Never give this to the agents.
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      # In production the backend insists on TLS to Postgres and Redis unless told the traffic
+      # stays on a private network. Here it does: both live on internal-only bridge networks
+      # that nothing else can join. Remove these two lines if you point DATABASE_URL or REDIS_URL
+      # at a managed service across a network (and use sslmode=require / rediss://).
+      DATABASE_ALLOW_PLAINTEXT: "true"
+      REDIS_ALLOW_PLAINTEXT: "true"
+      AUDIT_IDENTIFIER_RETENTION_DAYS: ${AUDIT_IDENTIFIER_RETENTION_DAYS:-180}
     ports:
       # Loopback only. The API is reached through the reverse proxy (TLS, and /api/v1/metrics
       # blocked) or through the frontend's /api/v1 proxy, never straight from the internet.
@@ -78,13 +226,16 @@ services:
       context: ../../agents
       dockerfile: ../infra/docker/Dockerfile.agents
     container_name: vectorscrub-agents
+    <<: *hardening
+    mem_limit: 4g
+    networks: [queue, agent_api, web]
     depends_on:
       backend:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      BACKEND_API_URL: http://backend:8080
+      BACKEND_API_URL: http://backend:8081
       AGENT_API_KEY: ${AGENT_API_KEY}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -104,6 +255,13 @@ services:
         # variable: Next.js bakes rewrites in at build time, so a runtime value is ignored.
         API_URL: http://backend:8080
     container_name: vectorscrub-frontend
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.next/cache
+    mem_limit: 512m
+    networks: [web]
     environment:
       # Shown on the Terms and Privacy pages; read at request time by the Next.js server.
       CONTACT_EMAIL: ${CONTACT_EMAIL:-}
@@ -123,7 +281,3 @@ services:
       # Loopback only: put the reverse proxy (nginx + TLS) in front of it.
       - "127.0.0.1:3000:3000"
     restart: unless-stopped
-
-volumes:
-  postgres_data:
-  redis_data:

@@ -40,7 +40,7 @@ export default function HistoryPage() {
     // If it is missing or expired the first API call answers 401 and the API client sends
     // the user to /login.
     loadHistory();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     applyFilters();
@@ -311,7 +311,7 @@ export default function HistoryPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {filteredEvents.map((event, index) => (
+            {filteredEvents.map((event) => (
               <div
                 key={event.id}
                 className={`bg-gray-900 border border-gray-800 ${getEventBorderColor(

@@ -12,7 +12,6 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::error::internal_error;
-use crate::crypto::MasterKey;
 use crate::db::AppState;
 use crate::middleware::auth_extractor::{AgentAuth, AuthenticatedCustomer};
 use crate::services::deletion::{self, DeletionError, NewCampaign};
@@ -27,10 +26,6 @@ fn enabled(state: &AppState) -> Result<(), ApiError> {
     } else {
         Err((StatusCode::NOT_FOUND, "Not found".into()))
     }
-}
-
-fn master(state: &AppState) -> Result<MasterKey, ApiError> {
-    MasterKey::from_base64(&state.config.master_key_b64).map_err(internal_error)
 }
 
 fn deletion_error(e: DeletionError) -> ApiError {
@@ -65,7 +60,7 @@ pub async fn info(auth: AuthenticatedCustomer, State(state): State<AppState>) ->
         .await
         .map_err(internal_error)?
         .ok_or((StatusCode::NOT_FOUND, "Customer not found".to_string()))?;
-    let residence = customer_svc::residence_state(&state.pool, &master(&state)?, auth.id)
+    let residence = customer_svc::residence_state(&state.pool, &state.keys, auth.id)
         .await
         .map_err(internal_error)?;
     let paid = customer.subscription_tier != crate::models::customer::SubscriptionTier::Free;
@@ -118,7 +113,7 @@ pub async fn create_campaign(
     if req.channel_ids.len() > 50 {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, "Too many companies selected.".into()));
     }
-    let residence = customer_svc::residence_state(&state.pool, &master(&state)?, auth.id)
+    let residence = customer_svc::residence_state(&state.pool, &state.keys, auth.id)
         .await
         .map_err(internal_error)?;
     let (campaign_id, request_ids) = deletion::create_campaign(
@@ -229,7 +224,7 @@ pub async fn claim(_auth: AgentAuth, State(state): State<AppState>, Path(id): Pa
 /// customer agreed to share it. Only for a request that has been claimed and is being sent.
 pub async fn identity(_auth: AgentAuth, State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
     enabled(&state)?;
-    let identity = identity_access::release_for_deletion(&state.pool, &master(&state)?, id)
+    let identity = identity_access::release_for_deletion(&state.pool, &state.keys, id)
         .await
         .map_err(|e| match e {
             AccessError::Denied => (StatusCode::FORBIDDEN, "Not available".to_string()),

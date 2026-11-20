@@ -21,7 +21,7 @@ use sqlx::PgPool;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
-use crate::crypto::MasterKey;
+use crate::services::keys::KeyService;
 use crate::services::scan::RecoveryConfig;
 use crate::services::{
     audit, login_throttle, notification as notification_svc, privacy_score as privacy_score_svc,
@@ -40,7 +40,7 @@ pub struct RecoverySummary {
 pub async fn run_scan_recovery(
     pool: PgPool,
     redis: redis::Client,
-    master_key_b64: String,
+    keys: std::sync::Arc<KeyService>,
     cfg: RecoveryConfig,
     interval: Duration,
 ) {
@@ -51,7 +51,7 @@ pub async fn run_scan_recovery(
         "Scan job recovery starting"
     );
     loop {
-        match recover_once(&pool, &redis, &master_key_b64, &cfg).await {
+        match recover_once(&pool, &redis, &keys, &cfg).await {
             Ok(s) if s != RecoverySummary::default() => info!(?s, "Scan recovery pass"),
             Ok(_) => {}
             Err(e) => error!(error = %e, "Scan recovery pass failed"),
@@ -64,10 +64,9 @@ pub async fn run_scan_recovery(
 pub async fn recover_once(
     pool: &PgPool,
     redis: &redis::Client,
-    master_key_b64: &str,
+    keys: &KeyService,
     cfg: &RecoveryConfig,
 ) -> anyhow::Result<RecoverySummary> {
-    let master = MasterKey::from_base64(master_key_b64)?;
     let report = scan_svc::recover_jobs(pool, cfg).await?;
     let mut summary = RecoverySummary {
         requeued: report.requeued.len(),
@@ -107,7 +106,7 @@ pub async fn recover_once(
     }
 
     for pending in &report.to_dispatch {
-        match scan_svc::dispatch_job(pool, redis, &master, pending.job_id, pending.customer_id, &pending.tier).await {
+        match scan_svc::dispatch_job(pool, redis, keys, pending.job_id, pending.customer_id, &pending.tier).await {
             Ok(()) => summary.dispatched += 1,
             Err(e) => {
                 summary.dispatch_errors += 1;
@@ -147,6 +146,11 @@ pub async fn recover_once(
     // than a year. Nothing here touches customer data or any audit log.
     if let Err(e) = login_throttle::purge_stale(pool).await {
         warn!(error = %e, "Could not purge stale login throttle records");
+    }
+    match audit::clear_old_identifiers(pool, cfg.audit_identifier_retention_days).await {
+        Ok(n) if n > 0 => info!(cleared = n, "Cleared email, IP and user agent from old audit rows"),
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "Could not clear identifiers from old audit rows"),
     }
     match crate::services::session::prune(pool).await {
         Ok(n) if n > 0 => info!(deleted = n, "Pruned sessions that ended over a week ago"),

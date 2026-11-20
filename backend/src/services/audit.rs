@@ -215,6 +215,8 @@ pub mod actions {
     pub const MFA_DISABLE: &str = "mfa.disable";
     /// A one-time recovery code was used instead of an authenticator code.
     pub const MFA_RECOVERY_USED: &str = "mfa.recovery_code_used";
+    /// The customer changed their password (all their other sessions were ended).
+    pub const PASSWORD_CHANGE: &str = "password.change";
     /// The customer ended one session (another device), or all of them.
     pub const SESSION_REVOKE: &str = "session.revoke";
 
@@ -266,6 +268,43 @@ pub mod actions {
     pub const BILLING_PLAN_CHANGED: &str = "billing.plan_changed";
 }
 
+/// Rows handled per statement by `clear_old_identifiers`, and passes per call, so a large backlog
+/// is worked off over several runs instead of holding one long lock.
+const CLEAR_BATCH: i64 = 5000;
+const CLEAR_MAX_BATCHES: usize = 20;
+
+/// Clear the email address, IP address and user agent from audit rows older than `older_than_days`.
+///
+/// The trail keeps what happened, to which kind of thing, with what result and when, and (while the
+/// account exists) the customer id. It stops keeping who the person was in the sense of an email,
+/// an address on the network or a browser. That is what makes a failed login for an email that
+/// never had an account (an attacker's or a stranger's typo) stop being personal data after a
+/// while. Nothing else about a row can change: the triggers on `audit_log` allow exactly this
+/// kind of clearing and refuse every other edit. Returns how many rows were cleared.
+pub async fn clear_old_identifiers(pool: &PgPool, older_than_days: i64) -> Result<u64, sqlx::Error> {
+    let mut cleared = 0u64;
+    for _ in 0..CLEAR_MAX_BATCHES {
+        let done = sqlx::query(
+            "UPDATE audit_log SET user_email = NULL, ip_address = NULL, user_agent = NULL \
+             WHERE id IN ( \
+                SELECT id FROM audit_log \
+                WHERE timestamp < NOW() - make_interval(days => $1::int) \
+                  AND (user_email IS NOT NULL OR ip_address IS NOT NULL OR user_agent IS NOT NULL) \
+                ORDER BY timestamp LIMIT $2)",
+        )
+        .bind(older_than_days as i32)
+        .bind(CLEAR_BATCH)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        cleared += done;
+        if (done as i64) < CLEAR_BATCH {
+            break;
+        }
+    }
+    Ok(cleared)
+}
+
 /// Resource types
 pub mod resources {
     pub const CUSTOMER: &str = "customer";
@@ -294,6 +333,73 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    /// Insert a row with an explicit age (the application cannot back-date its own entries).
+    async fn aged_row(pool: &PgPool, days_old: i32, customer: Option<Uuid>, email: Option<&str>, ip: Option<&str>) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO audit_log (id, timestamp, created_at, customer_id, user_email, action, resource_type, ip_address, user_agent, status, details) \
+             VALUES ($1, NOW() - make_interval(days => $2), NOW() - make_interval(days => $2), $3, $4, 'user.login', 'customer', $5, 'Mozilla/5.0', 'failure', '{\"k\":\"v\"}')",
+        )
+        .bind(id).bind(days_old).bind(customer).bind(email).bind(ip)
+        .execute(pool).await.unwrap();
+        id
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn old_rows_lose_their_identifiers_and_nothing_else(pool: PgPool) {
+        let c = ts::customer(&pool, "free", false).await;
+        let old_known = aged_row(&pool, 200, Some(c), Some("jane@example.com"), Some("203.0.113.9")).await;
+        let old_stranger = aged_row(&pool, 400, None, Some("typo@example.com"), Some("198.51.100.7")).await;
+        let recent = aged_row(&pool, 10, Some(c), Some("jane@example.com"), Some("203.0.113.9")).await;
+        let boundary = aged_row(&pool, 179, None, Some("edge@example.com"), Some("192.0.2.1")).await;
+        // no email or IP, but still a user agent, so it counts too
+        let already = aged_row(&pool, 300, Some(c), None, None).await;
+
+        assert_eq!(clear_old_identifiers(&pool, 180).await.unwrap(), 3);
+        assert_eq!(clear_old_identifiers(&pool, 180).await.unwrap(), 0, "nothing left to do the second time");
+
+        type Row = (Option<Uuid>, Option<String>, Option<String>, Option<String>, String, String, serde_json::Value);
+        let row = |id: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, Row>("SELECT customer_id, user_email, ip_address, user_agent, action, status, details FROM audit_log WHERE id = $1")
+                    .bind(id).fetch_one(&pool).await.unwrap()
+            }
+        };
+        for id in [old_known, old_stranger] {
+            let r = row(id).await;
+            assert_eq!((&r.1, &r.2, &r.3), (&None, &None, &None), "identifiers cleared");
+            assert_eq!((r.4.as_str(), r.5.as_str(), &r.6), ("user.login", "failure", &serde_json::json!({"k":"v"})), "what happened is kept");
+        }
+        assert_eq!(row(old_known).await.0, Some(c), "the customer link stays while the account exists");
+        assert_eq!(row(old_stranger).await.0, None);
+        for id in [recent, boundary] {
+            let r = row(id).await;
+            assert!(r.1.is_some() && r.2.is_some() && r.3.is_some(), "younger than the limit: untouched");
+        }
+        assert_eq!(row(already).await.0, Some(c));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_large_backlog_is_worked_off_across_runs_and_the_guards_still_hold(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO audit_log (timestamp, created_at, user_email, action, resource_type, status) \
+             SELECT NOW() - interval '400 days', NOW() - interval '400 days', 'x' || g || '@example.com', 'user.login', 'customer', 'failure' \
+             FROM generate_series(1, $1) g",
+        )
+        .bind(CLEAR_BATCH * CLEAR_MAX_BATCHES as i64 + 10)
+        .execute(&pool).await.unwrap();
+        let first = clear_old_identifiers(&pool, 180).await.unwrap();
+        assert_eq!(first, (CLEAR_BATCH as u64) * CLEAR_MAX_BATCHES as u64, "one run is bounded");
+        assert_eq!(clear_old_identifiers(&pool, 180).await.unwrap(), 10, "the next run finishes it");
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE user_email IS NOT NULL").fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 0);
+        // the append-only guard still refuses any other edit
+        let id: Uuid = sqlx::query_scalar("SELECT id FROM audit_log LIMIT 1").fetch_one(&pool).await.unwrap();
+        assert!(rejected(&pool, "UPDATE audit_log SET action = 'x' WHERE id = $1", id).await);
+        assert!(rejected(&pool, "DELETE FROM audit_log WHERE id = $1", id).await);
     }
 
     async fn rejected(pool: &PgPool, sql: &str, id: Uuid) -> bool {

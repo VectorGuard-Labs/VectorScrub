@@ -25,7 +25,7 @@ export default function RemovalsPage() {
     // If it is missing or expired the first API call answers 401 and the API client sends
     // the user to /login.
     loadRequests();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   async function loadRequests() {
     setLoading(true);

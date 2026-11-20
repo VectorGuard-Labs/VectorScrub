@@ -7,12 +7,34 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use std::sync::Arc;
+
 use crate::crypto::MasterKey;
+use crate::services::keys::{EnvWrapper, KeyService, Wrapper};
 use crate::models::customer::SubmitIdentityRequest;
 use crate::services::customer as customer_svc;
 
 pub fn master_key_b64() -> String {
     BASE64.encode([7u8; 32])
+}
+
+/// The key service the tests use: keys wrapped by the environment provider, nothing cached (so a
+/// test that deletes a key or changes a row sees the effect at once).
+pub fn key_service(pool: PgPool) -> KeyService {
+    key_service_with_ttl(pool, 0)
+}
+
+pub fn key_service_with_ttl(pool: PgPool, ttl_secs: u64) -> KeyService {
+    key_service_with_master_and_ttl(pool, &master_key_b64(), ttl_secs)
+}
+
+pub fn key_service_with_master(pool: PgPool, master_b64: &str) -> KeyService {
+    key_service_with_master_and_ttl(pool, master_b64, 0)
+}
+
+fn key_service_with_master_and_ttl(pool: PgPool, master_b64: &str, ttl_secs: u64) -> KeyService {
+    let master = MasterKey::from_base64(master_b64).expect("test master key");
+    KeyService::new(pool, Wrapper::Env(EnvWrapper::new(&master)), ttl_secs)
 }
 
 pub fn other_master_key_b64() -> String {
@@ -49,7 +71,7 @@ pub async fn customer(pool: &PgPool, tier: &str, monitoring_enabled: bool) -> Uu
 }
 
 /// Store an encrypted identity profile for the customer.
-pub async fn identity(pool: &PgPool, master: &MasterKey, customer_id: Uuid, full_name: &str) {
+pub async fn identity(pool: &PgPool, keys: &KeyService, customer_id: Uuid, full_name: &str) {
     let req = SubmitIdentityRequest {
         full_name: full_name.to_string(),
         current_address: "123 Main St, Austin, TX 78701".to_string(),
@@ -58,7 +80,7 @@ pub async fn identity(pool: &PgPool, master: &MasterKey, customer_id: Uuid, full
         email_addresses: vec!["jane@example.com".to_string()],
         date_of_birth: Some("1984-03-09".to_string()),
     };
-    customer_svc::save_identity(pool, master, &req, customer_id)
+    customer_svc::save_identity(pool, keys, &req, customer_id)
         .await
         .expect("save identity");
 }
@@ -154,7 +176,9 @@ pub fn test_config() -> crate::services::config::AppConfig {
         database_url: "postgres://unused".into(),
         redis_url: "redis://127.0.0.1:1".into(),
         jwt_secret: "t".repeat(40),
-        master_key_b64: master_key_b64(),
+        master_key_b64: Some(master_key_b64()),
+        key_provider: crate::services::config::KeyProviderConfig::Env,
+        dek_cache_ttl_secs: 0,
         agent_api_key: "a".repeat(40),
         port: 0,
         db_pool_size: 1,
@@ -176,16 +200,22 @@ pub fn test_config() -> crate::services::config::AppConfig {
         stripe: None,
         deletion_requests_enabled: false,
         max_accounts: None,
+        metrics_token: None,
+        internal_port: None,
+        internal_bind: std::net::IpAddr::from([0, 0, 0, 0]),
+        audit_identifier_retention_days: 180,
     }
 }
 
 /// An `AppState` whose connections are never opened. For tests of layers that do not
 /// touch the database or Redis (rate limiting, routing). Must run inside a Tokio runtime.
 pub fn dummy_state() -> crate::db::AppState {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://u:p@127.0.0.1:1/none")
+        .expect("lazy pool");
     crate::db::AppState {
-        pool: sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://u:p@127.0.0.1:1/none")
-            .expect("lazy pool"),
+        keys: Arc::new(key_service(pool.clone())),
+        pool,
         redis: redis::Client::open("redis://127.0.0.1:1").expect("redis client"),
         config: test_config(),
         metrics: metrics_exporter_prometheus::PrometheusBuilder::new()

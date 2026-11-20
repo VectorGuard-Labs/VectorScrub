@@ -89,6 +89,12 @@ export default function PrivacyPage() {
           We do not yet automatically delete inactive accounts.
         </p>
         <p>
+          Our security log records sign-ins, failed sign-ins and account changes. After 180 days the
+          email address, IP address and browser details are removed from each entry, whether or not an
+          account exists for it (a mistyped or guessed email address does not stay on file). The
+          entry itself, what happened and when, is kept.
+        </p>
+        <p>
           <strong className="text-white">You can delete your account yourself</strong> from your profile
           page (enter your password to confirm). This permanently erases your account, identity
           details, scans, exposures, removal requests, alerts and settings, at once. You can also write
@@ -108,8 +114,9 @@ export default function PrivacyPage() {
             subscription, cut off from your account, for accounting and disputes.
           </li>
           <li>
-            <strong className="text-white">Backups,</strong> until they expire under our hosting
-            provider&apos;s schedule. We do not restore deleted accounts from them.
+            <strong className="text-white">Backups,</strong> for up to 30 days, encrypted. A backup
+            made before you deleted your account still contains it until it expires. If we ever have
+            to restore from one, we erase again every account that was deleted after it was made.
           </li>
         </ul>
         <p>

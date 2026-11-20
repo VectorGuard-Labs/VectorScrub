@@ -4,8 +4,8 @@
 
 | Control | Status in code |
 |---------|----------------|
-| PII encrypted at rest with AES-256-GCM, per-customer keys derived from the master key | **Implemented** (key derivation is SHA-256 over master key, label and customer id; no AAD) |
-| Master key in an HSM (PyHSM), automatic 90-day rotation | **Not implemented.** Key is read from an environment variable; no rotation. The PyHSM module was removed. |
+| PII encrypted at rest with AES-256-GCM, per-customer keys | **Implemented** as envelope encryption: random per-customer data key, HKDF-SHA256 field keys, AES-GCM associated data binding each value to its customer and field. Data keys wrapped by a key held in PyHSM. |
+| Key-encryption key in a key service, rotation | **Implemented with PyHSM** (Unix socket, HMAC-authenticated, tested against a live PyHSM). Rotation is a manual command (`vectorscrub kms rotate`) that re-wraps data keys without re-encrypting data; no automatic 90-day schedule. **PyHSM is software, not a certified HSM** (no FIPS 140 validation, no tamper-resistant hardware): do not describe it as one in an audit. The drill (`docs/runbooks/key-service.md`) has run on a developer machine only. |
 | Passwords hashed with Argon2id; JWT HS256, 24 h expiry | **Implemented.** Sessions are server-side: logout and "sign out everywhere" revoke at once, 60-minute inactivity timeout, 24 h absolute. Optional TOTP two-factor with recovery codes for customers (not enforced). No refresh tokens. No MFA for staff because there is no staff login (operators use the CLI with database credentials). |
 | Login lockout and per-IP rate limits | **Implemented.** Per-IP limits are shared across instances through Redis; if Redis is down they degrade to per-instance in-memory limits. |
 | CSRF protection and security headers | **Implemented** (backend API responses and the Next.js pages; session in an `HttpOnly` cookie) |
@@ -17,7 +17,10 @@
 | Scan job recovery and health probes | **Implemented** |
 | Customer PII never sent to LLMs | **Implemented and tested** (redaction, NER, vocabulary filter, fail-closed). Detection accuracy on real pages not measured. |
 | Role-based access control, admin/operator roles | **Not implemented** (only customer JWT and one shared agent key) |
-| mTLS between services, IP allowlisting, Redis/DB TLS | **Not implemented** in the repo; deployment concern |
+| TLS to Postgres and Redis | **Enforced in production** (the backend refuses to start without `sslmode=require` / `rediss://`, unless an explicit private-network override is set; compose uses the override on internal-only networks). Tested against live TLS servers. |
+| mTLS between services, IP allowlisting | **Not implemented** in the repo; deployment concern. Agent-to-backend traffic is plain HTTP on an internal-only network. |
+| Metrics, API docs and agent API not public | **Implemented** (metrics need a token, docs off in production, agent API on its own port, reference proxy blocks all three). Not tested against your real hostname. |
+| Audit identifiers retention | **Implemented**: email, IP and user agent cleared after 180 days (configurable). |
 | Idempotency keys | **Not implemented** |
 | Automated data retention / right-to-erasure | **Not implemented** (see `DATA_RETENTION.md`) |
 | Circuit breakers | **Partial:** Python agents only, per host, for page fetches |
@@ -110,7 +113,7 @@ Access Control Matrix:
 
 ```yaml
 Encryption at Rest:
-  Customer PII: AES-256-GCM, per-customer derived keys (master key from environment)
+  Customer PII: AES-256-GCM, per-customer data keys wrapped by PyHSM, HKDF field keys, AAD
   Database: PostgreSQL encryption enabled
   Backups: Encrypted with separate key
   File Storage: S3 server-side encryption
@@ -122,7 +125,7 @@ Encryption in Transit:
   Internal Services: mTLS
 
 Key Management:
-  Master Keys: environment variable (target: KMS/HSM; not implemented)
+  Key-encryption key: PyHSM keystore (software; target: certified HSM or cloud KMS behind the same interface)
   Key Rotation: Target 90 days (not implemented)
   Key Access: Logged and monitored
 ```

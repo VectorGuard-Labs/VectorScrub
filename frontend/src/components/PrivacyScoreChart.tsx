@@ -23,20 +23,25 @@ export default function PrivacyScoreChart() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadTrend();
-  }, [timeRange]);
-
-  async function loadTrend() {
-    setLoading(true);
-    try {
-      const data = await getPrivacyScoreHistory(timeRange);
-      setTrend(data);
-    } catch (err) {
-      console.error("Failed to load privacy score history:", err);
-    } finally {
-      setLoading(false);
+    let current = true;
+    async function loadTrend() {
+      setLoading(true);
+      try {
+        const data = await getPrivacyScoreHistory(timeRange);
+        if (!current) return;
+        setTrend(data);
+      } catch (err) {
+        if (current) console.error("Failed to load privacy score history:", err);
+      } finally {
+        if (current) setLoading(false);
+      }
     }
-  }
+    void loadTrend();
+    // A newer range was chosen (or the chart went away) before this answer came back: ignore it.
+    return () => {
+      current = false;
+    };
+  }, [timeRange]);
 
   if (loading) {
     return (

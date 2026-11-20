@@ -20,6 +20,8 @@ The scan recovery loop (`jobs/recovery.rs`) performs three housekeeping deletes:
 
 Two-factor secrets, recovery codes and sessions belong to the customer and are removed with the account by the same cascade as everything else (tested).
 
+| `audit_log` identifiers | After `AUDIT_IDENTIFIER_RETENTION_DAYS` (default 180) the email, IP address and user agent are cleared from the row. The row (what happened, when, result, and the customer link while the account exists) is kept. Failed logins for emails that never had an account stop being personal data this way. |
+
 Nothing else is ever deleted automatically: customers, identity profiles, scan jobs, exposures, removal requests, alerts, `audit_log`, and `removal_audit_log` are kept indefinitely.
 
 ## What does not exist

@@ -17,19 +17,12 @@ use validator::Validate;
 
 use super::auth::reauthenticate;
 use super::error::internal_error;
-use crate::crypto::MasterKey;
 use crate::db::AppState;
 use crate::middleware::auth_extractor::AuthenticatedCustomer;
 use crate::services::{audit, mfa as mfa_svc, session as session_svc};
 
 fn invalid(message: &str) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, message.to_string()).into_response()
-}
-
-// A handler's error type is the ready-made response, as everywhere else in this module.
-#[allow(clippy::result_large_err)]
-fn master(state: &AppState) -> Result<MasterKey, Response> {
-    MasterKey::from_base64(&state.config.master_key_b64).map_err(|e| internal_error(e).into_response())
 }
 
 /// GET /api/v1/me/mfa
@@ -78,8 +71,7 @@ pub async fn mfa_setup(
         return Err((StatusCode::CONFLICT, "Two-factor authentication is already on.").into_response());
     }
     let customer = reauthenticate(&state, auth.id, &req.password, None).await?;
-    let master = master(&state)?;
-    match mfa_svc::begin_setup(&state.pool, &master, auth.id, &customer.email).await {
+    match mfa_svc::begin_setup(&state.pool, &state.keys, auth.id, &customer.email).await {
         Ok(setup) => Ok(Json(setup)),
         Err(mfa_svc::MfaError::AlreadyEnabled) => {
             Err((StatusCode::CONFLICT, "Two-factor authentication is already on.").into_response())
@@ -120,8 +112,7 @@ pub async fn mfa_enable(
     Json(req): Json<MfaEnableRequest>,
 ) -> Result<Json<MfaEnabledResponse>, Response> {
     req.validate().map_err(|e| invalid(&e.to_string()))?;
-    let master = master(&state)?;
-    let codes = match mfa_svc::confirm_setup(&state.pool, &master, auth.id, &req.code).await {
+    let codes = match mfa_svc::confirm_setup(&state.pool, &state.keys, auth.id, &req.code).await {
         Ok(codes) => codes,
         Err(mfa_svc::MfaError::AlreadyEnabled) => {
             return Err((StatusCode::CONFLICT, "Two-factor authentication is already on.").into_response())
@@ -181,6 +172,61 @@ pub async fn mfa_disable(
         .await
         .map_err(|e| internal_error(e).into_response())?;
     audit::AuditEntry::builder(audit::actions::MFA_DISABLE, audit::resources::CUSTOMER)
+        .customer_id(auth.id)
+        .resource_id(auth.id)
+        .details(serde_json::json!({ "other_sessions_ended": ended }))
+        .log_or_warn(&state.pool)
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+pub struct ChangePasswordRequest {
+    #[validate(length(max = 1024))]
+    pub current_password: String,
+    #[validate(length(min = 12, max = 128, message = "Password must be between 12 and 128 characters"))]
+    pub new_password: String,
+    /// Required when the account has two-factor authentication on.
+    #[validate(length(max = 64))]
+    pub mfa_code: Option<String>,
+}
+
+/// POST /api/v1/me/password
+/// Changes the password. Needs the current password (and a code, if two-factor is on), shares the
+/// login lockout, and ends every other session so a copy of the old login stops working.
+#[utoipa::path(
+    post,
+    path = "/api/v1/me/password",
+    tag = "auth",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 204, description = "Password changed; other sessions ended"),
+        (status = 401, description = "Wrong current password, or a missing or wrong two-factor code"),
+        (status = 422, description = "The new password is too short, too long, or the same as the old one"),
+        (status = 429, description = "Too many failed attempts"),
+    ),
+)]
+pub async fn change_password(
+    auth: AuthenticatedCustomer,
+    State(state): State<AppState>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, Response> {
+    req.validate().map_err(|e| invalid(&e.to_string()))?;
+    let customer = reauthenticate(&state, auth.id, &req.current_password, req.mfa_code.as_deref()).await?;
+
+    if req.new_password == req.current_password {
+        return Err(invalid("Choose a password you have not been using."));
+    }
+    let new_hash = crate::services::auth::hash_password_async(req.new_password.clone())
+        .await
+        .map_err(|e| internal_error(e).into_response())?;
+    crate::services::customer::set_password_hash(&state.pool, customer.id, &new_hash)
+        .await
+        .map_err(|e| internal_error(e).into_response())?;
+    let ended = session_svc::revoke_all(&state.pool, auth.id, Some(auth.session_id))
+        .await
+        .map_err(|e| internal_error(e).into_response())?;
+    audit::AuditEntry::builder(audit::actions::PASSWORD_CHANGE, audit::resources::CUSTOMER)
         .customer_id(auth.id)
         .resource_id(auth.id)
         .details(serde_json::json!({ "other_sessions_ended": ended }))

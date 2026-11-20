@@ -14,7 +14,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # credentials reach the data directly. An agent that can see any of these has more access than
 # its design gives it, and a compromised agent (it fetches and parses untrusted web pages)
 # would inherit it.
-BACKEND_ONLY_SECRETS = ("MASTER_ENCRYPTION_KEY", "JWT_SECRET", "DATABASE_URL", "POSTGRES_PASSWORD", "STRIPE_WEBHOOK_SECRET")
+BACKEND_ONLY_SECRETS = (
+    "MASTER_ENCRYPTION_KEY",
+    "JWT_SECRET",
+    "DATABASE_URL",
+    "POSTGRES_PASSWORD",
+    "STRIPE_WEBHOOK_SECRET",
+    "METRICS_TOKEN",
+    # The credential to the key service that wraps every customer's data key.
+    "PYHSM_IPC_SECRET",
+    "PYHSM_IPC_SECRET_FILE",
+    "PYHSM_PASSWORD_FILE",
+)
 
 
 class ForbiddenSecretsError(RuntimeError):

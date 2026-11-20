@@ -55,6 +55,22 @@ jobs:
       - name: Audit Cargo.lock
         run: cargo audit
 
+      # Licenses, wildcard versions and where crates come from (backend/deny.toml). A dependency
+      # under a copyleft or missing license, or from outside crates.io, stops the build until a
+      # person decides.
+      - uses: actions/cache@v4
+        id: deny-bin
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-0.21.0-${{ runner.os }}
+
+      - name: Install cargo-deny
+        if: steps.deny-bin.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --version 0.21.0 --locked
+
+      - name: Licenses, bans and sources (cargo deny)
+        run: cargo deny check licenses bans sources
+
       # The set-aside advisories are about crates that are not part of the running service. This
       # is the fact those reasons rest on; if it stops being true the entries are wrong.
       - name: Ignored advisories still concern only crates outside the runtime build

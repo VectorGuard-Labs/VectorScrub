@@ -1,3 +1,11 @@
+> **Removed (2026-11).** The "browser stealth" and fingerprint-rotation parts of this document were
+> deleted from the code. They disguised the automated browser as a person's, which this product
+> does not do: the removal browser is openly automated, and a site that refuses it is reported as
+> refusing, with a pointer to the manual guide. The human-in-the-loop CAPTCHA handling described
+> below (the customer solves it, we never do) is unchanged. `agents/tests/test_honest_browser.py`
+> fails if anything like the removed code returns. Read the sections on `BrowserStealth`,
+> `BrowserFingerprintRotator` and the "stealth" success estimates as history.
+
 # Phase 3: CAPTCHA Strategy Implementation Summary
 
 ## ✅ Implementation Complete

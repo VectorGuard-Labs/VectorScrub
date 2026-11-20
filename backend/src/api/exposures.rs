@@ -13,9 +13,7 @@ pub async fn list(
     let mut exposures = exposure_svc::list_exposures(&state.pool, auth.id)
         .await
         .map_err(super::error::internal_error)?;
-    let master = crate::crypto::MasterKey::from_base64(&state.config.master_key_b64)
-        .map_err(super::error::internal_error)?;
-    url_vault::open_all(&master, &mut exposures).map_err(super::error::internal_error)?;
+    url_vault::open_all(&state.keys, &mut exposures).await.map_err(super::error::internal_error)?;
 
     Ok(Json(serde_json::json!({ "exposures": exposures })))
 }

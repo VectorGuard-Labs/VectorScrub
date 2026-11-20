@@ -10,9 +10,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// Open the stored (sealed) listing links on rows about to leave the API. See services/url_vault.rs.
-fn open_links<T: url_vault::CarriesLink>(state: &AppState, rows: &mut [T]) -> anyhow::Result<()> {
-    let master = crate::crypto::MasterKey::from_base64(&state.config.master_key_b64)?;
-    url_vault::open_all(&master, rows)
+async fn open_links<T: url_vault::CarriesLink>(state: &AppState, rows: &mut [T]) -> anyhow::Result<()> {
+    url_vault::open_all(&state.keys, rows).await
 }
 
 // Customer endpoints
@@ -31,7 +30,7 @@ pub async fn list_requests(
     let mut requests = removal::list_removal_requests(&state.pool, auth.id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    open_links(&state, &mut requests).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    open_links(&state, &mut requests).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(ListRemovalRequestsResponse { requests }))
 }
@@ -55,8 +54,7 @@ pub async fn done_by_hand(
                 crate::services::listing::ListingError::NotAListing => e.to_string(),
                 _ => "That profile link is not a valid https:// link to the site.".to_string(),
             }))?;
-            let master = crate::crypto::MasterKey::from_base64(&state.config.master_key_b64).map_err(super::error::internal_error)?;
-            let sealed = url_vault::seal(&master, auth.id, &normalized).map_err(super::error::internal_error)?;
+            let sealed = url_vault::seal(&state.keys, auth.id, &normalized).await.map_err(super::error::internal_error)?;
             Some(removal::NewListingLink { site, sealed })
         }
     };
@@ -86,7 +84,7 @@ pub async fn done_by_hand(
             ),
             _ => super::error::internal_error(format!("{e:?}")),
         })?;
-    open_links(&state, std::slice::from_mut(&mut request)).map_err(super::error::internal_error)?;
+    open_links(&state, std::slice::from_mut(&mut request)).await.map_err(super::error::internal_error)?;
 
     audit::AuditEntry::builder(audit::actions::REMOVAL_MANUAL_SUBMIT, audit::resources::EXPOSURE)
         .customer_id(auth.id)
@@ -120,8 +118,7 @@ pub async fn update_listing_link(
                 crate::services::listing::ListingError::NotAListing => e.to_string(),
                 _ => "That profile link is not a valid https:// link to the site.".to_string(),
             }))?;
-    let master = crate::crypto::MasterKey::from_base64(&state.config.master_key_b64).map_err(super::error::internal_error)?;
-    let sealed = url_vault::seal(&master, auth.id, &normalized).map_err(super::error::internal_error)?;
+    let sealed = url_vault::seal(&state.keys, auth.id, &normalized).await.map_err(super::error::internal_error)?;
     let mut request = removal::update_listing_link(&state.pool, auth.id, id, removal::NewListingLink { site, sealed })
         .await
         .map_err(|e| match e.downcast_ref::<removal::RemovalError>() {
@@ -136,7 +133,7 @@ pub async fn update_listing_link(
             ),
             _ => super::error::internal_error(format!("{e:?}")),
         })?;
-    open_links(&state, std::slice::from_mut(&mut request)).map_err(super::error::internal_error)?;
+    open_links(&state, std::slice::from_mut(&mut request)).await.map_err(super::error::internal_error)?;
     Ok(Json(serde_json::json!({
         "request": request,
         "message": "Updated. Our re-checks will look at this page from now on.",
@@ -166,7 +163,7 @@ pub async fn request_assistance(
             ),
             _ => super::error::internal_error(format!("{e:?}")),
         })?;
-    open_links(&state, std::slice::from_mut(&mut request)).map_err(super::error::internal_error)?;
+    open_links(&state, std::slice::from_mut(&mut request)).await.map_err(super::error::internal_error)?;
 
     audit::AuditEntry::builder(audit::actions::REMOVAL_ASSISTANCE_REQUEST, audit::resources::EXPOSURE)
         .customer_id(auth.id)
@@ -225,7 +222,7 @@ pub async fn authorize(
             ),
             _ => super::error::internal_error(format!("{e:?}")),
         })?;
-    open_links(&state, std::slice::from_mut(&mut request)).map_err(super::error::internal_error)?;
+    open_links(&state, std::slice::from_mut(&mut request)).await.map_err(super::error::internal_error)?;
 
     audit::AuditEntry::builder(audit::actions::EXPOSURE_AUTHORIZE_REMOVAL, audit::resources::EXPOSURE)
         .customer_id(auth.id)
@@ -257,7 +254,7 @@ pub async fn get_request(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    open_links(&state, std::slice::from_mut(&mut request)).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    open_links(&state, std::slice::from_mut(&mut request)).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let audit_log = removal::get_removal_audit_log(&state.pool, id)
         .await
@@ -294,7 +291,7 @@ pub async fn list_pending(
     let mut requests = removal::list_removal_requests_by_status(&state.pool, status)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    open_links(&state, &mut requests).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    open_links(&state, &mut requests).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(ListPendingResponse { requests }))
 }

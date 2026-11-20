@@ -33,7 +33,8 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::crypto::{decrypt_str, derive_customer_key, encrypt_str, MasterKey};
+use crate::crypto::envelope::purpose;
+use crate::services::keys::KeyService;
 use crate::models::customer::CleartextIdentity;
 use crate::services::{audit, customer as customer_svc, monitoring};
 
@@ -47,7 +48,7 @@ const TOKEN_VERSION: u8 = 1;
 const PURPOSE_SCAN: &str = "scan";
 
 /// Plaintext of a scan token. It is encrypted with the customer's own derived key
-/// (AES-256-GCM), so it cannot be forged or edited without the master key, and a
+/// (AES-256-GCM), so it cannot be forged or edited without the customer's data key, and a
 /// token minted for one customer cannot even be decrypted under another's key.
 #[derive(Debug, Serialize, Deserialize)]
 struct ScopedToken {
@@ -75,16 +76,16 @@ pub enum AccessError {
 // ---------------------------------------------------------------------------
 
 /// Mint a token that authorizes fetching identity for exactly one scan job.
-pub fn issue_scan_token(
-    master: &MasterKey,
+pub async fn issue_scan_token(
+    keys: &KeyService,
     customer_id: Uuid,
     job_id: Uuid,
 ) -> anyhow::Result<String> {
-    issue_scan_token_at(master, customer_id, job_id, OffsetDateTime::now_utc().unix_timestamp())
+    issue_scan_token_at(keys, customer_id, job_id, OffsetDateTime::now_utc().unix_timestamp()).await
 }
 
-fn issue_scan_token_at(
-    master: &MasterKey,
+async fn issue_scan_token_at(
+    keys: &KeyService,
     customer_id: Uuid,
     job_id: Uuid,
     now: i64,
@@ -97,13 +98,13 @@ fn issue_scan_token_at(
         iat: now,
         exp: now + SCAN_TOKEN_TTL_SECS,
     };
-    let key = derive_customer_key(master, customer_id);
-    let blob = encrypt_str(&key, &serde_json::to_string(&token)?)?;
+    let ck = keys.customer(customer_id).await?;
+    let blob = ck.seal_str(purpose::SCAN_TOKEN, &serde_json::to_string(&token)?)?;
     Ok(BASE64.encode(blob))
 }
 
-fn verify_scan_token(
-    master: &MasterKey,
+async fn verify_scan_token(
+    keys: &KeyService,
     customer_id: Uuid,
     job_id: Uuid,
     token: &str,
@@ -111,8 +112,13 @@ fn verify_scan_token(
 ) -> Result<(), AccessError> {
     let blob = BASE64.decode(token.trim()).map_err(|_| AccessError::Denied)?;
     // Wrong customer => wrong derived key => authentication failure here.
-    let json = decrypt_str(&derive_customer_key(master, customer_id), &blob)
-        .map_err(|_| AccessError::Denied)?;
+    let ck = keys.customer(customer_id).await.map_err(|e| {
+        // A key service that is down is not the same as a forged token; the caller is told "no"
+        // either way, but the operator must be able to tell the difference.
+        tracing::error!(error = %e, "Could not get the customer's key to check a scan token");
+        AccessError::Denied
+    })?;
+    let json = ck.open_str(purpose::SCAN_TOKEN, &blob).map_err(|_| AccessError::Denied)?;
     let t: ScopedToken = serde_json::from_str(&json).map_err(|_| AccessError::Denied)?;
 
     let ok = t.v == TOKEN_VERSION
@@ -134,13 +140,13 @@ fn verify_scan_token(
 
 async fn authorize_scan(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
     job_id: Uuid,
     token: &str,
     now: i64,
 ) -> Result<(), AccessError> {
-    verify_scan_token(master, customer_id, job_id, token, now)?;
+    verify_scan_token(keys, customer_id, job_id, token, now).await?;
 
     // The token proves the job was issued; the row proves it is still wanted.
     let live: Option<Uuid> = sqlx::query_scalar(
@@ -255,12 +261,12 @@ async fn record_denied(pool: &PgPool, purpose: Purpose, scope_id: Uuid) {
 /// written to the audit log. If the audit write fails, nothing is returned.
 async fn decrypt_and_audit(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
     purpose: Purpose,
     scope_id: Uuid,
 ) -> Result<CleartextIdentity, AccessError> {
-    let identity = customer_svc::load_cleartext_identity(pool, master, customer_id)
+    let identity = customer_svc::load_cleartext_identity(pool, keys, customer_id)
         .await
         .context("load identity")?;
 
@@ -277,26 +283,26 @@ async fn decrypt_and_audit(
 /// Identity for a scan job, against the token minted for that job.
 pub async fn release_for_scan(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
     job_id: Uuid,
     token: &str,
 ) -> Result<CleartextIdentity, AccessError> {
     let now = OffsetDateTime::now_utc().unix_timestamp();
-    if let Err(e) = authorize_scan(pool, master, customer_id, job_id, token, now).await {
+    if let Err(e) = authorize_scan(pool, keys, customer_id, job_id, token, now).await {
         if matches!(e, AccessError::Denied) {
             record_denied(pool, Purpose::Scan, job_id).await;
         }
         return Err(e);
     }
-    decrypt_and_audit(pool, master, customer_id, Purpose::Scan, job_id).await
+    decrypt_and_audit(pool, keys, customer_id, Purpose::Scan, job_id).await
 }
 
 /// Identity for submitting or verifying a removal request. The customer comes from
 /// the request itself.
 pub async fn release_for_removal(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     request_id: Uuid,
 ) -> Result<CleartextIdentity, AccessError> {
     let customer_id = match authorize_removal(pool, request_id).await {
@@ -308,7 +314,7 @@ pub async fn release_for_removal(
             return Err(e);
         }
     };
-    decrypt_and_audit(pool, master, customer_id, Purpose::Removal, request_id).await
+    decrypt_and_audit(pool, keys, customer_id, Purpose::Removal, request_id).await
 }
 
 /// The details for ONE deletion request email, and nothing more: the name, the first email
@@ -317,7 +323,7 @@ pub async fn release_for_removal(
 /// whatever the agent asks for. The customer comes from the request itself.
 pub async fn release_for_deletion(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     request_id: Uuid,
 ) -> Result<CleartextIdentity, AccessError> {
     let (customer_id, include_address) = match authorize_deletion(pool, request_id).await {
@@ -329,7 +335,7 @@ pub async fn release_for_deletion(
             return Err(e);
         }
     };
-    let mut identity = decrypt_and_audit(pool, master, customer_id, Purpose::Deletion, request_id).await?;
+    let mut identity = decrypt_and_audit(pool, keys, customer_id, Purpose::Deletion, request_id).await?;
     zeroize::Zeroize::zeroize(&mut identity.phone_numbers);
     zeroize::Zeroize::zeroize(&mut identity.previous_addresses);
     zeroize::Zeroize::zeroize(&mut identity.date_of_birth);
@@ -346,7 +352,7 @@ pub async fn release_for_deletion(
 /// Identity for a reappearance check. The customer comes from the exposure itself.
 pub async fn release_for_monitoring(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     exposure_id: Uuid,
 ) -> Result<CleartextIdentity, AccessError> {
     let customer_id = match authorize_monitoring(pool, exposure_id).await {
@@ -358,7 +364,7 @@ pub async fn release_for_monitoring(
             return Err(e);
         }
     };
-    decrypt_and_audit(pool, master, customer_id, Purpose::Monitoring, exposure_id).await
+    decrypt_and_audit(pool, keys, customer_id, Purpose::Monitoring, exposure_id).await
 }
 
 #[cfg(test)]
@@ -367,84 +373,104 @@ mod tests {
     use crate::test_support as ts;
     use sqlx::PgPool;
 
-    fn master() -> MasterKey {
-        MasterKey::from_base64(&ts::master_key_b64()).unwrap()
+    fn master(pool: &PgPool) -> KeyService {
+        ts::key_service(pool.clone())
+    }
+
+    async fn customer(pool: &PgPool) -> Uuid {
+        ts::customer(pool, "free", false).await
     }
 
     // ---- token ------------------------------------------------------------
 
-    #[test]
-    fn token_round_trips_for_the_job_it_was_minted_for() {
-        let (m, c, j) = (master(), Uuid::new_v4(), Uuid::new_v4());
-        let t = issue_scan_token_at(&m, c, j, 1_000).unwrap();
-        assert!(verify_scan_token(&m, c, j, &t, 1_000).is_ok());
-        assert!(verify_scan_token(&m, c, j, &t, 1_000 + SCAN_TOKEN_TTL_SECS - 1).is_ok());
+    #[sqlx::test(migrations = "./migrations")]
+    async fn token_round_trips_for_the_job_it_was_minted_for(pool: PgPool) {
+        let (m, c, j) = (master(&pool), customer(&pool).await, Uuid::new_v4());
+        let t = issue_scan_token_at(&m, c, j, 1_000).await.unwrap();
+        assert!(verify_scan_token(&m, c, j, &t, 1_000).await.is_ok());
+        assert!(verify_scan_token(&m, c, j, &t, 1_000 + SCAN_TOKEN_TTL_SECS - 1).await.is_ok());
     }
 
-    #[test]
-    fn token_for_one_job_is_rejected_for_another() {
-        let (m, c) = (master(), Uuid::new_v4());
-        let t = issue_scan_token_at(&m, c, Uuid::new_v4(), 1_000).unwrap();
+    #[sqlx::test(migrations = "./migrations")]
+    async fn token_for_one_job_is_rejected_for_another(pool: PgPool) {
+        let (m, c) = (master(&pool), customer(&pool).await);
+        let t = issue_scan_token_at(&m, c, Uuid::new_v4(), 1_000).await.unwrap();
         assert!(matches!(
-            verify_scan_token(&m, c, Uuid::new_v4(), &t, 1_000),
+            verify_scan_token(&m, c, Uuid::new_v4(), &t, 1_000).await,
             Err(AccessError::Denied)
         ));
     }
 
-    #[test]
-    fn token_for_one_customer_is_rejected_for_another() {
-        let (m, j) = (master(), Uuid::new_v4());
-        let t = issue_scan_token_at(&m, Uuid::new_v4(), j, 1_000).unwrap();
+    #[sqlx::test(migrations = "./migrations")]
+    async fn token_for_one_customer_is_rejected_for_another(pool: PgPool) {
+        let (m, j) = (master(&pool), Uuid::new_v4());
+        let (a, b) = (customer(&pool).await, customer(&pool).await);
+        let t = issue_scan_token_at(&m, a, j, 1_000).await.unwrap();
         assert!(matches!(
-            verify_scan_token(&m, Uuid::new_v4(), j, &t, 1_000),
+            verify_scan_token(&m, b, j, &t, 1_000).await,
             Err(AccessError::Denied)
         ));
     }
 
-    #[test]
-    fn expired_and_future_dated_tokens_are_rejected() {
-        let (m, c, j) = (master(), Uuid::new_v4(), Uuid::new_v4());
-        let t = issue_scan_token_at(&m, c, j, 1_000).unwrap();
-        assert!(verify_scan_token(&m, c, j, &t, 1_000 + SCAN_TOKEN_TTL_SECS).is_err(), "expired");
-        assert!(verify_scan_token(&m, c, j, &t, 1_000 - CLOCK_SKEW_SECS - 10).is_err(), "issued in the future");
+    #[sqlx::test(migrations = "./migrations")]
+    async fn expired_and_future_dated_tokens_are_rejected(pool: PgPool) {
+        let (m, c, j) = (master(&pool), customer(&pool).await, Uuid::new_v4());
+        let t = issue_scan_token_at(&m, c, j, 1_000).await.unwrap();
+        assert!(verify_scan_token(&m, c, j, &t, 1_000 + SCAN_TOKEN_TTL_SECS).await.is_err(), "expired");
+        assert!(verify_scan_token(&m, c, j, &t, 1_000 - CLOCK_SKEW_SECS - 10).await.is_err(), "issued in the future");
     }
 
-    #[test]
-    fn garbage_and_tampered_tokens_are_rejected() {
-        let (m, c, j) = (master(), Uuid::new_v4(), Uuid::new_v4());
+    #[sqlx::test(migrations = "./migrations")]
+    async fn garbage_and_tampered_tokens_are_rejected(pool: PgPool) {
+        let (m, c, j) = (master(&pool), customer(&pool).await, Uuid::new_v4());
         for bad in ["", "not base64!!", "AAAA", &BASE64.encode(b"short")] {
-            assert!(verify_scan_token(&m, c, j, bad, 1_000).is_err(), "{bad:?}");
+            assert!(verify_scan_token(&m, c, j, bad, 1_000).await.is_err(), "{bad:?}");
         }
-        let mut blob = BASE64.decode(issue_scan_token_at(&m, c, j, 1_000).unwrap()).unwrap();
+        let mut blob = BASE64.decode(issue_scan_token_at(&m, c, j, 1_000).await.unwrap()).unwrap();
         let last = blob.len() - 1;
         blob[last] ^= 1;
-        assert!(verify_scan_token(&m, c, j, &BASE64.encode(blob), 1_000).is_err());
+        assert!(verify_scan_token(&m, c, j, &BASE64.encode(blob), 1_000).await.is_err());
     }
 
-    #[test]
-    fn a_token_minted_under_a_different_master_key_is_rejected() {
-        let (c, j) = (Uuid::new_v4(), Uuid::new_v4());
-        let other = MasterKey::from_base64(&ts::other_master_key_b64()).unwrap();
-        let t = issue_scan_token_at(&other, c, j, 1_000).unwrap();
-        assert!(verify_scan_token(&master(), c, j, &t, 1_000).is_err());
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_token_minted_under_a_different_key_service_is_rejected(pool: PgPool) {
+        // Same customer, but a data key wrapped by a different environment key: the second
+        // service cannot even read this customer's stored key, so it cannot mint a valid token.
+        let c = customer(&pool).await;
+        let j = Uuid::new_v4();
+        let good = master(&pool);
+        let t = issue_scan_token_at(&good, c, j, 1_000).await.unwrap();
+        let other = ts::key_service_with_master(pool.clone(), &ts::other_master_key_b64());
+        assert!(verify_scan_token(&other, c, j, &t, 1_000).await.is_err());
+        assert!(verify_scan_token(&good, c, j, &t, 1_000).await.is_ok());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_token_cannot_be_used_as_any_other_kind_of_encrypted_field(pool: PgPool) {
+        let (m, c, j) = (master(&pool), customer(&pool).await, Uuid::new_v4());
+        let t = issue_scan_token_at(&m, c, j, 1_000).await.unwrap();
+        let blob = BASE64.decode(t).unwrap();
+        let ck = m.customer(c).await.unwrap();
+        assert!(ck.open_str(purpose::IDENTITY_FULL_NAME, &blob).is_err());
+        assert!(ck.open_str(purpose::SCAN_TOKEN, &blob).is_ok());
     }
 
     // ---- scan release ------------------------------------------------------
 
     #[sqlx::test(migrations = "./migrations")]
     async fn scan_release_requires_token_and_live_job(pool: PgPool) {
-        let m = master();
+        let m = master(&pool);
         let cust = ts::customer(&pool, "premium", true).await;
         ts::identity(&pool, &m, cust, "Jane Smith").await;
         let job = ts::scan_job(&pool, cust, "queued").await;
-        let token = issue_scan_token(&m, cust, job).unwrap();
+        let token = issue_scan_token(&m, cust, job).await.unwrap();
 
         let id = release_for_scan(&pool, &m, cust, job, &token).await.expect("released");
         assert_eq!(id.full_name, "Jane Smith");
 
         // wrong token / other job's token / no token
         let other_job = ts::scan_job(&pool, cust, "queued").await;
-        let other_token = issue_scan_token(&m, cust, other_job).unwrap();
+        let other_token = issue_scan_token(&m, cust, other_job).await.unwrap();
         for bad in [other_token.as_str(), "", "garbage"] {
             assert!(matches!(
                 release_for_scan(&pool, &m, cust, job, bad).await,
@@ -462,12 +488,12 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn another_customers_job_cannot_be_used_to_read_identity(pool: PgPool) {
-        let m = master();
+        let m = master(&pool);
         let (alice, bob) = (ts::customer(&pool, "free", false).await, ts::customer(&pool, "free", false).await);
         ts::identity(&pool, &m, alice, "Alice A").await;
         ts::identity(&pool, &m, bob, "Bob B").await;
         let alice_job = ts::scan_job(&pool, alice, "queued").await;
-        let alice_token = issue_scan_token(&m, alice, alice_job).unwrap();
+        let alice_token = issue_scan_token(&m, alice, alice_job).await.unwrap();
 
         // claim to be Bob while presenting Alice's job and token
         assert!(matches!(
@@ -480,7 +506,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn removal_release_is_limited_to_actionable_requests(pool: PgPool) {
-        let m = master();
+        let m = master(&pool);
         let cust = ts::customer(&pool, "personal", true).await;
         ts::identity(&pool, &m, cust, "Jane Smith").await;
         let exp = ts::exposure(&pool, cust, true, None).await;
@@ -512,7 +538,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn monitoring_release_is_limited_to_due_eligible_exposures(pool: PgPool) {
-        let m = master();
+        let m = master(&pool);
         let premium = ts::customer(&pool, "premium", true).await;
         let free = ts::customer(&pool, "free", true).await;
         let disabled = ts::customer(&pool, "premium", false).await;
@@ -536,7 +562,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn every_release_and_every_denial_is_audited(pool: PgPool) {
-        let m = master();
+        let m = master(&pool);
         let cust = ts::customer(&pool, "personal", true).await;
         ts::identity(&pool, &m, cust, "Jane Smith").await;
         let exp = ts::exposure(&pool, cust, true, None).await;
@@ -559,7 +585,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn if_the_audit_write_fails_the_identity_is_not_released(pool: PgPool) {
-        let m = master();
+        let m = master(&pool);
         let cust = ts::customer(&pool, "personal", true).await;
         ts::identity(&pool, &m, cust, "Jane Smith").await;
         let exp = ts::exposure(&pool, cust, true, None).await;

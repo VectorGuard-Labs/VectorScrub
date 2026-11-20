@@ -132,7 +132,7 @@ Data brokers regularly re-acquire and republish information even after opt-outs.
 Every plan covers one person. There is no shared or family plan: each family member who wants protection has their own account, their own encrypted profile, and their own Privacy Score.
 
 ### Know your data is protected — for real
-VectorScrub encrypts all customer identity data with AES-256-GCM using a unique cryptographic key derived for each customer. The key material never leaves the Rust backend process. Customer PII is never used to train AI models. The audit log is tamper-evident and append-only.
+VectorScrub encrypts all customer identity data with AES-256-GCM using a separate random key for each customer, which is itself encrypted by a key held in a separate key service (PyHSM) and not by anything in the backend's environment. Customer PII is never used to train AI models. The audit log is tamper-evident and append-only.
 
 ### Understand your exposure trend
 The Privacy Score tracks over time, so customers can see the concrete impact of removals and understand whether their exposure footprint is growing or shrinking.
@@ -240,15 +240,10 @@ Security is the core architectural constraint, not an afterthought. Every design
 
 | Concern | How VectorScrub handles it |
 |---|---|
-| PII at rest | AES-256-GCM encryption with a per-customer key derived from the master key as SHA-256(master ‖ label ‖ customer id). (Earlier docs said HMAC-SHA256; it is a keyed hash, not an HMAC or HKDF. Changing it would make stored data undecryptable without a migration.) One customer's ciphertext cannot be decrypted with another's key. Known limit: no AEAD associated data, so a blob moved between two fields of the same customer would still decrypt. Listing links (which can contain the customer's name) are sealed the same way (`services/url_vault.rs`, `enc1:` prefix); older plaintext rows are sealed by a startup backfill. |
-| Master key | Loaded once into the Rust process from the `MASTER_ENCRYPTION_KEY` environment variable and validated at startup (the process refuses to start if it is not 32 base64 bytes). Never written to disk, never accessible to the Python agent layer. **There is no HSM or KMS integration**: a PyHSM module and its documentation existed but were never wired in (and put a key-store password in the agent process, against this rule), so they were removed. For production, inject the key from a secrets manager or KMS. |
-| PII and LLMs | No customer PII and no third-party names are ever sent to an LLM, enforced in code. All model calls go through one gateway that redacts the customer's values (patterns), detects other people's names (local spaCy NER), drops every word outside a short structural vocabulary, sends no identity (not even masked hints) and no URLs, and re-checks the final excerpt, blocking the call if anything unsafe remains (`agents/shared/pii_guard.py`, `pii_ner.py`, `pii_vocab.py`). See [How the AI Works](#how-the-ai-works). |
-| Removal authorization | No removal request is ever submitted to a data source without an explicit customer authorization recorded in the database with timestamp. The agent prepares; the customer approves; the executor submits. |
-| Audit trail | Two append-only logs. `removal_audit_log` records every action on a removal request. `audit_log` records registration, login (success, failure, lockout, with client IP), identity submission, **every release of decrypted identity to the agents (and every refusal)**, scan start/recovery/failure, and removal authorization. Both logs are enforced append-only by database triggers (`audit_log` in migration 0007, `removal_audit_log` in 0010, which replaced rules that silently turned writes into no-ops): UPDATE, DELETE and TRUNCATE fail loudly. The only permitted change is clearing `audit_log.customer_id`/`user_email` (pseudonymization). A failed audit write that must not block a request is logged at error level and counted in `audit_write_failures_total`; identity release fails closed instead. This protects against the application and ordinary SQL, not against a database superuser or table owner, who could drop the trigger; real tamper evidence against them needs an external write-once sink or a hash chain, which does not exist. |
-| Evidence collection | Screenshot evidence captured during web form submission is SHA-256 hashed. The hash is stored in the database; screenshots can be stored in encrypted S3 for retrieval. Hashes prove authenticity without storing large binary data. |
-| Model training | Customer PII is never used to fine-tune or train any AI model — not VectorScrub's, not a provider's. |
+| PII at rest | Envelope encryption (`crypto/envelope.rs`, `services/keys.rs`). Each customer has a random 256-bit data key (DEK), stored in `customer_keys` only in wrapped form. Every kind of field gets its own key derived from the DEK with HKDF-SHA256 (salted with the customer id), and every ciphertext is AES-256-GCM with associated data naming the customer and the field, so a value copied to another customer's row or another column fails to open (tested, including a byte-flip at every position). Blob layout: `56 53 02` prefix, nonce, ciphertext, tag. Listing links are sealed the same way (`services/url_vault.rs`, `enc2:` prefix); two-factor secrets too. The old scheme (SHA-256 of one master key, no associated data) is read only by the one-time migration `vectorscrub kms migrate-legacy`. |
+| Key service | The DEKs are wrapped by a key-encryption key (KEK) that lives only in **PyHSM**, reached over a Unix socket (mode 600, no network) with HMAC-authenticated requests. **The backend holds no master key** with `KEY_PROVIDER=pyhsm`; production refuses `KEY_PROVIDER=env` (which derives the KEK from `MASTER_ENCRYPTION_KEY`, for development and tests) unless `KEY_PROVIDER_ALLOW_ENV=true`. The KEK is rotated with `vectorscrub kms rotate`, which adds a KEK version and re-wraps the small data keys without re-encrypting any customer data; old versions stay in the keystore so older backups still open. Unwrapped DEKs are cached in memory for `DEK_CACHE_TTL_SECS` (300). If PyHSM is down, nothing decrypts (no fallback) and `/health/ready` reports `key_service: false`. The backend refuses to start if PyHSM has no key by the expected name (it never silently creates one). **Limits:** PyHSM is a software key service, not a hardware security module: no FIPS 140 validation, no tamper-resistant hardware, and root on its host reads its keystore and memory. A taken-over backend can ask PyHSM to unwrap keys while it is held (PyHSM logs each one). **Losing the keystore, or its password, makes all customer data permanently unreadable**: see `docs/runbooks/key-service.md`. |
 | Agent authentication and scoping | Internal endpoints accept only the `X-Agent-Key` header (compared in constant time, length-hiding), not customer JWTs; the key must be 32+ characters or the backend will not start. The key is **not a skeleton key**: decrypted identity is released only against a concrete, currently-actionable work item, and the customer is derived from that item, never supplied by the caller. A scan needs the job-scoped token minted for exactly that job (AES-GCM under the customer's key, 24 h TTL) and the job must be queued or running; a removal request must be `authorized` or due for verification; an exposure must be due for a reappearance check for an eligible customer. Every release and every refusal is audited, and a release fails if its audit write fails. There is no "identity by customer id" endpoint. Remaining limit: the key is still one shared secret, and a release contains every identity field because redaction and form filling need them. |
-| Tenant isolation | Per-customer encryption keys mean a compromise of one customer's encrypted data does not affect others. |
+| Tenant isolation | Per-customer data keys, and ciphertext bound to its customer and field, mean a compromise of one customer's encrypted data does not affect others. |
 | Password storage | Argon2id with random per-user salt. No plaintext or reversibly encoded passwords stored anywhere. |
 | **Production Security** | **Additional hardening for production deployments** |
 | CSRF protection | Double-submit cookie on all state-changing requests (POST/PUT/DELETE; login/register and agent endpoints are exempt). The server issues a URL-safe token at `/api/v1/csrf-token`, sets it as the `csrf_token` cookie (`Secure` in production, `SameSite=Strict`), and requires the same value in `X-CSRF-Token`, compared in constant time. The frontend sends it automatically through `csrfFetch` (`frontend/src/lib/csrf.ts`). |
@@ -259,6 +254,9 @@ Security is the core architectural constraint, not an afterthought. Every design
 | Agents and backend secrets | The Python agents never receive the master key, JWT secret or database credentials: `agents/shared/config.py` refuses to start if any is in the process environment or the `.env` it would read. This is a guard against misconfiguration, not a sandbox; it cannot stop an operator handing the agents other secrets. |
 | "Removed" evidence | A record is reported removed only on positive evidence: the page is gone (404/410), or a substantial server-rendered page at the SAME address has no sign of the customer, or the model says "not a match" with confidence of at least 0.7. A redirect to a different page, a client-rendered or "enable JavaScript" shell, a bot wall, a stub page, a fetch error, or an unsure model are all inconclusive and retried. |
 | Rate limiting and lockout | Per-client-IP token buckets (GCRA, one atomic Lua script in Redis, so every backend instance shares the same counts; keys `<RATE_LIMIT_KEY_PREFIX>:rl:...` expire by themselves): a strict one on login and register (default 5/minute, burst 5) and a general one on the customer API (20/s, burst 60); 429 responses carry `Retry-After`. Internal agent routes and health probes are exempt. If Redis is unreachable or slower than 250 ms the limiter falls back to the same algorithm in the instance's memory (so the limit is then per instance, up to N times higher with N instances) rather than failing open or taking the API down; it logs once per outage, counts `rate_limit_backend_errors_total`, and retries Redis every 5 s. Client IP is the TCP peer unless `TRUST_PROXY_HEADERS=true`, in which case it is the `X-Forwarded-For` entry added by your own proxy (`TRUSTED_PROXY_HOPS` places from the right, default 1), never the client-controlled left side; the audit trail and the limiter use the same address, and IPv6 clients are limited per /64. Separately, 5 failed logins for an email lock it for 15 minutes, doubling every 5 further failures up to an hour; keyed on a hash of the email in Postgres so a non-existent email locks exactly like a real one, and unknown emails still pay for one Argon2 verification so response time does not reveal which emails are registered. Trade-off: someone who knows a victim's email can lock them out for up to an hour; the per-IP limit bounds how fast one source can do it. Request timeout is 30 s. |
+| Closed by default | `/api/v1/metrics` needs `Authorization: Bearer $METRICS_TOKEN` and answers 404 outside development when no token is set. The interactive API docs (`/docs`) are not served in production. With `INTERNAL_PORT` set, the agent-only `/internal/*` routes are served on that separate port and the public port does not have them at all (compose does this and puts the agents on an internal-only network with the backend). The reference proxy (`infra/nginx/`) answers 404 for all three as a second lock. |
+| Encrypted connections | In production the backend refuses to start unless `DATABASE_URL` has `sslmode=require` (or `verify-ca`/`verify-full`) and `REDIS_URL` is `rediss://`, unless `DATABASE_ALLOW_PLAINTEXT` / `REDIS_ALLOW_PLAINTEXT` is set to `true` for a private network (compose sets both, because its Postgres and Redis sit on internal-only networks). Both TLS paths were tested against live TLS servers. Agent-to-backend traffic is plain HTTP on that private network. |
+| Audit identifiers | After `AUDIT_IDENTIFIER_RETENTION_DAYS` (180) the email, IP address and user agent are cleared from `audit_log` rows, including failed logins for emails that never had an account. The row itself (action, result, time) stays. Runs with the scan-recovery housekeeping. |
 | Circuit breakers | Per-host breakers (`agents/shared/circuit_breaker.py`) around the discovery and monitoring page fetches: after 5 failures or 429/5xx answers a host is left alone for 5 minutes, and those checks come back inconclusive instead of piling on. **Not covered**: the opt-out form submission, SMTP, and the DROP API. |
 | Input validation | Request bodies are validated with `validator` (Rust) and `pydantic` (Python); callback ranges and lengths are bounded; agent writes are checked for ownership (an exposure can only be recorded against a running job of that customer; an audit entry only against the request's real owner). Errors that are not the caller's fault return a generic 500 and are logged server-side. A separate Python "PII validation framework" existed but was never connected and was removed. |
 | Request tracing | Unique request IDs tracked across all services for security auditing and debugging. |
@@ -333,7 +331,8 @@ VectorScrub/
 │       │   ├── csrf.rs               # GET /csrf-token for CSRF protection
 │       │   └── metrics.rs            # GET /metrics for Prometheus scraping
 │       ├── crypto/
-│       │   └── mod.rs                # AES-256-GCM encrypt/decrypt, key derivation
+│       │   ├── mod.rs                # old (format 1) primitives, read only by the migration
+│       │   └── envelope.rs           # format 2: per-customer data key, HKDF field keys, AAD
 │       ├── middleware/
 │       │   ├── mod.rs                # CORS, tracing, timeout, request IDs
 │       │   ├── auth_extractor.rs     # JWT extractor, agent key extractor
@@ -476,13 +475,13 @@ cd ~/VectorScrub   # or wherever you cloned it
 
 ### Step 2 — Generate cryptographic secrets
 
-VectorScrub requires a JWT signing secret and a 32-byte AES-256-GCM master encryption key. Never use placeholder values in any environment.
+VectorScrub requires a JWT signing secret, an agent key, and a key service (PyHSM; see `docs/runbooks/key-service.md`). For local development only, `MASTER_ENCRYPTION_KEY` (32 bytes, base64) stands in for the key service. Never use placeholder values in any environment.
 
 ```bash
 bash infra/scripts/gen_keys.sh
 ```
 
-This prints four values: `JWT_SECRET`, `MASTER_ENCRYPTION_KEY`, `POSTGRES_PASSWORD`, and `REDIS_PASSWORD`. Copy them — you will need them in the next step.
+This prints the secrets you need: `JWT_SECRET`, `AGENT_API_KEY`, `PYHSM_IPC_SECRET`, a PyHSM keystore password, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, and a development-only `MASTER_ENCRYPTION_KEY`. Copy them — you will need them in the next step.
 
 ### Step 3 — Create your .env file
 
@@ -604,7 +603,11 @@ All variables are defined in `.env.example`. Copy it to `.env` before starting a
 | `REDIS_URL` | Yes | Redis connection string. Example: `redis://localhost:6379` |
 | `REDIS_PASSWORD` | Yes | Password for Redis (used by Docker Compose) |
 | `JWT_SECRET` | Yes | Random string used to sign JWTs, at least 32 characters (the backend refuses to start otherwise). Generate with `openssl rand -base64 48` |
-| `MASTER_ENCRYPTION_KEY` | Yes | Base64-encoded 32-byte AES master key, validated at startup. Generate with `openssl rand -base64 32`. Read from the environment only; there is no HSM/KMS integration. Held by the Rust backend only. |
+| `KEY_PROVIDER` | No | `env` (default; development and tests) or `pyhsm` (production). Production refuses `env` unless `KEY_PROVIDER_ALLOW_ENV=true`. |
+| `PYHSM_SOCKET` / `PYHSM_KEY_ID` / `PYHSM_TIMEOUT_MS` | No | Defaults `/run/pyhsm/pyhsm.sock`, `vectorscrub-kek`, `5000`. |
+| `PYHSM_IPC_SECRET` or `PYHSM_IPC_SECRET_FILE` | With `pyhsm` | 32+ characters; the backend's credential to PyHSM. Backend-only: the agents refuse to start if they have it. |
+| `DEK_CACHE_TTL_SECS` | No | Default `300`; `0` asks PyHSM on every request. |
+| `MASTER_ENCRYPTION_KEY` | With `env` | Base64 32-byte key. Development and tests only, or set once to run `kms migrate-legacy`. Validated when present. Should be absent from a production backend. |
 | `PORT` | No | Port for the Rust API (default: `8080`) |
 | `ENVIRONMENT` | No | `development`, `staging`, or `production` (default: `development`). Any other value stops the backend at startup. Outside `development` it also requires `ALLOWED_ORIGINS`, and in `production` those must be `https://` and not localhost. Drives the `Secure` flag on cookies (staging and production) and HSTS (production). |
 | `DB_POOL_SIZE` | No | PostgreSQL connection pool size (default: `10`) |
@@ -614,6 +617,11 @@ All variables are defined in `.env.example`. Copy it to `.env` before starting a
 | `TRUSTED_PROXY_HOPS` | No | How many of your proxies are in front of the backend when `TRUST_PROXY_HEADERS=true`: the client is the `X-Forwarded-For` entry this many places from the right (default `1`; allowed 1-10). The left side of that header is client-controlled and never used. |
 | `RATE_LIMIT_GENERAL_PER_SECOND` / `RATE_LIMIT_GENERAL_BURST` | No | Per-IP limit for customer routes (defaults: `20`, `60`) |
 | `RATE_LIMIT_AUTH_PER_MINUTE` / `RATE_LIMIT_AUTH_BURST` | No | Per-IP limit for login and register (defaults: `5`, `5`) |
+| `METRICS_TOKEN` | No | 32+ characters. Bearer token for `/api/v1/metrics`; without it the endpoint is 404 outside development. Backend-only (the agents refuse to start if they have it). |
+| `INTERNAL_PORT` | No | Serve `/internal/*` on this port instead of `PORT`. Must differ from `PORT`. |
+| `INTERNAL_BIND` | No | IP address the internal listener binds to (default `0.0.0.0`). Compose sets the backend's address on its agent-only network so other networks cannot reach the port. |
+| `DATABASE_ALLOW_PLAINTEXT` / `REDIS_ALLOW_PLAINTEXT` | No | `true` lets production run without TLS to Postgres / Redis. Only for a private network. |
+| `AUDIT_IDENTIFIER_RETENTION_DAYS` | No | Default `180` (30 to 3650). Days before email, IP and user agent are cleared from audit rows. |
 | `RATE_LIMIT_KEY_PREFIX` | No | Prefix of the limiter's Redis keys (default `vs`; letters, digits, `-`, `_`; at most 32). Give each environment that shares one Redis its own prefix. |
 | `SCAN_RECOVERY_INTERVAL_SECS` | No | How often the recovery loop runs (default: `60`) |
 | `SCAN_STALE_AFTER_SECS` | No | A running scan with no heartbeat for this long is requeued (default: `600`) |
@@ -754,6 +762,7 @@ All endpoints are prefixed with `/api/v1`. Customer endpoints require the sessio
 | `POST` | `/auth/login` | Sign in. Body: `{ email, password }`. Returns `{ customer }` and sets the `vs_session` cookie, as register does. If the account has two-factor on, the password alone returns `200 {"mfa_required": true}` with no cookie and no session; send the same body again with `mfa_code` (authenticator code or recovery code). After 5 consecutive failures (wrong password or wrong code) for an email the endpoint returns `429` with a `Retry-After` header (15 min, doubling every further 5 failures, capped at 60 min). Unknown emails lock out identically, so the endpoint does not reveal which accounts exist. |
 | `POST` | `/auth/logout` | Revokes the session on the server and expires the cookie. Works with or without a session. A token copied before logout is refused from then on. |
 | `POST` | `/auth/logout-all` | Revokes every session of the signed-in customer. |
+| `POST` | `/me/password` | Body `{ current_password, new_password, mfa_code? }`. Needs the current password (and a code with two-factor on), shares the login lockout, refuses an unchanged or out-of-range password (12 to 128 characters), ends every other session. `204`. |
 | `GET` | `/me/mfa` | `{ enabled, recovery_codes_remaining }`. |
 | `POST` | `/me/mfa/setup` | Body `{ password }`. Returns `{ secret, otpauth_uri }` for an authenticator app. Protects nothing yet. `409` if already on. |
 | `POST` | `/me/mfa/enable` | Body `{ code }`. Confirms setup, turns two-factor on, returns the ten recovery codes (shown once) and ends the customer's other sessions. |
@@ -1087,7 +1096,7 @@ This section lists what exists in the code today. Items that are *not* implement
 
 ### Security Hardening
 
-**Secrets.** The backend refuses to start unless `JWT_SECRET` and `AGENT_API_KEY` are at least 32 characters and `MASTER_ENCRYPTION_KEY` decodes to exactly 32 bytes. `infra/scripts/gen_keys.sh` generates all of them. The master key is read from the environment only; in production inject it from a secret manager. There is no HSM/KMS integration and no automatic key rotation.
+**Secrets.** The backend refuses to start unless `JWT_SECRET` and `AGENT_API_KEY` are at least 32 characters and `MASTER_ENCRYPTION_KEY` decodes to exactly 32 bytes. `infra/scripts/gen_keys.sh` generates all of them. In production the customer data keys are wrapped by PyHSM (no master key in the backend); rotate the KEK with `vectorscrub kms rotate` (manual, no automatic schedule).
 
 **Rate limiting and lockout.** Per-IP limits (see [Authentication](#authentication)) and per-email login lockout. Both are held per backend instance (limits in memory, lockout in Postgres). Behind a proxy set `TRUST_PROXY_HEADERS=true` (and `TRUSTED_PROXY_HOPS` if you have more than one proxy); the client is taken from the right-hand end of `X-Forwarded-For`, so a client cannot choose its own address by sending the header itself. Without it every client appears as the proxy. Lockout can be used to lock a known email out for up to an hour; that trade-off was accepted over leaving the endpoint open to guessing.
 
@@ -1116,7 +1125,7 @@ There is no automated retention or erasure job. The earlier `data_retention.rs` 
 
 ### Docker Compose
 
-`infra/docker/docker-compose.yml` requires the secrets (`POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET`, `MASTER_ENCRYPTION_KEY`, `AGENT_API_KEY`) and fails with a clear message if one is missing. Postgres and Redis are bound to `127.0.0.1`. The backend image builds offline from `backend/.sqlx`.
+`infra/docker/docker-compose.yml` requires the secrets (`POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET`, `PYHSM_IPC_SECRET`, `PYHSM_PASSWORD_FILE`, `AGENT_API_KEY`) and a PyHSM image (`infra/docker/Dockerfile.pyhsm`) and fails with a clear message if one is missing. Postgres and Redis are bound to `127.0.0.1`. The backend image builds offline from `backend/.sqlx`.
 
 ### Compliance
 

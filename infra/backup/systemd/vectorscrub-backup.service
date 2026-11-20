@@ -1,0 +1,19 @@
+# Database backup. Install: see infra/backup/README.md.
+[Unit]
+Description=VectorScrub database backup (encrypted, verified, copied off the machine)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=vsbackup
+Group=vsbackup
+# Settings and secrets live here, mode 600, owned by vsbackup. Never in this unit file.
+EnvironmentFile=/etc/vectorscrub/backup.env
+ExecStart=/opt/vectorscrub/infra/scripts/backup.sh
+# The script needs nothing else from the machine.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/backups/vectorscrub

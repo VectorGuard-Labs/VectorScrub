@@ -3,8 +3,8 @@
 //! `vectorscrub verify-backup` runs these checks against a restored copy (see
 //! infra/scripts/restore_verify.sh and docs/runbooks/backup-and-restore.md). A backup that
 //! restores without errors can still be useless: the schema may be from another version, the
-//! audit-log guards may be missing, or the encrypted data may not open with the master key you
-//! hold. The last one is the one that matters most. Everything personal in this database is
+//! audit-log guards may be missing, or the encrypted data may not open with the key service you
+//! use. The last one is the one that matters most. Everything personal in this database is
 //! encrypted, so a backup is only as good as the key that goes with it.
 //!
 //! The checks read only. The one that tries to delete an audit row does so inside a transaction
@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::crypto::{self, MasterKey};
+use crate::services::keys::KeyService;
 
 /// How many identity profiles and two-factor secrets are trial-decrypted by default.
 pub const DEFAULT_SAMPLE: i64 = 50;
@@ -24,6 +24,7 @@ pub struct Report {
     pub customers: i64,
     pub migrations_expected: usize,
     pub migrations_applied: usize,
+    pub data_keys_checked: i64,
     pub identities_checked: i64,
     pub mfa_secrets_checked: i64,
     pub sealed_links_checked: i64,
@@ -46,6 +47,7 @@ impl Report {
         };
         line(format!("customers:                 {}", self.customers));
         line(format!("migrations:                {} applied, {} expected", self.migrations_applied, self.migrations_expected));
+        line(format!("data keys unwrapped:       {}", self.data_keys_checked));
         line(format!("identity profiles opened:  {}", self.identities_checked));
         line(format!("two-factor secrets opened: {}", self.mfa_secrets_checked));
         line(format!("listing links opened:      {}", self.sealed_links_checked));
@@ -63,12 +65,12 @@ impl Report {
 }
 
 /// Run every check. `sample` bounds how many encrypted rows of each kind are trial-decrypted.
-pub async fn run(pool: &PgPool, master: &MasterKey, sample: i64) -> Result<Report> {
+pub async fn run(pool: &PgPool, keys: &KeyService, sample: i64) -> Result<Report> {
     let customers: i64 = sqlx::query_scalar("SELECT count(*) FROM customers").fetch_one(pool).await.context("count customers")?;
     let mut r = Report { customers, ..Report::default() };
     check_migrations(pool, &mut r).await?;
     check_audit_guards(pool, &mut r).await?;
-    check_encrypted_data(pool, master, sample.max(1), &mut r).await?;
+    check_encrypted_data(pool, keys, sample.max(1), &mut r).await?;
 
     r.newest_audit_entry = sqlx::query_scalar::<_, Option<time::OffsetDateTime>>("SELECT max(timestamp) FROM audit_log")
         .fetch_one(pool)
@@ -157,8 +159,35 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
 }
 
-/// Trial-decrypt a sample of each kind of encrypted value with the key you are holding.
-async fn check_encrypted_data(pool: &PgPool, master: &MasterKey, sample: i64, r: &mut Report) -> Result<()> {
+/// Trial-decrypt a sample of each kind of encrypted value with the key service you are using.
+///
+/// This is the check that matters most. With envelope encryption the proof has two parts: the
+/// customer's wrapped data key must open through the key service (so the key service and its
+/// keystore belong to this backup), and the data must open under that key.
+async fn check_encrypted_data(pool: &PgPool, keys: &KeyService, sample: i64, r: &mut Report) -> Result<()> {
+    use crate::crypto::envelope::purpose;
+
+    // 1. Wrapped data keys.
+    let customers: Vec<Uuid> = sqlx::query_scalar("SELECT customer_id FROM customer_keys ORDER BY random() LIMIT $1")
+        .bind(sample)
+        .fetch_all(pool)
+        .await
+        .context("sample data keys")?;
+    let mut failed = 0;
+    for id in &customers {
+        if keys.customer_patient(*id).await.is_err() {
+            failed += 1;
+        }
+    }
+    r.data_keys_checked = customers.len() as i64;
+    if failed > 0 {
+        r.problems.push(format!(
+            "{failed} of {} sampled customer data keys do not unwrap through the key service. This is the wrong key service or keystore, a damaged backup, or the service is unreachable",
+            customers.len()
+        ));
+    }
+
+    // 2. Identity profiles.
     let identities: Vec<(Uuid, Vec<u8>)> = sqlx::query_as("SELECT customer_id, full_name_enc FROM identity_profiles ORDER BY random() LIMIT $1")
         .bind(sample)
         .fetch_all(pool)
@@ -166,54 +195,75 @@ async fn check_encrypted_data(pool: &PgPool, master: &MasterKey, sample: i64, r:
         .context("sample identity profiles")?;
     let mut failed = 0;
     for (customer, blob) in &identities {
-        let key = crypto::derive_customer_key(master, *customer);
-        if crypto::decrypt_str(&key, blob).is_err() {
+        let opened = match keys.customer_patient(*customer).await {
+            Ok(ck) => ck.open_str(purpose::IDENTITY_FULL_NAME, blob).is_ok(),
+            Err(_) => false,
+        };
+        if !opened {
             failed += 1;
         }
     }
     r.identities_checked = identities.len() as i64;
     if failed > 0 {
         r.problems.push(format!(
-            "{failed} of {} sampled identity profiles do not open with this master key. This is either the wrong key or a damaged backup",
+            "{failed} of {} sampled identity profiles do not open with this key service. This is either the wrong key or a damaged backup",
             identities.len()
         ));
     }
 
+    // 3. Two-factor secrets.
     let secrets: Vec<(Uuid, Vec<u8>)> = sqlx::query_as("SELECT customer_id, secret_enc FROM customer_mfa ORDER BY random() LIMIT $1")
         .bind(sample)
         .fetch_all(pool)
         .await
         .context("sample two-factor secrets")?;
-    let failed = secrets
-        .iter()
-        .filter(|(c, blob)| crypto::decrypt(&crypto::derive_customer_key(master, *c), blob).is_err())
-        .count();
+    let mut failed = 0;
+    for (customer, blob) in &secrets {
+        let opened = match keys.customer_patient(*customer).await {
+            Ok(ck) => ck.open(purpose::MFA_SECRET, blob).is_ok(),
+            Err(_) => false,
+        };
+        if !opened {
+            failed += 1;
+        }
+    }
     r.mfa_secrets_checked = secrets.len() as i64;
     if failed > 0 {
-        r.problems.push(format!("{failed} of {} sampled two-factor secrets do not open with this master key", secrets.len()));
+        r.problems.push(format!("{failed} of {} sampled two-factor secrets do not open with this key service", secrets.len()));
     }
 
+    // 4. Sealed listing links.
     let links: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT customer_id, source_url FROM exposures WHERE source_url LIKE 'enc1:%' ORDER BY random() LIMIT $1",
+        "SELECT customer_id, source_url FROM exposures WHERE source_url LIKE 'enc2:%' ORDER BY random() LIMIT $1",
     )
     .bind(sample)
     .fetch_all(pool)
     .await
     .context("sample sealed listing links")?;
-    let failed = links
-        .iter()
-        .filter(|(c, sealed)| crate::services::url_vault::open(master, *c, sealed).is_err())
-        .count();
+    let mut failed = 0;
+    for (customer, sealed) in &links {
+        if crate::services::url_vault::open(keys, *customer, sealed).await.is_err() {
+            failed += 1;
+        }
+    }
     r.sealed_links_checked = links.len() as i64;
     if failed > 0 {
-        r.problems.push(format!("{failed} of {} sampled listing links do not open with this master key", links.len()));
+        r.problems.push(format!("{failed} of {} sampled listing links do not open with this key service", links.len()));
+    }
+
+    // 5. Anything still in the old format means the old master key is still needed.
+    let legacy = crate::services::kms_migrate::count_legacy(pool).await.unwrap_or(0);
+    if legacy > 0 {
+        r.problems.push(format!(
+            "{legacy} stored values are still in the old encryption format (they need the old master key). Run `vectorscrub kms migrate-legacy`"
+        ));
     }
 
     // A database that has customers but nothing to open would pass every check above for the
-    // wrong reason. With customers present and no identity at all, say so rather than "usable".
-    if r.customers > 0 && r.identities_checked == 0 && r.mfa_secrets_checked == 0 && r.sealed_links_checked == 0 {
+    // wrong reason. With customers present and nothing opened, say so rather than "usable".
+    if r.customers > 0 && r.data_keys_checked + r.identities_checked + r.mfa_secrets_checked + r.sealed_links_checked == 0 {
         r.problems.push(
-            "no encrypted data was found to test the master key against, so it is not proven to match this backup".into(),
+            "no encrypted data was found to test the key service against, so it is not proven to match this backup".into(),
         );
     }
     Ok(())
@@ -224,13 +274,13 @@ mod tests {
     use super::*;
     use crate::test_support as ts;
 
-    fn master() -> MasterKey {
-        MasterKey::from_base64(&ts::master_key_b64()).unwrap()
+    fn keys(pool: &PgPool) -> KeyService {
+        ts::key_service(pool.clone())
     }
 
     async fn populated(pool: &PgPool) -> Uuid {
         let c = ts::customer(pool, "personal", true).await;
-        ts::identity(pool, &master(), c, "Jane Smith").await;
+        ts::identity(pool, &keys(pool), c, "Jane Smith").await;
         crate::services::audit::AuditEntry::builder("user.login", "customer")
             .customer_id(c)
             .log(pool)
@@ -242,23 +292,24 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn a_good_restore_is_usable(pool: PgPool) {
         let c = populated(&pool).await;
-        crate::services::mfa::begin_setup(&pool, &master(), c, "a@example.com").await.unwrap();
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        crate::services::mfa::begin_setup(&pool, &keys(&pool), c, "a@example.com").await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(r.ok(), "{}", r.render());
-        assert_eq!((r.customers, r.identities_checked, r.mfa_secrets_checked), (1, 1, 1));
+        assert_eq!((r.customers, r.data_keys_checked, r.identities_checked, r.mfa_secrets_checked), (1, 1, 1, 1));
         assert_eq!(r.migrations_applied, r.migrations_expected);
         assert!(r.newest_audit_entry.is_some());
         assert!(r.render().contains("RESULT: usable"));
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn the_wrong_master_key_is_caught(pool: PgPool) {
+    async fn the_wrong_key_service_is_caught(pool: PgPool) {
         let c = populated(&pool).await;
-        crate::services::mfa::begin_setup(&pool, &master(), c, "a@example.com").await.unwrap();
-        let wrong = MasterKey::from_base64(&ts::other_master_key_b64()).unwrap();
+        crate::services::mfa::begin_setup(&pool, &keys(&pool), c, "a@example.com").await.unwrap();
+        let wrong = ts::key_service_with_master(pool.clone(), &ts::other_master_key_b64());
         let r = run(&pool, &wrong, DEFAULT_SAMPLE).await.unwrap();
         assert!(!r.ok());
-        assert!(r.problems.iter().any(|p| p.contains("identity profiles") && p.contains("master key")), "{:?}", r.problems);
+        assert!(r.problems.iter().any(|p| p.contains("data keys") && p.contains("do not unwrap")), "{:?}", r.problems);
+        assert!(r.problems.iter().any(|p| p.contains("identity profiles") && p.contains("key service")), "{:?}", r.problems);
         assert!(r.problems.iter().any(|p| p.contains("two-factor")), "{:?}", r.problems);
         assert!(r.render().contains("NOT usable"));
     }
@@ -266,14 +317,14 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn customers_with_nothing_to_decrypt_do_not_count_as_proof_of_the_key(pool: PgPool) {
         ts::customer(&pool, "free", false).await;
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(!r.ok());
         assert!(r.problems.iter().any(|p| p.contains("not proven")), "{:?}", r.problems);
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn an_empty_database_has_no_encrypted_data_and_no_complaint_about_it(pool: PgPool) {
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(r.ok(), "{}", r.render());
     }
 
@@ -282,11 +333,11 @@ mod tests {
         populated(&pool).await;
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT max(version) FROM _sqlx_migrations)")
             .execute(&pool).await.unwrap();
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(r.problems.iter().any(|p| p.contains("is not applied")), "{:?}", r.problems);
 
         sqlx::query("UPDATE _sqlx_migrations SET checksum = '\\x00'::bytea WHERE version = 1").execute(&pool).await.unwrap();
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(r.problems.iter().any(|p| p.contains("different SQL")), "{:?}", r.problems);
     }
 
@@ -295,31 +346,31 @@ mod tests {
         populated(&pool).await;
         sqlx::query("INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (999999, 'future', true, '\\x01'::bytea, 0)")
             .execute(&pool).await.unwrap();
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(r.problems.iter().any(|p| p.contains("999999") && p.contains("newer")), "{:?}", r.problems);
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn a_database_that_is_not_ours_is_reported_not_crashed_on(pool: PgPool) {
         sqlx::query("DROP TABLE _sqlx_migrations").execute(&pool).await.unwrap();
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(r.problems.iter().any(|p| p.contains("not a VectorScrub database")), "{:?}", r.problems);
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn lost_audit_guards_are_caught_and_the_check_deletes_nothing(pool: PgPool) {
         populated(&pool).await;
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(r.ok(), "{}", r.render());
         let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log").fetch_one(&pool).await.unwrap();
         assert_eq!(rows, 1, "the probe is rolled back");
 
         sqlx::query("DROP TRIGGER audit_log_no_update_delete ON audit_log").execute(&pool).await.unwrap();
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(r.problems.iter().any(|p| p.contains("audit_log") && p.contains("triggers")), "{:?}", r.problems);
 
         sqlx::query("DROP TRIGGER removal_audit_log_no_truncate ON removal_audit_log").execute(&pool).await.unwrap();
-        let r = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap();
+        let r = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap();
         assert!(r.problems.iter().any(|p| p.contains("removal_audit_log")), "{:?}", r.problems);
     }
 
@@ -327,7 +378,7 @@ mod tests {
     async fn the_report_contains_no_customer_data(pool: PgPool) {
         let c = populated(&pool).await;
         let email: String = sqlx::query_scalar("SELECT email FROM customers WHERE id = $1").bind(c).fetch_one(&pool).await.unwrap();
-        let text = run(&pool, &master(), DEFAULT_SAMPLE).await.unwrap().render();
+        let text = run(&pool, &keys(&pool), DEFAULT_SAMPLE).await.unwrap().render();
         for secret in [email.as_str(), "Jane", "Smith", &c.to_string(), "Main St"] {
             assert!(!text.contains(secret), "leaked {secret:?}");
         }

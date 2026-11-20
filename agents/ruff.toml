@@ -1,0 +1,17 @@
+# Lint for the agent layer. Deliberately narrow: only rules that find real bugs or security
+# problems, so the check can stay strict (a failing run is always worth reading).
+#   E9, F63, F7, F82   syntax errors, invalid comparisons, undefined names
+#   F811, F841         redefined or unused names (they hide mistakes)
+#   S104               listening on every network interface
+#   S307, S324, S5xx   eval, weak hashes, unsafe deserialisation and TLS settings
+#   S602-S607          shell and subprocess misuse
+# Run: ruff check .  (from agents/)
+target-version = "py313"
+extend-exclude = ["__pycache__", ".venv", "venv"]
+
+[lint]
+select = ["E9", "F63", "F7", "F82", "F811", "F841", "S104", "S307", "S324", "S301", "S302", "S506", "S501", "S502", "S503", "S504", "S505", "S602", "S604", "S605", "S606", "S607", "S608"]
+
+[lint.per-file-ignores]
+# Tests assign values they never read, and use fake secrets on purpose.
+"tests/**" = ["F841", "S104"]  # S104: an address list that must be refused

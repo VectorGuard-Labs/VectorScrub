@@ -3,7 +3,8 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::crypto::{decrypt_str, derive_customer_key, encrypt_str, MasterKey};
+use crate::crypto::envelope::purpose;
+use crate::services::keys::KeyService;
 use crate::models::customer::{
     CleartextIdentity, CreateAccountRequest, Customer, IdentityProfile, SubmitIdentityRequest,
 };
@@ -24,6 +25,17 @@ fn clean_email(email: &str) -> &str {
 }
 
 /// Create a new customer account. Returns the created customer.
+/// Replace the stored password hash. The caller has already proved the old password.
+pub async fn set_password_hash(pool: &PgPool, customer_id: Uuid, new_hash: &str) -> Result<()> {
+    let done = sqlx::query("UPDATE customers SET password_hash = $2, updated_at = NOW() WHERE id = $1")
+        .bind(customer_id)
+        .bind(new_hash)
+        .execute(pool)
+        .await?;
+    anyhow::ensure!(done.rows_affected() == 1, "customer not found");
+    Ok(())
+}
+
 pub async fn create_account(
     pool: &PgPool,
     req: &CreateAccountRequest,
@@ -99,24 +111,24 @@ pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Customer>> {
 /// Raw PII is zeroized after encryption.
 pub async fn save_identity(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     req: &SubmitIdentityRequest,
     customer_id: Uuid,
 ) -> Result<IdentityProfile> {
-    let key = derive_customer_key(master, customer_id);
+    let ck = keys.customer(customer_id).await?;
 
-    let full_name_enc = encrypt_str(&key, &req.full_name)?;
-    let address_enc = encrypt_str(&key, &req.current_address)?;
+    let full_name_enc = ck.seal_str(purpose::IDENTITY_FULL_NAME, &req.full_name)?;
+    let address_enc = ck.seal_str(purpose::IDENTITY_ADDRESS, &req.current_address)?;
     let prev_json = serde_json::to_string(&req.previous_addresses)?;
-    let previous_addresses_enc = encrypt_str(&key, &prev_json)?;
+    let previous_addresses_enc = ck.seal_str(purpose::IDENTITY_PREVIOUS_ADDRESSES, &prev_json)?;
     let phones_json = serde_json::to_string(&req.phone_numbers)?;
-    let phone_numbers_enc = encrypt_str(&key, &phones_json)?;
+    let phone_numbers_enc = ck.seal_str(purpose::IDENTITY_PHONE_NUMBERS, &phones_json)?;
     let emails_json = serde_json::to_string(&req.email_addresses)?;
-    let email_addresses_enc = encrypt_str(&key, &emails_json)?;
+    let email_addresses_enc = ck.seal_str(purpose::IDENTITY_EMAIL_ADDRESSES, &emails_json)?;
     let dob_enc = req
         .date_of_birth
         .as_deref()
-        .map(|d| encrypt_str(&key, d))
+        .map(|d| ck.seal_str(purpose::IDENTITY_DATE_OF_BIRTH, d))
         .transpose()?;
 
     let id = Uuid::new_v4();
@@ -168,7 +180,7 @@ pub async fn has_identity(pool: &PgPool, customer_id: Uuid) -> Result<bool> {
 /// address never leaves this function.
 pub async fn residence_state(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
 ) -> Result<Option<&'static str>> {
     let address_enc: Option<Vec<u8>> =
@@ -177,8 +189,8 @@ pub async fn residence_state(
             .fetch_optional(pool)
             .await?;
     let Some(address_enc) = address_enc else { return Ok(None) };
-    let key = derive_customer_key(master, customer_id);
-    Ok(crate::services::residence::state_from_address(&decrypt_str(&key, &address_enc)?))
+    let ck = keys.customer(customer_id).await?;
+    Ok(crate::services::residence::state_from_address(&ck.open_str(purpose::IDENTITY_ADDRESS, &address_enc)?))
 }
 
 /// Load and decrypt an identity profile. Only services/identity_access.rs should call
@@ -186,7 +198,7 @@ pub async fn residence_state(
 /// The returned CleartextIdentity is zeroized on drop.
 pub async fn load_cleartext_identity(
     pool: &PgPool,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
 ) -> Result<CleartextIdentity> {
     let profile: Option<IdentityProfile> = sqlx::query_as(
@@ -197,22 +209,22 @@ pub async fn load_cleartext_identity(
     .await?;
 
     let profile = profile.ok_or_else(|| anyhow!("No identity profile found for customer"))?;
-    let key = derive_customer_key(master, customer_id);
+    let ck = keys.customer(customer_id).await?;
 
     Ok(CleartextIdentity {
         customer_id: customer_id.to_string(),
-        full_name: decrypt_str(&key, &profile.full_name_enc)?,
-        current_address: decrypt_str(&key, &profile.address_enc)?,
-        previous_addresses: serde_json::from_str(&decrypt_str(
-            &key,
+        full_name: ck.open_str(purpose::IDENTITY_FULL_NAME, &profile.full_name_enc)?,
+        current_address: ck.open_str(purpose::IDENTITY_ADDRESS, &profile.address_enc)?,
+        previous_addresses: serde_json::from_str(&ck.open_str(
+            purpose::IDENTITY_PREVIOUS_ADDRESSES,
             &profile.previous_addresses_enc,
         )?)?,
-        phone_numbers: serde_json::from_str(&decrypt_str(&key, &profile.phone_numbers_enc)?)?,
-        email_addresses: serde_json::from_str(&decrypt_str(&key, &profile.email_addresses_enc)?)?,
+        phone_numbers: serde_json::from_str(&ck.open_str(purpose::IDENTITY_PHONE_NUMBERS, &profile.phone_numbers_enc)?)?,
+        email_addresses: serde_json::from_str(&ck.open_str(purpose::IDENTITY_EMAIL_ADDRESSES, &profile.email_addresses_enc)?)?,
         date_of_birth: profile
             .date_of_birth_enc
             .as_deref()
-            .map(|b| decrypt_str(&key, b))
+            .map(|b| ck.open_str(purpose::IDENTITY_DATE_OF_BIRTH, b))
             .transpose()?,
     })
 }

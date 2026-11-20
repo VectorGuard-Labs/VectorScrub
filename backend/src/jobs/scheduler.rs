@@ -4,7 +4,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::crypto::MasterKey;
+use crate::services::keys::KeyService;
 use crate::models::customer::Customer;
 use crate::services::scan as scan_svc;
 
@@ -16,12 +16,12 @@ use crate::services::scan as scan_svc;
 pub async fn run_scheduled_rescans(
     pool: PgPool,
     redis: redis::Client,
-    master_key_b64: String,
+    keys: std::sync::Arc<KeyService>,
 ) {
     info!("Scheduled rescan dispatcher starting");
 
     loop {
-        if let Err(e) = dispatch_due_rescans(&pool, &redis, &master_key_b64).await {
+        if let Err(e) = dispatch_due_rescans(&pool, &redis, &keys).await {
             error!(error = %e, "Failed to dispatch scheduled rescans");
         }
 
@@ -34,7 +34,7 @@ pub async fn run_scheduled_rescans(
 async fn dispatch_due_rescans(
     pool: &PgPool,
     redis: &redis::Client,
-    master_key_b64: &str,
+    keys: &KeyService,
 ) -> Result<()> {
     // Query customers with monitoring enabled and due for rescan
     // Personal: monthly (30 days), Premium: weekly (7 days)
@@ -63,7 +63,7 @@ async fn dispatch_due_rescans(
     info!(count = customers.len(), "Customers due for scheduled rescan");
 
     for customer in customers {
-        match initiate_scheduled_scan(pool, redis, master_key_b64, &customer).await {
+        match initiate_scheduled_scan(pool, redis, keys, &customer).await {
             Ok(job_id) => {
                 info!(
                     customer_id = %customer.id,
@@ -91,11 +91,10 @@ async fn dispatch_due_rescans(
 async fn initiate_scheduled_scan(
     pool: &PgPool,
     redis: &redis::Client,
-    master_key_b64: &str,
+    keys: &KeyService,
     customer: &Customer,
 ) -> Result<Uuid> {
-    let master = MasterKey::from_base64(master_key_b64)?;
-    let job = scan_svc::initiate_scan(pool, redis, &master, customer.id, &customer.subscription_tier).await?;
+    let job = scan_svc::initiate_scan(pool, redis, keys, customer.id, &customer.subscription_tier).await?;
 
     sqlx::query("UPDATE customers SET last_scan_at = NOW() WHERE id = $1")
         .bind(customer.id)

@@ -2,6 +2,7 @@
 name = "vectorscrub-backend"
 version = "0.1.0"
 edition = "2021"
+publish = false
 authors = ["VectorGuard Labs"]
 description = "VectorScrub backend API - secure PII handling and job orchestration"
 
@@ -35,6 +36,7 @@ rand_core = { version = "0.6", features = ["std"] }
 aes-gcm = "0.10"
 sha2 = "0.10"
 hmac = "0.12"
+hkdf = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
 hex = "0.4"
@@ -46,7 +48,7 @@ time = { version = "0.3", features = ["serde", "serde-well-known", "macros"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Message queue / jobs
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
 
 # Validation
 url = "2.5"
@@ -73,6 +75,11 @@ anyhow = "1"
 # API documentation
 utoipa = { version = "4", features = ["axum_extras", "uuid", "chrono", "time"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
+
+# TLS. Both rustls crypto providers (ring and aws-lc-rs) are compiled in through our dependencies,
+# so rustls cannot pick one by itself and panics on the first TLS connection that is not made by
+# sqlx or reqwest (for example a rediss:// URL). main() installs aws-lc-rs explicitly.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 
 # HTTP client (for internal agent communication)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

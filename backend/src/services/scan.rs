@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::crypto::MasterKey;
+use crate::services::keys::KeyService;
 use crate::models::customer::SubscriptionTier;
 use crate::models::scan_job::{ScanJob, ScanJobPayload, ScanJobStatus, SourceCoverage};
 use crate::services::{exposure as exposure_svc, identity_access};
@@ -35,7 +35,7 @@ pub fn tier_name(tier: &SubscriptionTier) -> String {
 pub async fn initiate_scan(
     pool: &PgPool,
     redis: &redis::Client,
-    master: &MasterKey,
+    keys: &KeyService,
     customer_id: Uuid,
     tier: &SubscriptionTier,
 ) -> Result<ScanJob, ScanError> {
@@ -80,7 +80,7 @@ pub async fn initiate_scan(
         .execute(pool)
         .await?;
 
-    if let Err(e) = dispatch_job(pool, redis, master, job.id, customer_id, &tier_name(tier)).await {
+    if let Err(e) = dispatch_job(pool, redis, keys, job.id, customer_id, &tier_name(tier)).await {
         tracing::error!(job_id = %job.id, error = %e,
             "Could not enqueue scan job; the recovery loop will dispatch it");
     } else {
@@ -96,7 +96,7 @@ pub async fn initiate_scan(
 pub async fn dispatch_job(
     pool: &PgPool,
     redis: &redis::Client,
-    master: &MasterKey,
+    keys: &KeyService,
     job_id: Uuid,
     customer_id: Uuid,
     tier: &str,
@@ -104,7 +104,7 @@ pub async fn dispatch_job(
     let payload = ScanJobPayload {
         job_id,
         customer_id,
-        identity_token: identity_access::issue_scan_token(master, customer_id, job_id)?,
+        identity_token: identity_access::issue_scan_token(keys, customer_id, job_id).await?,
         tier: tier.to_string(),
     };
     let payload_json = serde_json::to_string(&payload)?;
@@ -344,6 +344,8 @@ pub async fn update_scan_status(
 
 #[derive(Debug, Clone)]
 pub struct RecoveryConfig {
+    /// Days after which identifiers are cleared from old audit rows (see `audit::clear_old_identifiers`).
+    pub audit_identifier_retention_days: i64,
     /// A running job with no heartbeat for this long is presumed lost.
     pub stale_after_secs: i64,
     /// A queued job not dispatched for this long gets (re-)dispatched.
@@ -447,7 +449,7 @@ mod tests {
     use crate::test_support as ts;
 
     fn cfg() -> RecoveryConfig {
-        RecoveryConfig { stale_after_secs: 600, redispatch_after_secs: 600, max_attempts: 3 }
+        RecoveryConfig { audit_identifier_retention_days: 180, stale_after_secs: 600, redispatch_after_secs: 600, max_attempts: 3 }
     }
 
     async fn row(pool: &PgPool, id: Uuid) -> (String, i32, Option<String>) {

@@ -139,6 +139,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      # Narrow on purpose (agents/ruff.toml): undefined or unused names, listening on every
+      # interface, eval, weak hashes, unsafe TLS settings, shell injection.
+      - name: Lint
+        run: ruff check .
+
       - name: Install the browser the executor tests drive
         run: playwright install --with-deps chromium
 
@@ -163,6 +168,10 @@ jobs:
       - name: Type-check
         run: npm run typecheck
 
+      # Warnings fail too: a lint run that is allowed to have warnings soon has too many to read.
+      - name: Lint
+        run: npm run lint -- --max-warnings 0
+
       # The Privacy Policy promises no third-party fonts, scripts, trackers or session replay.
       - name: No third-party content
         run: npm run check:third-party
@@ -183,7 +192,8 @@ jobs:
             echo "compose accepted an empty environment: required secrets are not enforced"; exit 1
           fi
           POSTGRES_PASSWORD=p REDIS_PASSWORD=r JWT_SECRET=$(printf 'j%.0s' {1..40}) \
-          MASTER_ENCRYPTION_KEY=x AGENT_API_KEY=$(printf 'k%.0s' {1..40}) docker compose config >/dev/null
+          PYHSM_IPC_SECRET=$(printf 'i%.0s' {1..40}) PYHSM_PASSWORD_FILE=/dev/null \
+          AGENT_API_KEY=$(printf 'k%.0s' {1..40}) docker compose config >/dev/null
 
       # No database exists in this build: the image compiles from backend/.sqlx.
       - name: Backend image builds with no database
@@ -191,3 +201,38 @@ jobs:
 
       - name: Agents image builds (browser, spaCy model, hash-pinned)
         run: docker build -f infra/docker/Dockerfile.agents -t vectorscrub-agents agents
+
+      - name: Frontend image builds
+        run: docker build -f infra/docker/Dockerfile.frontend -t vectorscrub-frontend frontend
+
+      # Known vulnerabilities in what actually ships: the operating-system packages and libraries
+      # inside each image. Only HIGH and CRITICAL that have a fix available block the build (an
+      # unfixed one cannot be acted on; it is still listed in the report). Findings can appear
+      # between two runs with no change here, because the database of known issues keeps growing:
+      # fix by rebuilding on a newer base image or updating the dependency.
+      - name: Scan the backend image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: vectorscrub-backend
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Scan the agents image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: vectorscrub-agents
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Scan the frontend image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: vectorscrub-frontend
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table

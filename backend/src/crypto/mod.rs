@@ -1,13 +1,18 @@
 //! Cryptographic primitives for VectorScrub.
 //!
-//! All PII is encrypted with AES-256-GCM using per-customer derived keys.
-//! The master key is loaded from the environment.
-//! Nonces are randomly generated and prepended to ciphertext.
+//! Current encryption is in `envelope` (format 2: a random key per customer, wrapped by the key
+//! service, HKDF subkeys per field, AAD binding each ciphertext to its customer and field).
 //!
-//! Layout of encrypted blob: [ 12-byte nonce | ciphertext | 16-byte tag ]
+//! What is left in this file is the old format 1 (a key derived from one master key held in the
+//! environment). Nothing writes it any more. It is kept to read data written before format 2, and
+//! only the one-time migration (`vectorscrub kms migrate-legacy`, services/kms_migrate.rs) uses it.
+//!
+//! Format 1 layout: [ 12-byte nonce | ciphertext | 16-byte tag ]
 
+#[cfg(test)]
+use aes_gcm::aead::{AeadCore, OsRng};
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
 use anyhow::{anyhow, Context, Result};
@@ -15,6 +20,17 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::Zeroize;
+
+pub mod envelope;
+
+/// Choose the TLS crypto provider for this process. Call once, first thing in `main`, before any
+/// connection is made. Safe to call again (a provider already installed is kept).
+///
+/// Needed because two providers are compiled in through our dependencies, and rustls refuses to
+/// guess between them: without this, the first `rediss://` connection panics.
+pub fn install_tls_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
 
 /// Master encryption key loaded at startup — 32 bytes, base64-encoded in env.
 pub struct MasterKey([u8; 32]);
@@ -30,6 +46,12 @@ impl MasterKey {
         let mut key = [0u8; 32];
         key.copy_from_slice(&bytes);
         Ok(Self(key))
+    }
+}
+
+impl MasterKey {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -63,8 +85,11 @@ pub fn derive_customer_key(master: &MasterKey, customer_id: Uuid) -> [u8; 32] {
     key
 }
 
+/// Format 1 encryption. Nothing in the service writes it any more; tests use it to create the
+/// old-format data the migration has to read.
 /// Encrypt plaintext bytes with AES-256-GCM under the given customer key.
 /// Returns: base64( nonce || ciphertext+tag )
+#[cfg(test)]
 pub fn encrypt(customer_key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
     let key = Key::<Aes256Gcm>::from_slice(customer_key);
     let cipher = Aes256Gcm::new(key);
@@ -103,11 +128,13 @@ pub fn decrypt(customer_key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Convenience: encrypt a UTF-8 string.
+#[cfg(test)]
 pub fn encrypt_str(customer_key: &[u8; 32], plaintext: &str) -> Result<Vec<u8>> {
     encrypt(customer_key, plaintext.as_bytes())
 }
 
 /// Convenience: decrypt and return a UTF-8 string.
+#[cfg(test)]
 pub fn decrypt_str(customer_key: &[u8; 32], blob: &[u8]) -> Result<String> {
     let bytes = decrypt(customer_key, blob)?;
     String::from_utf8(bytes).context("Decrypted bytes are not valid UTF-8")

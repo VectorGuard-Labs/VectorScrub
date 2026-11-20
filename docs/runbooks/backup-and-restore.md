@@ -4,13 +4,13 @@ Status: the scripts and the verification command exist and were exercised end to
 
 ## What a backup is, and the one thing that can make it worthless
 
-The database holds everything. Personal data in it (identity profiles, listing links, two-factor secrets) is AES-256-GCM ciphertext under keys derived from `MASTER_ENCRYPTION_KEY`. The master key is **not** in the database and **not** in the backup.
+The database holds everything. Personal data in it (identity profiles, listing links, two-factor secrets) is AES-256-GCM ciphertext under per-customer data keys, and those keys are stored wrapped by a key that lives only in the **PyHSM keystore**. The keystore is **not** in the database and **not** in the database backup.
 
-- A backup without the key it was made under restores to a database full of data nobody can open.
-- Losing the key loses every customer's identity data, whatever the state of the backups.
-- If the key is ever replaced (there is no rotation today), keep the old key for as long as any backup made under it might be restored.
+- A database backup without the PyHSM keystore restores to a database full of data nobody can open.
+- Losing the keystore (or its password) loses every customer's data, whatever the state of the database backups. **Back the keystore up separately and on its own schedule: `infra/scripts/backup_keystore.sh`, and see `docs/runbooks/key-service.md`.**
+- Rotating the key adds a version to the keystore and keeps the old ones, so an older database backup still opens with a newer keystore. The reverse is not true: a database made after a rotation needs a keystore backup taken after it.
 
-So: keep the master key in a secrets manager with its own versioning and its own access list, separate from where backups live. A backup that sits in the same place as the key gives anyone who reaches that place everything.
+So: keep the keystore backups, the keystore password and the database backups in different places with different access. Anyone who can reach all three can read everything.
 
 The dump also holds, in the clear: account emails, password hashes, client IP addresses, user agents, and the audit trail. That is why `backup.sh` refuses to write an unencrypted backup unless told to, and encrypts to a public key whose private half is **not** on the database host.
 
@@ -43,7 +43,8 @@ Use a database role that can only read for `DATABASE_URL`. Generate the GPG key 
 
 ```bash
 RESTORE_ADMIN_URL=postgres://postgres:...@scratch-host:5432/postgres \
-MASTER_ENCRYPTION_KEY="$(fetch-from-secrets-manager)" \
+KEY_PROVIDER=pyhsm PYHSM_SOCKET=/path/to/restored-keystore-pyhsm.sock \
+PYHSM_IPC_SECRET="$(fetch-from-secrets-manager)" \
 GNUPGHOME=/path/to/keyring-with-the-private-key \
 infra/scripts/restore_verify.sh /var/backups/vectorscrub/vectorscrub-20261109T021700Z.dump.gpg
 ```
@@ -72,7 +73,7 @@ Record each drill in the log below. The restore time it prints is your real reco
 1. **Stop the writers.** Stop the backend and the agents so nothing writes to the database while you restore.
 2. **Decide the target.** A new database (preferred: keep the damaged one for investigation) or the existing one (`pg_restore --clean --if-exists`).
 3. **Restore.** `gpg --decrypt FILE | pg_restore --no-owner --no-privileges --exit-on-error --dbname=NEW_DB_URL` (or use the managed provider's point-in-time restore).
-4. **Verify before starting anything:** `DATABASE_URL=NEW_DB_URL MASTER_ENCRYPTION_KEY=... vectorscrub verify-backup`. Do not continue on "NOT usable".
+4. **Verify before starting anything:** `DATABASE_URL=NEW_DB_URL KEY_PROVIDER=pyhsm PYHSM_SOCKET=... PYHSM_IPC_SECRET=... vectorscrub verify-backup`. Do not continue on "NOT usable".
 5. **Start the backend.** It applies any migrations the backup is missing. If `verify-backup` said the backup is from a *newer* version, deploy that version instead.
 6. **Redis is not restored.** It holds the scan queue and rate-limit counters only. The scan recovery loop re-dispatches scans that were queued or running, so nothing needs doing.
 7. **Sessions.** Everyone is signed in or out according to the restored `sessions` table. If you restored to a point before an incident, revoke every session first: `UPDATE sessions SET revoked_at = NOW() WHERE revoked_at IS NULL;` (a deliberate operator action, not something the service does).
@@ -101,11 +102,11 @@ The checklist asks for a recovery time objective and a recovery point objective.
 ## Before you rely on this (all open)
 
 - [ ] Backup user with read-only rights created
-- [ ] GPG key pair generated off the database host; private key stored with the master key's own backup
+- [ ] GPG key pairs generated off the database host (one for database backups, a different one for keystore backups); private keys stored apart from each other
 - [ ] Daily schedule installed; heartbeat monitor alerting
 - [ ] Off-site copy in a bucket with versioning and a retention rule, in a different account or provider than the database
 - [ ] Managed point-in-time recovery enabled (if on a managed database)
 - [ ] First drill run against the off-site copy with the key from the secrets manager; logged above
-- [ ] Master key stored in a secrets manager with versioning, and a second person able to reach it
+- [ ] PyHSM keystore backed up on a schedule and after every rotation (`backup_keystore.sh`), its password and IPC secret in a secrets manager, and a second person able to reach them
 - [ ] RTO and RPO written down from the drill
 - [ ] Erasure record process agreed (previous section) and the Privacy Policy states the backup retention

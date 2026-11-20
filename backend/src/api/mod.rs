@@ -26,7 +26,14 @@ pub mod security;
 #[cfg(test)]
 mod tests;
 
+/// Everything: the customer API, probes and the agent-only internal routes on one router. Used
+/// when `INTERNAL_PORT` is not set (development) and by the tests.
 pub fn router(state: AppState) -> Router {
+    public_router(state.clone()).merge(internal_router(state))
+}
+
+/// The routes customers' browsers and Stripe reach, plus the health probes.
+pub fn public_router(state: AppState) -> Router {
     let cfg = state.config.clone();
 
     // Login and register: strict per-IP limit (credential stuffing, Argon2 CPU burn).
@@ -50,6 +57,7 @@ pub fn router(state: AppState) -> Router {
             .route("/auth/logout", post(auth::logout))
             .route("/auth/logout-all", post(auth::logout_all))
             // Two-factor authentication and the customer's own sessions
+            .route("/me/password", post(security::change_password))
             .route("/me/mfa", get(security::mfa_status))
             .route("/me/mfa/setup", post(security::mfa_setup))
             .route("/me/mfa/enable", post(security::mfa_enable))
@@ -104,12 +112,22 @@ pub fn router(state: AppState) -> Router {
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready));
 
+    Router::new()
+        .merge(auth_routes)
+        .merge(customer_routes)
+        .merge(probes)
+        .with_state(state)
+}
+
+/// The routes only the agents call, authenticated by `X-Agent-Key`. With `INTERNAL_PORT` set this
+/// is served on its own port, so the public port has no `/internal/*` routes to expose.
+pub fn internal_router(state: AppState) -> Router {
     // Internal: agent callbacks. Authenticated by the agent key (not a customer JWT) and
     // not subject to the per-IP limit, since every agent shares one address.
     //
     // Identity is released only against a concrete, currently-actionable work item (see
     // services/identity_access.rs); there is deliberately no "identity by customer id" route.
-    let internal = Router::new()
+    Router::new()
         // scans: claim -> progress/heartbeat -> complete|fail
         .route("/internal/scan/:job_id/claim", post(agent_callbacks::claim_scan))
         .route("/internal/scan/status", put(agent_callbacks::update_scan_status))
@@ -145,12 +163,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/internal/exposures/:id/monitoring-result",
             post(agent_callbacks::record_monitoring_result),
-        );
-
-    Router::new()
-        .merge(auth_routes)
-        .merge(customer_routes)
-        .merge(probes)
-        .merge(internal)
+        )
         .with_state(state)
 }

@@ -13,7 +13,6 @@ use super::error::internal_error;
 use crate::db::AppState;
 use crate::middleware::session::{cleared_session_cookie, session_cookie};
 use crate::models::customer::{CreateAccountRequest, CustomerProfile};
-use crate::crypto::MasterKey;
 use crate::middleware::auth_extractor::AuthenticatedCustomer;
 use crate::models::customer::Customer;
 use crate::services::{
@@ -284,9 +283,7 @@ pub async fn login(
         let Some(code) = code else {
             return Ok(Json(MfaRequiredResponse { mfa_required: true }).into_response());
         };
-        let master = MasterKey::from_base64(&state.config.master_key_b64)
-            .map_err(|e| internal_error(e).into_response())?;
-        match mfa_svc::verify(&state.pool, &master, customer.id, code)
+        match mfa_svc::verify(&state.pool, &state.keys, customer.id, code)
             .await
             .map_err(|e| internal_error(e).into_response())?
         {
@@ -440,9 +437,7 @@ pub(super) async fn reauthenticate(
         let Some(code) = mfa_code.map(str::trim).filter(|c| !c.is_empty()) else {
             return Err(err(StatusCode::UNAUTHORIZED, "Enter a code from your authenticator app."));
         };
-        let master = MasterKey::from_base64(&state.config.master_key_b64)
-            .map_err(|e| internal_error(e).into_response())?;
-        let ok = mfa_svc::verify(&state.pool, &master, customer.id, code)
+        let ok = mfa_svc::verify(&state.pool, &state.keys, customer.id, code)
             .await
             .map_err(|e| internal_error(e).into_response())?;
         if ok.is_none() {

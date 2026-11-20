@@ -4,7 +4,6 @@ use crate::db::AppState;
 use crate::middleware::auth_extractor::AuthenticatedCustomer;
 use crate::models::customer::{CustomerProfile, SubmitIdentityRequest};
 use crate::services::{audit, customer as customer_svc};
-use crate::crypto::MasterKey;
 use validator::Validate;
 
 /// GET /api/v1/me
@@ -30,10 +29,8 @@ pub async fn submit_identity(
     req.validate()
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
 
-    let master = MasterKey::from_base64(&state.config.master_key_b64)
-        .map_err(super::error::internal_error)?;
 
-    customer_svc::save_identity(&state.pool, &master, &req, auth.id)
+    customer_svc::save_identity(&state.pool, &state.keys, &req, auth.id)
         .await
         .map_err(super::error::internal_error)?;
 
@@ -58,9 +55,7 @@ pub async fn get_residence(
     auth: AuthenticatedCustomer,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let master = MasterKey::from_base64(&state.config.master_key_b64)
-        .map_err(super::error::internal_error)?;
-    let found = customer_svc::residence_state(&state.pool, &master, auth.id)
+    let found = customer_svc::residence_state(&state.pool, &state.keys, auth.id)
         .await
         .map_err(super::error::internal_error)?;
     Ok(Json(serde_json::json!({ "state": found })))
@@ -89,8 +84,7 @@ pub async fn add_listing(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Customer not found".into()))?;
     let tier = format!("{:?}", customer.subscription_tier).to_lowercase();
 
-    let master = MasterKey::from_base64(&state.config.master_key_b64).map_err(super::error::internal_error)?;
-    let sealed = url_vault::seal(&master, auth.id, &normalized).map_err(super::error::internal_error)?;
+    let sealed = url_vault::seal(&state.keys, auth.id, &normalized).await.map_err(super::error::internal_error)?;
 
     let mut exposure = listing::add_listing(&state.pool, auth.id, &tier, &site, &sealed)
         .await
@@ -100,7 +94,7 @@ pub async fn add_listing(
             Some(le @ (listing::ListingError::BadUrl | listing::ListingError::NotAListing)) => (StatusCode::UNPROCESSABLE_ENTITY, le.to_string()),
             None => super::error::internal_error(format!("{e:?}")),
         })?;
-    url_vault::open_all(&master, std::slice::from_mut(&mut exposure)).map_err(super::error::internal_error)?;
+    url_vault::open_all(&state.keys, std::slice::from_mut(&mut exposure)).await.map_err(super::error::internal_error)?;
 
     audit::AuditEntry::builder(audit::actions::LISTING_ADD, audit::resources::EXPOSURE)
         .customer_id(auth.id)

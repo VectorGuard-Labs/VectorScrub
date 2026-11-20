@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint src scripts eslint.config.mjs",
     "typecheck": "tsc --noEmit",
     "check:third-party": "node scripts/check-third-party.mjs"
   },

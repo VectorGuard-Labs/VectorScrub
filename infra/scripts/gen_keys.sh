@@ -9,7 +9,17 @@ echo "JWT_SECRET (copy to .env — the backend refuses to start with fewer than 
 openssl rand -base64 48
 
 echo ""
-echo "MASTER_ENCRYPTION_KEY (copy to .env — 32 bytes base64):"
+echo "PYHSM_IPC_SECRET (copy to .env — the backend authenticates to the key service with it):"
+openssl rand -hex 32
+
+echo ""
+echo "PyHSM keystore password (put it in a FILE, mode 600, and set PYHSM_PASSWORD_FILE to its path;"
+echo "it unlocks the keystore that holds the key-encryption key. At least 12 characters):"
+openssl rand -base64 36 | tr -d '\n/+=' | cut -c1-40; echo
+
+echo ""
+echo "MASTER_ENCRYPTION_KEY: not needed in production. Only for KEY_PROVIDER=env (development and tests),"
+echo "or once, to move data written before envelope encryption. Development value (32 bytes base64):"
 openssl rand -base64 32
 
 echo ""
