@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Keep in step with the Rust version in infra/docker/Dockerfile.backend.
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: clippy
 
