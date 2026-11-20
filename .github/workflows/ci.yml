@@ -50,7 +50,7 @@ jobs:
       TEST_REDIS_URL: redis://localhost:6379/14
       SQLX_OFFLINE: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Keep in step with the Rust version in infra/docker/Dockerfile.backend.
       - uses: dtolnay/rust-toolchain@1.90.0
@@ -137,7 +137,7 @@ jobs:
     env:
       TEST_REDIS_URL: redis://localhost:6379/14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -171,7 +171,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -196,7 +196,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: docker compose file is valid (and refuses to start without its secrets)
         working-directory: infra/docker
