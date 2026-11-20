@@ -73,7 +73,7 @@ thiserror = "2"
 anyhow = "1"
 
 # API documentation
-utoipa = { version = "4", features = ["axum_extras", "uuid", "chrono", "time"] }
+utoipa = { version = "6", features = ["axum_extras", "uuid", "chrono", "time"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
 
 # TLS. Both rustls crypto providers (ring and aws-lc-rs) are compiled in through our dependencies,
