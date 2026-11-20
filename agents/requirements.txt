@@ -18,7 +18,7 @@ beautifulsoup4==4.12.3
 httpx==0.28.1
 
 # Job queue
-redis==5.2.1
+redis==8.1.0
 
 # Named-entity recognition for the PII guard (shared/pii_ner.py). Runs locally on CPU;
 # no text leaves the process. The model wheel is hash-pinned because it is fetched from a
