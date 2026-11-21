@@ -273,7 +273,7 @@ Security is the core architectural constraint, not an afterthought. Every design
 |----------|-------------|--------------|
 | **Free**     | $0     | One scan every 7 days (4 sources), up to 3 automated opt-outs, manual opt-out guide, privacy score |
 | **Early Access** (tier `personal`) | $4.99, monthly only | 15 sources, unlimited automated opt-outs for the listings found, progress tracking, monthly rescan and reappearance re-check, alerts. Founding members keep their price (see *Price changes* below) |
-| **Premium** (not on sale) | $14.99 | Not sold at present: no price or payment link is configured, and it is hidden from the site. Its extra four sources are currently all blocked, so it would add little. Everything in Early Access + expanded source coverage (19 sources: TruthFinder, ThatsThem, SmartBackgroundChecks and AdvancedBackgroundChecks on top of Personal's 15), priority removal, weekly rescan and weekly reappearance re-check, evidence collection |
+| **Premium** (not on sale) | $14.99 | Not sold at present: no price or payment link is configured, and it is hidden from the site. Everything in Early Access + expanded source coverage (34 sources: 19 more on top of Personal's 15, of which 3 business-contact sites are manual search only; how many can be read is measured, not yet known), priority removal, weekly rescan and weekly reappearance re-check, evidence collection |
 
 All plans are per person. A Family tier ($24.99, up to 4 members) existed in earlier versions and was removed; migration `0005_remove_family_tier.sql` moved any existing Family customers to Premium.
 

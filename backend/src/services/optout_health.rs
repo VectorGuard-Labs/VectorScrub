@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 
-/// Most checks one report may carry. There are 19 brokers today; this leaves room to grow.
+/// Most checks one report may carry. There are 34 brokers today; this leaves room to grow.
 pub const MAX_CHECKS_PER_REPORT: usize = 200;
 
 /// Which set of pages a check belongs to (see migration 0014).

@@ -237,8 +237,9 @@ DISCOVERY_SOURCES = [
     },
 ]
 
-# Tier hierarchy: free gets 4 brokers, personal 15, premium 19. A tier gets every source
-# at or below its own level.
+# Tier hierarchy: free gets 4 brokers, personal 15, premium all 34. A tier gets every source
+# at or below its own level. Sources flagged manual are listed but never fetched (1 free,
+# 5 personal, 8 premium), so a scan fetches at most 3, 10 and 26 sites.
 TIER_ORDER = {"free": 0, "personal": 1, "premium": 2}
 
 

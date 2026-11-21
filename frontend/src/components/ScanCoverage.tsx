@@ -11,7 +11,7 @@ const GROUPS: { outcome: SourceOutcome; label: string; hint: string }[] = [
   { outcome: "not_supported", label: "Needs a manual search", hint: "These sites only show results through an interactive search, so they cannot be checked automatically." },
 ];
 
-/** "Checked 3 of 19 sources." for a scan that recorded coverage, otherwise "". */
+/** "Checked 3 of 15 sources." for a scan that recorded coverage, otherwise "". */
 export function coverageSummary(job: ScanJob): string {
   const total = job.coverage?.length ?? 0;
   if (!job.coverage || total === 0) return "";
@@ -20,7 +20,7 @@ export function coverageSummary(job: ScanJob): string {
 }
 
 /**
- * Which sources the last scan could and could not read. A scan that reads 3 of 19 sites and
+ * Which sources the last scan could and could not read. A scan that reads 3 of 15 sites and
  * finds nothing on the others is not the same as one that read all 19, and the dashboard must
  * not suggest it is.
  */

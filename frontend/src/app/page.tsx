@@ -83,7 +83,7 @@ const plans: {
     badge: null,
     note: null,
     features: [
-      "Checks up to 4 brokers, once every 7 days",
+      "Searches 3 brokers automatically and shows you how to search 1 more by hand, once every 7 days",
       "Up to 3 opt-out requests, automated where the site allows it",
       "Step-by-step guide for opting out by hand",
       "One identity",

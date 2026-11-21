@@ -26,7 +26,7 @@ const PRICES: Record<PaidTier, { name: string; month: string; year: string; note
     year: "$49.90",
     note: "Founding members keep this price for as long as they stay subscribed.",
     features: [
-      "Checks up to 15 brokers, wherever the site allows it",
+      "Searches up to 10 brokers automatically where the site allows it, and shows you how to search 5 more by hand",
       "Unlimited opt-out requests for the listings we find, automated where the site allows it",
       "Step-by-step manual opt-outs for the sites that block automation",
       "Monthly rescans and reappearance checks",
@@ -37,7 +37,7 @@ const PRICES: Record<PaidTier, { name: string; month: string; year: string; note
     month: "$14.99",
     year: "$149.90",
     features: [
-      "Checks up to 19 brokers, wherever the site allows it",
+      "Searches up to 26 brokers automatically where the site allows it, and shows you how to search 8 more by hand",
       "Everything in Early Access",
       "Weekly rescans and reappearance checks",
       "Your opt-out requests are processed first",

@@ -86,7 +86,7 @@ All plans are per person. There is no Family tier (removed in migration 0005).
 |----------|----------|-------------------------------------------------------------------|
 | Free     | $0       | One scan/7d, 3 automated opt-outs, manual opt-out guide, no monitoring |
 | Personal (sold as "Early Access") | $4.99, monthly only | Unlimited automated opt-outs, monitoring (monthly re-check); founding price locked via legacy price ids |
-| Premium  | not on sale | 19 sources (Personal 15), weekly rescan and re-check, requests processed first. Hidden: no price/link configured. Its 4 extra sources are all blocked today |
+| Premium  | not on sale | 34 sources (Personal 15, Free 4; 8 of the 34 are manual-only and never fetched), weekly rescan and re-check, requests processed first. Hidden: no price/link configured. Readability of its 19 extra sources is not yet measured |
 
 ## Running Locally
 See README.md for setup instructions.
