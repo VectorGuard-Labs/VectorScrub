@@ -7,14 +7,14 @@
 # are supply-chain risk with no benefit. Re-add one only together with the code that uses it.
 
 # LLM calls. All of them go through detection/agent.py behind shared/pii_guard.py.
-langchain-openai==1.7.4
-langchain-anthropic==1.7.10
-openai==3.46.0
-anthropic==2.6.0
+langchain-openai==1.8.5
+langchain-anthropic==1.7.12
+openai==3.57.0
+anthropic==2.12.0
 
 # Web fetching and browser automation
-playwright==1.64.1
-beautifulsoup4==4.12.3
+playwright==1.65.2
+beautifulsoup4==4.15.0
 httpx==0.28.1
 
 # Job queue
@@ -27,8 +27,8 @@ spacy==3.8.18
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
 
 # Data handling
-pydantic==2.11.4
-pydantic-settings==2.8.1
+pydantic==2.14.4
+pydantic-settings==2.16.3
 
 # Logging and retries
 structlog==26.1.0
