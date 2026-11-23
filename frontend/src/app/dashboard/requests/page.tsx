@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import type { DeletionInfo, DeletionRequest, DeletionStatus } from "@/types";
+import { safeHref } from "@/lib/caBrokerSearch";
 
 const STATUS: Record<DeletionStatus, { text: string; style: string }> = {
   queued: { text: "Waiting to be sent", style: "text-yellow-300 border-yellow-800 bg-yellow-950" },
@@ -52,7 +53,24 @@ export default function DeletionRequestsPage() {
   }
 
   useEffect(() => {
-    void load();
+    let live = true;
+    Promise.all([getDeletionInfo(), listDeletionRequests()])
+      .then(([i, r]) => {
+        if (!live) return;
+        setInfo(i);
+        setRequests(r);
+      })
+      .catch((e) => {
+        if (!live) return;
+        if (e instanceof ApiError && e.status === 404) setUnavailable(true);
+        else setError("Could not load this page. Please try again.");
+      })
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
   }, []);
 
   function toggle(id: string) {
@@ -190,7 +208,7 @@ export default function DeletionRequestsPage() {
                     <div className="ml-7 mt-2 text-xs text-gray-500 space-y-1">
                       <p>
                         Would be emailed to <span className="text-gray-300">{c.address}</span>, the address{" "}
-                        <a href={c.source_url} target="_blank" rel="noopener noreferrer" className="text-brand-blue-400 hover:text-brand-blue-300 inline-flex items-center gap-1">
+                        <a href={safeHref(c.source_url) ?? undefined} target="_blank" rel="noopener noreferrer" className="text-brand-blue-400 hover:text-brand-blue-300 inline-flex items-center gap-1">
                           the company publishes <ExternalLink className="w-3 h-3" aria-hidden="true" />
                         </a>
                         . We last checked on {formatDate(c.verified_on)}.

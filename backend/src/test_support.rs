@@ -174,6 +174,8 @@ pub fn test_config() -> crate::services::config::AppConfig {
     use crate::services::config::{AppConfig, Environment};
     AppConfig {
         database_url: "postgres://unused".into(),
+        run_migrations: true,
+        allow_owner_database_role: false,
         redis_url: "redis://127.0.0.1:1".into(),
         jwt_secret: "t".repeat(40),
         master_key_b64: Some(master_key_b64()),

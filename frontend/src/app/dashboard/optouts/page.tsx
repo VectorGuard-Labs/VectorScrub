@@ -43,6 +43,8 @@ export default function OptOutsPage() {
   const [registry, setRegistry] = useState<RegistryData | null>(null);
   const [registryFailed, setRegistryFailed] = useState(false);
   const [loading, setLoading] = useState(true);
+  // The time the page was opened. Read once, so rendering stays free of side effects.
+  const [now] = useState(() => Date.now());
 
   useEffect(() => {
     let cancelled = false;
@@ -327,7 +329,7 @@ export default function OptOutsPage() {
               const company = owners?.get(b.name);
               const exposure = exposures.find((e) => e.source_name === b.name && e.is_active) ?? exposures.find((e) => e.source_name === b.name);
               const request = exposure ? latestRequest(exposure.id, requests) : undefined;
-              const route = routeStatus(page, outcome, Date.now(), isAutomationBlocked(request?.failure_reason));
+              const route = routeStatus(page, outcome, now, isAutomationBlocked(request?.failure_reason));
               const track = tracker({
                 listed: listed.has(b.name),
                 addedByCustomer: exposure?.origin === "customer",

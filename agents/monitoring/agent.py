@@ -282,7 +282,7 @@ class MonitoringAgent:
         breaker = get_circuit_breaker(f"monitor:{host}", FETCH_BREAKER)
 
         async def get():
-            async with httpx.AsyncClient(timeout=20) as client:
+            async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
                 fetched = await safe_get(
                     client, url, headers=headers, timeout=20, allowed_domain=allowed_domain
                 )

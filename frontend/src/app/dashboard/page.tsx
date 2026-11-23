@@ -28,6 +28,7 @@ import {
 } from "@/lib/utils";
 import type { CustomerProfile, ExposureSummary, Exposure, ScanJob } from "@/types";
 import PrivacyScoreChart from "@/components/PrivacyScoreChart";
+import { safeHref } from "@/lib/caBrokerSearch";
 import ScanCoverage, { coverageSummary } from "@/components/ScanCoverage";
 
 export default function DashboardPage() {
@@ -447,15 +448,17 @@ export default function DashboardPage() {
                         Removed
                       </span>
                     )}
-                    <a
-                      href={exp.source_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-gray-500 hover:text-brand-blue-400 transition-colors"
-                      aria-label={`View ${exp.source_name} listing`}
-                    >
-                      <ExternalLink className="w-4 h-4" />
-                    </a>
+                    {safeHref(exp.source_url) && (
+                      <a
+                        href={safeHref(exp.source_url) ?? undefined}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-gray-500 hover:text-brand-blue-400 transition-colors"
+                        aria-label={`View ${exp.source_name} listing`}
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
+                    )}
                   </div>
                 </div>
               ))}

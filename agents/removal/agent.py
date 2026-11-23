@@ -139,9 +139,6 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
         requires_id_verification=False,
         estimated_days=3,
         handler_class="NuwberHandler",
-        # Phase 3: CAPTCHA handling
-        supports_human_captcha=True,  # Frequent CAPTCHA, human intervention supported
-        prefers_email_for_captcha=False,  # Has web form, try it first
     ),
     "ussearch.com": RemovalProcedure(
         source_name="ussearch.com",
@@ -177,9 +174,6 @@ OPT_OUT_REGISTRY: dict[str, RemovalProcedure] = {
                      "so automated submission stops and the request is reported as needing manual completion.",
         requires_id_verification=False,
         estimated_days=3,
-        # Phase 3: CAPTCHA handling
-        supports_human_captcha=True,  # Always has CAPTCHA, human intervention needed
-        prefers_email_for_captcha=False,  # Web form is the only option
     ),
     "smartbackgroundchecks.com": RemovalProcedure(
         source_name="smartbackgroundchecks.com",

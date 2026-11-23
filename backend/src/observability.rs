@@ -2,7 +2,8 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{runtime, trace as sdktrace, Resource};
+use opentelemetry_sdk::{trace as sdktrace, Resource};
+use std::sync::OnceLock;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -20,10 +21,12 @@ pub fn init_observability(service_name: &str, otlp_endpoint: Option<&str>) -> Pr
         .expect("Failed to install Prometheus recorder");
 
     // Create OpenTelemetry resource with service information
-    let resource = Resource::new(vec![
-        KeyValue::new("service.name", service_name.to_string()),
-        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-    ]);
+    let resource = Resource::builder()
+        .with_attributes([
+            KeyValue::new("service.name", service_name.to_string()),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+        ])
+        .build();
 
     // Set up tracing layers
     let env_filter = EnvFilter::try_from_default_env()
@@ -74,11 +77,13 @@ pub fn init_observability(service_name: &str, otlp_endpoint: Option<&str>) -> Pr
     prometheus_handle
 }
 
+static TRACER_PROVIDER: OnceLock<sdktrace::SdkTracerProvider> = OnceLock::new();
+
 /// Set up OpenTelemetry tracing with OTLP exporter
 fn setup_otlp_tracing(
     endpoint: &str,
     resource: Resource,
-) -> Result<sdktrace::Tracer, Box<dyn std::error::Error>> {
+) -> Result<sdktrace::SdkTracer, Box<dyn std::error::Error>> {
     use opentelemetry_otlp::SpanExporter;
 
     let exporter = SpanExporter::builder()
@@ -86,12 +91,14 @@ fn setup_otlp_tracing(
         .with_endpoint(endpoint)
         .build()?;
 
-    let tracer_provider = sdktrace::TracerProvider::builder()
-        .with_batch_exporter(exporter, runtime::Tokio)
+    let tracer_provider = sdktrace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
         .with_resource(resource)
         .build();
 
     let tracer = tracer_provider.tracer("vectorscrub-backend");
+    // Kept so that shutdown can flush spans that have not been exported yet.
+    let _ = TRACER_PROVIDER.set(tracer_provider);
 
     Ok(tracer)
 }
@@ -159,5 +166,7 @@ fn register_custom_metrics() {
 
 /// Shutdown OpenTelemetry gracefully
 pub fn shutdown_observability() {
-    opentelemetry::global::shutdown_tracer_provider();
+    if let Some(provider) = TRACER_PROVIDER.get() {
+        let _ = provider.shutdown();
+    }
 }

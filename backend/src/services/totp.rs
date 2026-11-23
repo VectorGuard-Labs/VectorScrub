@@ -6,7 +6,7 @@
 //!
 //! Pure functions: no clock, no storage. `services::mfa` supplies both.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::RngCore;
 use sha1::Sha1;
 
@@ -68,7 +68,7 @@ pub fn base32_decode(s: &str) -> Vec<u8> {
 
 /// RFC 4226 HOTP for one counter value, as a zero-padded decimal string.
 fn hotp(secret: &[u8], counter: u64) -> String {
-    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(secret).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha1> as KeyInit>::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(&counter.to_be_bytes());
     let digest = mac.finalize().into_bytes();
     let offset = (digest[19] & 0x0f) as usize;

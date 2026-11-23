@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   LogOut,
@@ -30,116 +30,110 @@ interface TimelineEvent {
 export default function HistoryPage() {
   const router = useRouter();
   const [events, setEvents] = useState<TimelineEvent[]>([]);
-  const [filteredEvents, setFilteredEvents] = useState<TimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [severityFilter, setSeverityFilter] = useState<string>("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
+
+  // Derived from the events and the two filters, so there is no second copy of the list to keep in step.
+  const filteredEvents = useMemo(() => {
+    let filtered = events;
+    if (severityFilter !== "all") filtered = filtered.filter((e) => e.severity === severityFilter);
+    if (typeFilter !== "all") filtered = filtered.filter((e) => e.type === typeFilter);
+    return filtered;
+  }, [events, severityFilter, typeFilter]);
+
+  async function loadTimeline(): Promise<TimelineEvent[]> {
+    const [exposuresData, removalsData] = await Promise.all([
+      listExposures(),
+      listRemovalRequests(),
+    ]);
+
+    const timelineEvents: TimelineEvent[] = [];
+
+    // Add exposure discovery events
+    exposuresData.exposures.forEach((exp: Exposure) => {
+      timelineEvents.push({
+        id: `discovered-${exp.id}`,
+        type: "discovered",
+        date: exp.discovered_at,
+        title: `New ${exp.severity} exposure found`,
+        description: `${exp.source_name} • ${exp.pii_summary}`,
+        severity: exp.severity,
+        source: exp.source_name,
+        category: exp.pii_category,
+      });
+
+      // Add reappearance events if applicable
+      if (!exp.is_active && exp.removed_at) {
+        // Check if it reappeared (simplified - in production, check removal status)
+        // For now, we'll just show removed status
+      }
+    });
+
+    // Add removal events
+    removalsData.requests.forEach((req: RemovalRequest) => {
+      if (req.submitted_at) {
+        timelineEvents.push({
+          id: `submitted-${req.id}`,
+          type: "removal_submitted",
+          date: req.submitted_at,
+          title: "Removal request submitted",
+          description: `${req.source_name} • ${req.procedure_used || "web form"}`,
+          source: req.source_name,
+        });
+      }
+
+      if (req.verified_at && req.status === "verified_removed") {
+        timelineEvents.push({
+          id: `verified-${req.id}`,
+          type: "removal_verified",
+          date: req.verified_at,
+          title: "Removal verified",
+          description: `${req.source_name} • Information successfully removed`,
+          source: req.source_name,
+        });
+      }
+
+      if (req.status === "reappeared") {
+        timelineEvents.push({
+          id: `reappeared-${req.id}`,
+          type: "reappeared",
+          date: req.updated_at,
+          title: "Information reappeared",
+          description: `${req.source_name} • Previously removed data detected again`,
+          source: req.source_name,
+          severity: "high",
+        });
+      }
+    });
+
+    // Sort by date descending
+    timelineEvents.sort(
+      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+    );
+
+    return timelineEvents;
+  }
 
   useEffect(() => {
     // No client-side token check: the session is an HttpOnly cookie the page cannot see.
     // If it is missing or expired the first API call answers 401 and the API client sends
     // the user to /login.
-    loadHistory();
+    let live = true;
+    loadTimeline()
+      .then((timeline) => {
+        if (live) setEvents(timeline);
+      })
+      .catch((err) => {
+        console.error("Failed to load history:", err);
+      })
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
   }, []);
-
-  useEffect(() => {
-    applyFilters();
-  }, [severityFilter, typeFilter, events]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function loadHistory() {
-    setLoading(true);
-    try {
-      const [exposuresData, removalsData] = await Promise.all([
-        listExposures(),
-        listRemovalRequests(),
-      ]);
-
-      const timelineEvents: TimelineEvent[] = [];
-
-      // Add exposure discovery events
-      exposuresData.exposures.forEach((exp: Exposure) => {
-        timelineEvents.push({
-          id: `discovered-${exp.id}`,
-          type: "discovered",
-          date: exp.discovered_at,
-          title: `New ${exp.severity} exposure found`,
-          description: `${exp.source_name} • ${exp.pii_summary}`,
-          severity: exp.severity,
-          source: exp.source_name,
-          category: exp.pii_category,
-        });
-
-        // Add reappearance events if applicable
-        if (!exp.is_active && exp.removed_at) {
-          // Check if it reappeared (simplified - in production, check removal status)
-          // For now, we'll just show removed status
-        }
-      });
-
-      // Add removal events
-      removalsData.requests.forEach((req: RemovalRequest) => {
-        if (req.submitted_at) {
-          timelineEvents.push({
-            id: `submitted-${req.id}`,
-            type: "removal_submitted",
-            date: req.submitted_at,
-            title: "Removal request submitted",
-            description: `${req.source_name} • ${req.procedure_used || "web form"}`,
-            source: req.source_name,
-          });
-        }
-
-        if (req.verified_at && req.status === "verified_removed") {
-          timelineEvents.push({
-            id: `verified-${req.id}`,
-            type: "removal_verified",
-            date: req.verified_at,
-            title: "Removal verified",
-            description: `${req.source_name} • Information successfully removed`,
-            source: req.source_name,
-          });
-        }
-
-        if (req.status === "reappeared") {
-          timelineEvents.push({
-            id: `reappeared-${req.id}`,
-            type: "reappeared",
-            date: req.updated_at,
-            title: "Information reappeared",
-            description: `${req.source_name} • Previously removed data detected again`,
-            source: req.source_name,
-            severity: "high",
-          });
-        }
-      });
-
-      // Sort by date descending
-      timelineEvents.sort(
-        (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
-      );
-
-      setEvents(timelineEvents);
-      setFilteredEvents(timelineEvents);
-    } catch (err) {
-      console.error("Failed to load history:", err);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function applyFilters() {
-    let filtered = events;
-
-    if (severityFilter !== "all") {
-      filtered = filtered.filter((e) => e.severity === severityFilter);
-    }
-
-    if (typeFilter !== "all") {
-      filtered = filtered.filter((e) => e.type === typeFilter);
-    }
-
-    setFilteredEvents(filtered);
-  }
 
   function handleExport() {
     // Export to CSV

@@ -34,7 +34,19 @@ The backend refuses to start if PyHSM has no key by the expected name, instead o
 
 ## First-time setup
 
-1. **Build the image** from the PyHSM repository: `docker build -t pyhsm:2.4.0 /path/to/PyHSM`.
+1. **Build the image** from a PyHSM release you have reviewed, and pin it by digest. A tag can be moved; a digest cannot.
+   ```bash
+   git -C /path/to/PyHSM rev-parse HEAD                      # record this commit in the table below
+   docker build -t pyhsm:build /path/to/PyHSM
+   docker image inspect pyhsm:build --format '{{.Id}}'       # sha256:...   (a registry digest if you push it)
+   # .env:  PYHSM_IMAGE=pyhsm@sha256:<digest>   (compose has no default and refuses to start without it)
+   ```
+   Record where the image came from, so a reviewer can tell it is the one you meant to run:
+
+   | Date | PyHSM commit or tag | Built by | Image digest | Reviewed by |
+   |---|---|---|---|---|
+   | | | | | |
+
    **PyHSM must have IPC authentication version 2** (the release after 2.3.7). VectorScrub signs every request that way: the signature covers the whole request and its time, and a request is accepted once. PyHSM 2.3.7 and earlier refuse these requests, and the new PyHSM refuses old-style ones, so upgrade both together. PyHSM also refuses any connecting user other than its own (compose runs both as uid 1000), and writes the kernel-reported uid and pid of every caller into its audit log.
 2. **Create the secrets** (never commit them; put them in your secrets manager):
    ```bash
@@ -49,9 +61,9 @@ The backend refuses to start if PyHSM has no key by the expected name, instead o
    docker run --rm -v vectorscrub_pyhsm_data:/d -v vectorscrub_pyhsm_socket:/s alpine sh -c 'chown 1000:1000 /d /s && chmod 750 /d && chmod 700 /s'
    ```
    (The volume names are `<compose project>_pyhsm_data` and `<compose project>_pyhsm_socket`; the project is the directory name, `docker` for `infra/docker`, unless you pass `-p`.)
-3. **Start PyHSM, the database and Redis, then create the key** before the backend runs:
+3. **Start PyHSM, the database, Redis and the migration step, then create the key** before the backend runs:
    ```bash
-   docker compose up -d pyhsm postgres redis
+   docker compose up -d pyhsm postgres redis migrate
    docker compose run --rm --no-deps backend kms init     # prints "Created key 'vectorscrub-kek'"
    ```
    If you start the backend first it refuses to start ("the key service has no key named 'vectorscrub-kek'") and restarts until the key exists. That is deliberate.
@@ -166,7 +178,7 @@ PyHSM's socket is mode 600 and owned by the user PyHSM runs as, so the backend m
 
 ## Before you rely on this (all open)
 
-- [ ] PyHSM image built from a reviewed PyHSM release and pinned by digest
+- [ ] PyHSM image built from a reviewed PyHSM release and pinned by digest (`PYHSM_IMAGE`; compose enforces that it is set; the provenance table in step 1 filled in)
 - [ ] Keystore password and IPC secret in a secrets manager, readable by two people, not by the backup operator
 - [ ] Keystore backup schedule installed with its own heartbeat monitor; first backup taken before the first customer
 - [ ] Keystore backups stored in a different account or provider from database backups, under a different GPG key

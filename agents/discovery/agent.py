@@ -494,7 +494,7 @@ class DiscoveryAgent:
             async with sem:
                 return await self._fetch_source(client, name, url, identity)
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             tasks = [fetch_with_sem(client, name, url) for name, url in search_targets]
             batches = await asyncio.gather(*tasks, return_exceptions=True)
 

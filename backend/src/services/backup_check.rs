@@ -127,7 +127,8 @@ async fn check_audit_guards(pool: &PgPool, r: &mut Report) -> Result<()> {
     for table in ["audit_log", "removal_audit_log"] {
         // Update/delete guard (row level) and truncate guard (statement level).
         let (row_guards, truncate_guards): (i64, i64) = sqlx::query_as(
-            "SELECT count(*) FILTER (WHERE (tgtype & 1) = 1), count(*) FILTER (WHERE (tgtype & 32) = 32) \
+            "SELECT count(*) FILTER (WHERE (tgtype & 1) = 1 AND (tgtype & 2) = 2 AND (tgtype & 24) <> 0), \
+                    count(*) FILTER (WHERE (tgtype & 32) = 32) \
              FROM pg_trigger WHERE tgrelid = to_regclass($1) AND NOT tgisinternal",
         )
         .bind(table)
@@ -137,6 +138,18 @@ async fn check_audit_guards(pool: &PgPool, r: &mut Report) -> Result<()> {
         if row_guards == 0 || truncate_guards == 0 {
             r.problems.push(format!("{table} has lost its append-only triggers"));
             continue;
+        }
+
+        // The hash chain trigger (migration 0025): without it new audit rows are not chained.
+        let chained: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_trigger WHERE tgrelid = to_regclass($1) AND NOT tgisinternal AND (tgtype & 4) = 4 AND tgname LIKE '%\\_chain'",
+        )
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("inspect chain trigger on {table}"))?;
+        if chained == 0 {
+            r.problems.push(format!("{table} has lost its audit hash-chain trigger"));
         }
 
         // And prove it behaves: try to delete one row, then roll back whatever happens.

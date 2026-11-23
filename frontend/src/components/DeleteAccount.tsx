@@ -21,7 +21,9 @@ export default function DeleteAccount() {
     try {
       await deleteAccount(password, code.trim() || undefined);
       // The session cookie is already cleared; leave the app.
-      window.location.assign("/?deleted=1");
+      // A full page load on purpose: it drops every piece of client state.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- full reload is intended here
+      window.location.href = "/?deleted=1";
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not delete the account. Try again.");
       setBusy(false);

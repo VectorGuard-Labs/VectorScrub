@@ -73,7 +73,9 @@ async function handleResponse<T>(
     // leaving every page to show its own "failed to load". (Login and register are not
     // "authenticated" calls; a 401 there just means wrong credentials.)
     if (authenticated && res.status === 401 && typeof window !== "undefined") {
-      window.location.assign("/login");
+      // A full page load on purpose: it drops every piece of client state from the expired session.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- full reload is intended here
+      window.location.href = "/login";
     }
     throw new ApiError(res.status, await errorMessage(res));
   }

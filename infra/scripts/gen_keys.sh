@@ -31,6 +31,10 @@ echo "POSTGRES_PASSWORD (hex on purpose: it is embedded in a URL, where base64's
 openssl rand -hex 24
 
 echo ""
+echo "DB_APP_PASSWORD (hex; the runtime database role's password. The backend connects as that role, not as the owner):"
+openssl rand -hex 24
+
+echo ""
 echo "REDIS_PASSWORD (hex, same reason):"
 openssl rand -hex 24
 

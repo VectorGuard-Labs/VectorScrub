@@ -33,3 +33,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# TypeScript incremental build cache (was tracked by mistake)
+*.tsbuildinfo

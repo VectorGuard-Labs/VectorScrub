@@ -66,8 +66,21 @@ export default function SecurityPage() {
   }, []);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let live = true;
+    Promise.all([getMfaStatus(), getSessions()])
+      .then(([m, s]) => {
+        if (!live) return;
+        setMfa(m);
+        setSessions(s);
+        setLoadError("");
+      })
+      .catch((e) => {
+        if (live) setLoadError(e instanceof Error ? e.message : "Could not load your security settings.");
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   return (
     <main className="min-h-screen px-6 py-10">
@@ -284,7 +297,9 @@ function SessionsSection({ sessions, onChanged }: { sessions: SessionInfo[]; onC
     setError("");
     try {
       await logoutEverywhere();
-      window.location.assign("/login");
+      // A full page load on purpose: it drops every piece of client state from the signed-out session.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- full reload is intended here
+      window.location.href = "/login";
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not sign out everywhere.");
       setBusy(false);

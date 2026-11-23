@@ -115,7 +115,7 @@ class OptOutHealthChecker:
             from removal.agent import OPT_OUT_REGISTRY as registry  # noqa: N811
         targets = [(name, p.opt_out_url) for name, p in sorted(registry.items()) if p.opt_out_url]
         results: list[OptOutCheck] = []
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             for i, (name, url) in enumerate(targets):
                 if i and self._delay:
                     await asyncio.sleep(self._delay)

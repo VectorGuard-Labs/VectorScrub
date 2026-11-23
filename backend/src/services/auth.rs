@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use anyhow::{anyhow, Result};
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
     Argon2,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -74,10 +74,10 @@ pub async fn warm_up() {
 
 /// Hash a password using Argon2id with a random salt.
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    // The library draws a fresh random salt from the operating system for every hash.
     let argon2 = Argon2::default();
     argon2
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| anyhow!("Failed to hash password: {e}"))
 }
@@ -105,25 +105,18 @@ pub fn issue_token(
         iat: now.unix_timestamp(),
         exp: (now + Duration::hours(crate::middleware::session::SESSION_MAX_AGE_HOURS)).unix_timestamp(),
     };
-    encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(|e| anyhow!("Failed to issue JWT: {e}"))
+    let key = EncodingKey::from_secret(secret.as_bytes()).map_err(|e| anyhow!("Failed to issue JWT: {e}"))?;
+    encode(&Header::new(Algorithm::HS256), &claims, &key).map_err(|e| anyhow!("Failed to issue JWT: {e}"))
 }
 
 /// Validate and decode a JWT; returns the embedded claims.
 pub fn validate_token(token: &str, secret: &str) -> Result<Claims> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
-    decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map(|data| data.claims)
-    .map_err(|e| anyhow!("Invalid or expired token: {e}"))
+    let key = DecodingKey::from_secret(secret.as_bytes()).map_err(|e| anyhow!("Invalid or expired token: {e}"))?;
+    decode::<Claims>(token, &key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| anyhow!("Invalid or expired token: {e}"))
 }
 
 #[cfg(test)]
@@ -183,6 +176,42 @@ mod tests {
         verify_against_dummy_async("anything at all".into()).await;
     }
 
+    /// A hash made by a different implementation (Python argon2-cffi, Argon2id, m=65536 t=3 p=4).
+    /// Stored password hashes must keep verifying across a change of library version, and the
+    /// parameters of new hashes must not get weaker than the OWASP minimum for Argon2id.
+    #[test]
+    fn hashes_from_another_implementation_verify_and_new_ones_are_not_weaker_than_the_minimum() {
+        const OTHER: &str = "$argon2id$v=19$m=65536,t=3,p=4$qa280lXEdYzLPFr3Tcyr/A$Bfn9mUgbNiNSOsXsrNn3aBdAkrcxoz5o6ltpFOzhj4U";
+        assert!(verify_password("correct horse battery staple", OTHER).unwrap());
+        assert!(!verify_password("correct horse battery stapl", OTHER).unwrap());
+
+        let mine = hash_password("correct horse battery staple").unwrap();
+        assert!(mine.starts_with("$argon2id$v=19$"), "{mine}");
+        let m: u32 = mine.split("m=").nth(1).unwrap().split(',').next().unwrap().parse().unwrap();
+        let t: u32 = mine.split("t=").nth(1).unwrap().split(',').next().unwrap().parse().unwrap();
+        assert!(m >= 19_456 && t >= 2, "memory {m} KiB, passes {t}: below the OWASP minimum for Argon2id");
+        assert!(verify_password("correct horse battery staple", &mine).unwrap());
+    }
+
+    /// Signed outside this code base (HMAC-SHA256 over header.claims, secret "s" x 40), in the form
+    /// the previous jsonwebtoken release produced. Sessions issued before the library upgrade must
+    /// keep working, and a wrong secret, a changed claim or a different algorithm must not.
+    #[test]
+    fn a_token_made_by_the_previous_library_version_still_validates() {
+        const OLD: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMTExMTExMS0yMjIyLTMzMzMtNDQ0NC01NTU1NTU1NTU1NTUiLCJqdGkiOiI2NjY2NjY2Ni03Nzc3LTg4ODgtOTk5OS0wMDAwMDAwMDAwMDAiLCJ0aWVyIjoiZnJlZSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.Ql5CnN419hDzTCY2lXk-Oi9wInjCTgzYcNqUL8ux3Yo";
+        let secret = "s".repeat(40);
+        let claims = validate_token(OLD, &secret).unwrap();
+        assert_eq!(claims.sub, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(claims.jti, "66666666-7777-8888-9999-000000000000");
+        assert!(validate_token(OLD, &"t".repeat(40)).is_err(), "wrong secret");
+        let (head, rest) = OLD.split_once('.').unwrap();
+        let (_, sig) = rest.rsplit_once('.').unwrap();
+        let forged = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, br#"{"sub":"someone-else","jti":"x","tier":"premium","iat":1,"exp":4102444800}"#);
+        assert!(validate_token(&format!("{head}.{forged}.{sig}"), &secret).is_err(), "changed claims");
+        let none = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, br#"{"alg":"none","typ":"JWT"}"#);
+        assert!(validate_token(&format!("{none}.{rest}"), &secret).is_err(), "alg none");
+    }
+
     #[test]
     fn a_token_carries_its_session_and_a_token_without_one_is_refused() {
         let (c, sid) = (Uuid::new_v4(), Uuid::new_v4());
@@ -198,7 +227,7 @@ mod tests {
         let old = encode(
             &Header::new(Algorithm::HS256),
             &Old { sub: c.to_string(), tier: "free".into(), iat: now, exp: now + 3600 },
-            &EncodingKey::from_secret("k".repeat(40).as_bytes()),
+            &EncodingKey::from_secret("k".repeat(40).as_bytes()).unwrap(),
         )
         .unwrap();
         assert!(validate_token(&old, &"k".repeat(40)).is_err());

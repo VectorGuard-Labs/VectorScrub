@@ -6,6 +6,13 @@ use std::env;
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub database_url: String,
+    /// Apply pending migrations at startup (`RUN_MIGRATIONS`, default true). Set false when the
+    /// service connects as a role that owns nothing and `vectorscrub migrate` runs separately as
+    /// the owner; the service then refuses to start until every migration is applied.
+    pub run_migrations: bool,
+    /// `DATABASE_ALLOW_OWNER_ROLE=true` lets production run as a role that owns the audit tables or
+    /// is a superuser. See `services::db_roles`. A decision to record, not a default.
+    pub allow_owner_database_role: bool,
     pub redis_url: String,
     pub jwt_secret: String,
     /// The old master key (`MASTER_ENCRYPTION_KEY`). Needed only (a) as the key-encryption key when
@@ -463,6 +470,8 @@ impl AppConfig {
 
         Ok(Self {
             database_url,
+            run_migrations: env_parse(&get, "RUN_MIGRATIONS", true)?,
+            allow_owner_database_role: env_parse(&get, "DATABASE_ALLOW_OWNER_ROLE", false)?,
             redis_url,
             jwt_secret,
             master_key_b64,
@@ -588,6 +597,20 @@ mod tests {
         assert_eq!((c.rate_limit_auth_per_minute, c.rate_limit_auth_burst), (5, 5));
         assert_eq!(c.scan_max_attempts, 3);
         assert!(!c.is_production());
+    }
+
+    #[test]
+    fn migrations_run_at_startup_and_an_owner_role_is_refused_unless_allowed() {
+        let c = load(&good()).unwrap();
+        assert!(c.run_migrations, "default: the service applies its own migrations");
+        assert!(!c.allow_owner_database_role, "default: the owner role is not allowed in production");
+        let mut v = good();
+        v.insert("RUN_MIGRATIONS", "false".into());
+        v.insert("DATABASE_ALLOW_OWNER_ROLE", "true".into());
+        let c = load(&v).unwrap();
+        assert!(!c.run_migrations && c.allow_owner_database_role);
+        v.insert("RUN_MIGRATIONS", "maybe".into());
+        assert!(load(&v).is_err(), "a typo is refused, not read as a default");
     }
 
     #[test]

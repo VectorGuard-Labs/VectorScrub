@@ -9,11 +9,9 @@
 //!
 //! Format 1 layout: [ 12-byte nonce | ciphertext | 16-byte tag ]
 
-#[cfg(test)]
-use aes_gcm::aead::{AeadCore, OsRng};
 use aes_gcm::{
     aead::{Aead, KeyInit},
-    Aes256Gcm, Key, Nonce,
+    AeadCore, Aes256Gcm,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -85,15 +83,38 @@ pub fn derive_customer_key(master: &MasterKey, customer_id: Uuid) -> [u8; 32] {
     key
 }
 
+/// The 96-bit nonce AES-GCM takes.
+pub(crate) type Nonce = aes_gcm::Nonce<<Aes256Gcm as AeadCore>::NonceSize>;
+
+/// AES-256-GCM under a 256-bit key. The one place the cipher is built from key bytes, so a change
+/// of library version touches this file and nothing else that builds a cipher.
+pub(crate) fn cipher_for(key: &[u8]) -> Aes256Gcm {
+    Aes256Gcm::new_from_slice(key).expect("AES-256 keys are 32 bytes")
+}
+
+/// A fresh random 96-bit nonce from the operating system's generator. With a random nonce, one
+/// key must not seal anywhere near 2^32 messages; every key here is per customer and per field.
+pub(crate) fn random_nonce() -> Nonce {
+    use rand::RngCore;
+    let mut n = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut n);
+    Nonce::from(n)
+}
+
+/// The nonce stored at the front of a blob. The caller has checked the blob is long enough.
+pub(crate) fn nonce_from(bytes: &[u8]) -> Nonce {
+    let n: [u8; 12] = bytes.try_into().expect("a 12-byte nonce");
+    Nonce::from(n)
+}
+
 /// Format 1 encryption. Nothing in the service writes it any more; tests use it to create the
 /// old-format data the migration has to read.
 /// Encrypt plaintext bytes with AES-256-GCM under the given customer key.
 /// Returns: base64( nonce || ciphertext+tag )
 #[cfg(test)]
 pub fn encrypt(customer_key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
-    let key = Key::<Aes256Gcm>::from_slice(customer_key);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let cipher = cipher_for(customer_key);
+    let nonce = random_nonce();
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|e| anyhow!("Encryption failed: {e}"))?;
@@ -119,11 +140,10 @@ pub fn decrypt(customer_key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
         return Err(anyhow!("Ciphertext blob too short"));
     }
     let (nonce_bytes, ciphertext) = blob.split_at(12);
-    let key = Key::<Aes256Gcm>::from_slice(customer_key);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = cipher_for(customer_key);
+    let nonce = nonce_from(nonce_bytes);
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| anyhow!("Decryption failed: {e}"))
 }
 

@@ -19,7 +19,7 @@ use super::auth::reauthenticate;
 use super::error::internal_error;
 use crate::db::AppState;
 use crate::middleware::auth_extractor::AuthenticatedCustomer;
-use crate::services::{audit, mfa as mfa_svc, session as session_svc};
+use crate::services::{audit, mfa as mfa_svc, password_policy, session as session_svc};
 
 fn invalid(message: &str) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, message.to_string()).into_response()
@@ -217,6 +217,7 @@ pub async fn change_password(
     if req.new_password == req.current_password {
         return Err(invalid("Choose a password you have not been using."));
     }
+    password_policy::check(&req.new_password, &customer.email).map_err(|r| invalid(r.message()))?;
     let new_hash = crate::services::auth::hash_password_async(req.new_password.clone())
         .await
         .map_err(|e| internal_error(e).into_response())?;

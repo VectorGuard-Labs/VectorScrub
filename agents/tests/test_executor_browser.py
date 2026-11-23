@@ -81,12 +81,17 @@ async def test_a_working_form_with_a_confirmation_is_submitted(broker, jane):
     r = await RemovalExecutor().submit_web_form(proc(broker, "good.html"), jane, "https://broker.example/rec/1")
     assert r["status"] == "submitted"
     assert r["confirmation_ref"] == "ABC-12345"
-    assert len(r["evidence_hash"]) == 64
+    # No screenshot of the filled-in form is taken or kept: it would show the customer's identity.
+    assert r["evidence_hash"] is None
 
 
-async def test_a_captcha_is_a_hard_stop_not_something_to_get_around(broker, jane):
+async def test_a_captcha_is_a_hard_stop_not_something_to_get_around(broker, jane, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     r = await RemovalExecutor().submit_web_form(proc(broker, "captcha.html"), jane, "u")
-    assert r["status"] == "failed" and "CAPTCHA" in r["error"]
+    assert r["status"] == "failed" and "CAPTCHA" in r["error"] and "manually" in r["error"]
+    assert r["status"] != "captcha_intervention"
+    # Nothing is paused or written to disk for a person to take over: no session files, no cookies.
+    assert list(tmp_path.iterdir()) == []
 
 
 async def test_a_changed_page_with_nothing_to_fill_fails_instead_of_reporting_success(broker, jane):
@@ -94,10 +99,12 @@ async def test_a_changed_page_with_nothing_to_fill_fails_instead_of_reporting_su
     assert r["status"] == "failed" and "layout" in r["error"]
 
 
-async def test_submitting_without_seeing_a_confirmation_is_a_failure_with_evidence_kept(broker, jane):
+async def test_submitting_without_seeing_a_confirmation_is_a_failure(broker, jane, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     r = await RemovalExecutor().submit_web_form(proc(broker, "ambiguous.html"), jane, "u")
     assert r["status"] == "failed" and "no confirmation" in r["error"].lower()
-    assert r["evidence_hash"], "the screenshot hash is kept so the failure can be diagnosed"
+    assert r["evidence_hash"] is None
+    assert list(tmp_path.iterdir()) == [], "no screenshot or other file of the filled-in form is written"
 
 
 async def test_error_wording_beats_polite_wording(broker, jane):

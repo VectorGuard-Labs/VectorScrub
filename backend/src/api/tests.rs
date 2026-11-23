@@ -267,6 +267,23 @@ async fn exposures_can_only_be_recorded_against_a_running_job_of_that_customer(p
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn an_exposure_link_that_is_not_a_plain_web_link_is_refused(pool: PgPool) {
+    let (app, cfg) = app(pool.clone());
+    let alice = ts::customer(&pool, "free", false).await;
+    let running = ts::scan_job(&pool, alice, "running").await;
+    for bad in ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "https://u:p@spokeo.com/x"] {
+        let r = send(&app, "POST", "/internal/exposures", &agent(&cfg), Some(json!({
+            "customer_id": alice, "scan_job_id": running, "source_name": "spokeo.com",
+            "source_url": bad, "pii_category": "full_name", "severity": "high",
+            "pii_summary": "J*** S***", "confidence": 0.9
+        }))).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM exposures WHERE customer_id = $1").bind(alice).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn the_removal_status_endpoint_enforces_the_lifecycle(pool: PgPool) {
     let (app, cfg) = app(pool.clone());
     let c = ts::customer(&pool, "personal", true).await;
@@ -679,6 +696,23 @@ async fn registering_a_taken_email_is_a_clean_conflict(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn registration_refuses_common_and_email_based_passwords(pool: PgPool) {
+    let (app, _) = app(pool.clone());
+    for bad in ["Password123!!!", "123456789012", "qwertyuiop12", "jane.smith-2024-abc"] {
+        let r = send(&app, "POST", "/auth/register", &[], Some(json!({
+            "email": "jane.smith@example.com", "password": bad,
+            "accepted_terms_version": crate::models::customer::TERMS_VERSION, "confirmed_adult": true
+        }))).await;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+        assert!(r.body.contains("Choose something less guessable"), "{}", r.body);
+        assert!(!r.body.contains(bad), "the password is never echoed");
+    }
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM customers").fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0, "nothing is created for a refused password");
+    assert_eq!(register(&app, "jane.smith@example.com").await.status, StatusCode::CREATED, "a passphrase is fine");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn registration_requires_accepting_the_current_terms_and_records_it(pool: PgPool) {
     let (app, _) = app(pool.clone());
     let body = |v: Option<&str>| match v {
@@ -844,7 +878,7 @@ async fn a_customer_cannot_read_another_customers_scan(pool: PgPool) {
 mod billing {
     use super::*;
     use crate::services::config::{BillingInterval, PaidTier, StripeConfig, StripePlan};
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     const SECRET: &str = "whsec_http_test_signing_secret";
@@ -3183,6 +3217,10 @@ mod security {
         let (app, _) = app(pool);
         let t = new_account(&app, "rules@example.com").await;
         for (new, why) in [("short", "too short"), (&"x".repeat(129)[..], "too long"), (PASSWORD, "unchanged")] {
+            let r = change(&app, &t, json!({ "current_password": PASSWORD, "new_password": new })).await;
+            assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{why}: {}", r.body);
+        }
+        for (new, why) in [("Password123!!!", "common"), ("rules@example.com-x", "contains the email"), ("123456789012", "a sequence")] {
             let r = change(&app, &t, json!({ "current_password": PASSWORD, "new_password": new })).await;
             assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{why}: {}", r.body);
         }

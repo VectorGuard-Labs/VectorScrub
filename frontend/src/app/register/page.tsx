@@ -77,7 +77,7 @@ export default function RegisterPage() {
                 className="block text-sm text-gray-400 mb-1.5"
               >
                 Password
-                <span className="text-gray-600 ml-1">(12+ characters)</span>
+                <span className="text-gray-600 ml-1">(12+ characters; a few unrelated words works well)</span>
               </label>
               <input
                 id="password"

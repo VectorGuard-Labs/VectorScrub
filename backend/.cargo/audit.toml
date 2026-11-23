@@ -9,20 +9,6 @@
 
 [advisories]
 ignore = [
-    # zip 0.6.6 (six advisories: extraction through symlinks, SUID bits, archive/header
-    # mismatch, AES checks, a crash on a large symlink). zip is a BUILD dependency of
-    # utoipa-swagger-ui, used by its build script to unpack the Swagger UI release archive. It is
-    # not linked into the backend binary or the Docker image, and nothing in our code opens a zip.
-    # The one archive it opens is the Swagger UI release that the build script downloads, so the
-    # exposure is a compromised upstream release on a build machine. Fixed by moving to
-    # utoipa 5 / utoipa-swagger-ui 9+ (a separate, breaking upgrade of the API-docs macros).
-    "RUSTSEC-2026-0548",
-    "RUSTSEC-2026-0429",
-    "RUSTSEC-2026-0367",
-    "RUSTSEC-2026-0368",
-    "RUSTSEC-2026-0369",
-    "RUSTSEC-2026-0545",
-
     # libsqlite3-sys 0.30.1 and rsa 0.9.10 (Marvin timing attack). Both are listed in Cargo.lock
     # only because sqlx's lockfile entry names every database driver; sqlx-sqlite and sqlx-mysql
     # are not enabled (Cargo.toml selects the `postgres` feature alone), so neither crate is

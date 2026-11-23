@@ -86,7 +86,7 @@ async def verify(channels: list[dict], today: date | None = None, client: httpx.
 
     if client is not None:
         return await run(client)
-    async with httpx.AsyncClient() as c:
+    async with httpx.AsyncClient(trust_env=False) as c:
         return await run(c)
 
 

@@ -86,12 +86,17 @@ Account erasure deletes the customer and pseudonymizes the audit trail. A backup
 
 Until that is solved, the procedure is: keep the operators' record of written erasure requests (the email thread or ticket, with date), and after any restore re-run `vectorscrub erase-account <email>` for each request dated after the backup. Backups are also kept for `BACKUP_KEEP_DAYS` (30 by default), so an erased customer's data persists in backups for up to that long. The Privacy Policy and `DATA_RETENTION.md` must say so. If a stricter promise is wanted, shorten the retention or add a signed-off erasure ledger that stores only a salted hash of each erased email; that is a design decision for counsel and is not built.
 
-## Targets (not yet set)
+## Targets
 
-The checklist asks for a recovery time objective and a recovery point objective. Neither is defined, because nothing has been measured on production-sized data.
+These are **pilot targets, set from what the scripts and a daily schedule can deliver**, not measured on production data. The owner of the service should confirm or change them, and replace the recovery time with the number from the first real-infrastructure drill.
 
-- **Recovery point** is bounded by the backup interval: with one daily dump, up to a day of data (new accounts, scan results, removal progress, audit entries) can be lost. A removal authorization lost this way is a legal record lost. Point-in-time recovery on the managed database shrinks this to minutes; use it.
-- **Recovery time** for the database step is the number the drill prints, on the size of the data at that moment. Add the time to provision, restore the key, deploy and verify. Write the total down after the first real-infrastructure drill and set the objective from it.
+| Target | Value | Why |
+|---|---|---|
+| Recovery point (RPO) | 24 hours | One encrypted dump a day (`backup.sh`). Up to a day of new accounts, scan results, removal progress and audit entries can be lost. A removal authorization lost this way is a legal record lost, so enable managed point-in-time recovery if the database is hosted, which shrinks this to minutes. |
+| Recovery time (RTO) | 8 hours | Provision a host, restore the keystore and the database, run `db_roles.sh`, `verify-backup`, start, and check. Not yet measured. |
+| Keystore | restore point = the last rotation | Take a keystore backup after every rotation. A database backup newer than the keystore backup may not open (`key-service.md`, "Restoring for real"). |
+
+After a restore, run `infra/scripts/db_roles.sh` as the database owner before starting the service (`database-roles.md`).
 
 ## Drill log
 

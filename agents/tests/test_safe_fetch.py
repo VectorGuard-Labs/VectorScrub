@@ -31,6 +31,10 @@ def ok(text="hello"):
     "127.0.0.1", "10.1.2.3", "172.16.0.9", "192.168.1.1", "169.254.169.254", "0.0.0.0",
     "100.64.0.1", "224.0.0.1", "240.0.0.1", "::1", "fe80::1", "fd00::1", "::", "::ffff:10.0.0.5",
     "::ffff:127.0.0.1", "not-an-ip",
+    # IPv6 forms that embed, translate or tunnel to an IPv4 address, or are not routable: a NAT64
+    # gateway turns 64:ff9b::a00:1 into 10.0.0.1.
+    "64:ff9b::a00:1", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "::a00:1", "::5", "::ffff:0:a00:1",
+    "fec0::1", "5f00::1", "2002:a00:1::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001:db8::1",
 ])
 def test_non_public_addresses_are_refused(addr):
     assert not is_public_address(addr)
@@ -212,3 +216,31 @@ async def test_errors_never_contain_the_url():
     with pytest.raises(FetchBlocked) as e:
         await get(ok(), url=url)
     assert "jane" not in str(e.value).lower() and "internal.test" not in str(e.value)
+
+
+# ---- proxies -----------------------------------------------------------------------
+
+def test_every_http_client_in_the_agents_ignores_proxy_environment_variables():
+    """With trust_env left on, HTTP(S)_PROXY would send a request to a proxy instead of to the
+    address safe_get validated and pinned. Every client must say trust_env=False."""
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in root.rglob("*.py"):
+        parts = path.relative_to(root).parts
+        if parts[0] in {"tests", ".venv", "venv"} or "site-packages" in parts:
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"AsyncClient", "Client"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "httpx"
+            ):
+                flag = next((k for k in node.keywords if k.arg == "trust_env"), None)
+                if flag is None or not (isinstance(flag.value, ast.Constant) and flag.value.value is False):
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert offenders == []

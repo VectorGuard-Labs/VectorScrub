@@ -23,6 +23,12 @@ updates:
   - package-ecosystem: npm
     directory: /frontend
     schedule: { interval: weekly, day: monday }
+    ignore:
+      # typescript-eslint does not support TypeScript 7 yet ("typescript-eslint does not support
+      # TS 7.0"; tracking: typescript-eslint issue 10940), so ESLint fails to start. Remove this
+      # entry when it does.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
     open-pull-requests-limit: 5
     groups:
       npm-minor-and-patch:

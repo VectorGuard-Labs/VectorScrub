@@ -15,12 +15,20 @@
 #   web        frontend, backend (public port) and agents. The only network with internet access:
 #              agents fetch broker pages, the frontend and backend answer the reverse proxy.
 # The agents are the component that parses untrusted web pages. They have no route to Postgres.
+# Two database roles. `vectorscrub` (POSTGRES_USER) owns the schema and is used only by the `migrate`
+# service and by operators. `vectorscrub_app` (created by infra/scripts/db_roles.sh when the data
+# volume is first initialised) is what the backend connects as: it can read and write rows but owns
+# nothing, so a compromised backend cannot drop the audit-log triggers. Procedure for an existing
+# volume: docs/runbooks/database-roles.md.
 # The key service. PyHSM holds the key-encryption key that wraps every customer's data key; the
 # backend asks it to wrap and unwrap and never holds the key itself. Build the image from the PyHSM
-# Build the image from the PyHSM repository with its own Dockerfile. PyHSM must be a version with
-# IPC authentication version 2 (the release after 2.3.7): the backend signs requests that way, and
-# PyHSM 2.3.7 and earlier refuse them (and vice versa).
-#   docker build -t pyhsm:2.4.0 /path/to/PyHSM
+# repository with its own Dockerfile, from a commit or tag you have reviewed. PyHSM must be a version
+# with IPC authentication version 2 (the release after 2.3.7): the backend signs requests that way,
+# and PyHSM 2.3.7 and earlier refuse them (and vice versa). Reference the result by DIGEST, not by
+# tag (a tag can be moved), and record where it came from (docs/runbooks/key-service.md):
+#   docker build -t pyhsm:build /path/to/PyHSM
+#   docker image inspect pyhsm:build --format '{{.Id}}'     # sha256:...
+#   PYHSM_IMAGE=pyhsm@sha256:<that digest>   (a registry digest if you push it to a private registry)
 # Before the first start, give the pyhsm_data and pyhsm_socket volumes to uid 1000 and run
 # `docker compose run --rm --no-deps backend kms init` (see docs/runbooks/key-service.md).
 # Secrets (create once, never commit; see docs/runbooks/key-service.md):
@@ -58,7 +66,8 @@ volumes:
 
 services:
   pyhsm:
-    image: ${PYHSM_IMAGE:-pyhsm:2.4.0}
+    # No default: the image that holds the key-encryption key must be one you built and pinned.
+    image: "${PYHSM_IMAGE:?PYHSM_IMAGE is required (the PyHSM image you built, by digest: pyhsm@sha256:...; see docs/runbooks/key-service.md)}"
     <<: *hardening
     user: "1000:1000"
     read_only: true
@@ -92,7 +101,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
     <<: *hardening
     # The image starts as root to prepare the data directory, then runs the server as "postgres".
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
@@ -107,12 +116,15 @@ services:
       POSTGRES_DB: vectorscrub
       POSTGRES_USER: vectorscrub
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see infra/scripts/gen_keys.sh)}
-    ports:
-      # Loopback only: the database is for the containers and for you on this machine, never
-      # the network. (It used to be published on every interface.)
-      - "127.0.0.1:5432:5432"
+      # Password of the runtime role the backend connects as (see "Two database roles" above).
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:?DB_APP_PASSWORD is required, 24+ characters (see infra/scripts/gen_keys.sh)}
+    # No ports are published: Postgres is on an internal-only network and nothing outside the
+    # stack should reach it. To use psql from the host, run `docker compose exec postgres psql`.
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Creates the runtime role the first time the data volume is initialised. For a volume that
+      # already exists, run infra/scripts/db_roles.sh once by hand (docs/runbooks/database-roles.md).
+      - ../scripts/db_roles.sh:/docker-entrypoint-initdb.d/10-db-roles.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vectorscrub"]
       interval: 5s
@@ -120,7 +132,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
     <<: *hardening
     cap_add: [SETGID, SETUID]
     read_only: true
@@ -129,9 +141,13 @@ services:
     mem_limit: 512m
     networks: [queue]
     container_name: vectorscrub-redis
-    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required (see infra/scripts/gen_keys.sh)}
-    ports:
-      - "127.0.0.1:6379:6379"
+    # The password goes into a config file on a private tmpfs, not onto the command line, where any
+    # local user could read it with `ps` or `docker top`. No port is published: Redis is on an
+    # internal-only network.
+    command:
+      - sh
+      - -c
+      - umask 077 && printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf && exec redis-server /tmp/redis.conf
     volumes:
       - redis_data:/data
     healthcheck:
@@ -140,12 +156,34 @@ services:
       timeout: 3s
       retries: 5
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required (see infra/scripts/gen_keys.sh)}
+
+  # Applies database migrations as the schema OWNER, then exits. The backend does not run
+  # migrations and never holds the owner's password. Same image as the backend.
+  migrate:
+    build:
+      context: ../../backend
+      dockerfile: ../infra/docker/Dockerfile.backend
+    image: vectorscrub-backend:local
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+    networks: [data]
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgres://vectorscrub:${POSTGRES_PASSWORD}@postgres:5432/vectorscrub
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   backend:
     build:
       context: ../../backend
       dockerfile: ../infra/docker/Dockerfile.backend
+    image: vectorscrub-backend:local
     container_name: vectorscrub-backend
     <<: *hardening
     # PyHSM's socket is mode 600 and owned by uid 1000, so the backend runs as that uid too. It is
@@ -166,6 +204,8 @@ services:
     depends_on:
       pyhsm:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -177,7 +217,10 @@ services:
       PYHSM_SOCKET: /run/pyhsm/pyhsm.sock
       PYHSM_IPC_SECRET: ${PYHSM_IPC_SECRET:?PYHSM_IPC_SECRET is required (openssl rand -hex 32)}
       PYHSM_KEY_ID: ${PYHSM_KEY_ID:-vectorscrub-kek}
-      DATABASE_URL: postgres://vectorscrub:${POSTGRES_PASSWORD}@postgres:5432/vectorscrub
+      # The runtime role: reads and writes rows, owns nothing, cannot touch the audit triggers.
+      # The owner's password (POSTGRES_PASSWORD) is not given to this container.
+      DATABASE_URL: postgres://vectorscrub_app:${DB_APP_PASSWORD}@postgres:5432/vectorscrub
+      RUN_MIGRATIONS: "false"
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required, 32+ characters (see infra/scripts/gen_keys.sh)}
       # Only needed once, to move data written before envelope encryption:

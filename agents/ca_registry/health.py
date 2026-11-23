@@ -74,7 +74,7 @@ class CaRightsHealthChecker:
         host_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         results: dict[str, OptOutCheck] = {}
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
 
             async def one(ident: str, url: str) -> None:
                 host = (urlsplit(url).hostname or "").lower().removeprefix("www.")

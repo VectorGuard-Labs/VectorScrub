@@ -16,6 +16,9 @@ place that makes such a request, and it:
     later, so DNS rebinding cannot swap in a private address between check and connect.
     TLS still verifies the certificate against the original hostname (SNI is set to it);
   * follows redirects itself, re-validating every hop, up to a small limit;
+  * expects a client built with `trust_env=False`: with the default, httpx reads HTTP(S)_PROXY
+    from the environment and would send the request to that proxy instead of connecting to the
+    address validated here. A test (test_safe_fetch.py) fails if any client in the agents omits it;
   * caps the size of the DECOMPRESSED body, so neither a huge page nor a zip bomb can
     exhaust memory, and caps total time so a slow drip cannot hold a worker.
 
@@ -69,14 +72,25 @@ class Fetched:
 # Address checks
 # ---------------------------------------------------------------------------
 
+# IPv6 addresses we will connect to must be in the global unicast block. Python's `is_global`
+# alone accepts several ranges that embed or translate an IPv4 address or are not routable
+# (NAT64 64:ff9b::/96, IPv4-compatible ::/96, IPv4-translated ::ffff:0:0:0/96, deprecated
+# site-local fec0::/10, unallocated space), and on a network with a NAT64 gateway 64:ff9b::a00:1
+# reaches 10.0.0.1. Anything outside 2000::/3 is refused instead of enumerated.
+_IPV6_GLOBAL_UNICAST = ipaddress.ip_network("2000::/3")
+
+
 def is_public_address(address: str) -> bool:
     """True only for a globally routable unicast address."""
     try:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError:
         return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip not in _IPV6_GLOBAL_UNICAST:
+            return False
     return ip.is_global and not ip.is_multicast
 
 

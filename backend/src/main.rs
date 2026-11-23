@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::info;
 use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 mod api;
 mod crypto;
@@ -34,6 +33,18 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("erase-account") {
         return erase_account_cli(args.get(2).map(String::as_str)).await;
+    }
+
+    // `vectorscrub migrate`: apply pending migrations as the schema OWNER, then exit. Run it as a
+    // separate step (the compose `migrate` service) so the running service can use a role that
+    // owns nothing. Reads DATABASE_URL only; the service's other settings are not needed.
+    if args.get(1).map(String::as_str) == Some("migrate") {
+        return migrate_cli().await;
+    }
+
+    // `vectorscrub audit verify | head`: check the audit hash chain (migration 0025), or print its head.
+    if args.get(1).map(String::as_str) == Some("audit") {
+        return audit_cli(&args[2..]).await;
     }
 
     if args.get(1).map(String::as_str) == Some("kms") {
@@ -74,13 +85,29 @@ async fn main() -> anyhow::Result<()> {
         .context("Invalid deletion-request channel catalog")?;
     info!(channels, "Deletion-request channel catalog is valid");
 
-    // Run migrations
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .context("Failed to run database migrations")?;
+    // Migrations. Either this process applies them (development, single-role setups), or it only
+    // checks that the owner already did (`RUN_MIGRATIONS=false`, the production arrangement).
+    let migrator = sqlx::migrate!("./migrations");
+    if config.run_migrations {
+        migrator.run(&pool).await.context("Failed to run database migrations")?;
+        info!("Database migrations applied successfully");
+    } else {
+        let mut conn = pool.acquire().await.context("Failed to connect to PostgreSQL")?;
+        let pending = services::db_roles::pending_migrations(&mut conn, &migrator)
+            .await
+            .context("Could not read the migration state")?;
+        anyhow::ensure!(
+            pending.is_empty(),
+            "RUN_MIGRATIONS=false but migrations are not applied (versions {pending:?}). Run `vectorscrub migrate` with the owner role first"
+        );
+        info!("All database migrations are already applied");
+    }
 
-    info!("Database migrations applied successfully");
+    // The role this service runs as must not be able to drop the audit triggers.
+    {
+        let mut conn = pool.acquire().await.context("Failed to connect to PostgreSQL")?;
+        services::db_roles::check_runtime_role(&mut conn, config.is_production(), config.allow_owner_database_role).await?;
+    }
 
     // Where customers' data keys come from. With PyHSM, wait for it (it may start a moment after
     // this process) and check that the key-encryption key exists: without it nothing can be
@@ -148,11 +175,15 @@ async fn main() -> anyhow::Result<()> {
         .await;
     });
 
-    // The interactive API documentation maps every endpoint for an attacker, so it is served only
-    // outside production.
+    // The API description maps every endpoint for an attacker, so it is served only outside
+    // production. (There is no Swagger UI: its crate downloaded a release archive from GitHub in
+    // its build script. Open the JSON in any OpenAPI viewer.)
     let mut public = Router::new();
     if !config.is_production() {
-        public = public.merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", docs::ApiDoc::openapi()));
+        public = public.route(
+            "/api-docs/openapi.json",
+            axum::routing::get(|| async { axum::Json(docs::ApiDoc::openapi()) }),
+        );
     }
 
     // With INTERNAL_PORT set, the agent-only routes live on their own listener and the public
@@ -301,6 +332,45 @@ async fn wait_for_key_service(keys: &services::keys::KeyService) -> anyhow::Resu
          if not, this is the wrong keystore and starting would make every stored customer key unreadable",
         hsm.key_id()
     );
+    Ok(())
+}
+
+/// `vectorscrub audit verify | head`. `verify` exits non-zero if the chain does not hold. `head` prints
+/// the sequence number and hash of the newest link: store it where the database host cannot write.
+async fn audit_cli(args: &[String]) -> anyhow::Result<()> {
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let pool = PgPoolOptions::new().max_connections(2).connect(&url).await.context("could not connect to DATABASE_URL")?;
+    let report = services::audit_chain::verify(&pool).await?;
+    match args.first().map(String::as_str) {
+        Some("verify") => {
+            match &report.head {
+                Some((seq, hash)) => println!("{} links checked; head {seq} {hash}", report.links),
+                None => println!("no links yet (no audit row has been written since migration 0025)"),
+            }
+            if let Some(problem) = report.problem {
+                anyhow::bail!("AUDIT CHAIN BROKEN: {problem}");
+            }
+            println!("the audit chain holds");
+            Ok(())
+        }
+        Some("head") => {
+            anyhow::ensure!(report.problem.is_none(), "the chain does not verify; run `audit verify`");
+            match report.head {
+                Some((seq, hash)) => println!("{seq} {hash}"),
+                None => println!("0 -"),
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("usage: vectorscrub audit verify | head"),
+    }
+}
+
+/// `vectorscrub migrate`: apply every pending migration using DATABASE_URL (the schema owner).
+async fn migrate_cli() -> anyhow::Result<()> {
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let pool = PgPoolOptions::new().max_connections(1).connect(&url).await.context("could not connect to DATABASE_URL")?;
+    sqlx::migrate!("./migrations").run(&pool).await.context("Failed to run database migrations")?;
+    println!("migrations are up to date");
     Ok(())
 }
 

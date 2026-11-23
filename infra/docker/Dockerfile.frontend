@@ -1,4 +1,4 @@
-FROM node:22-alpine AS builder
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS builder
 WORKDIR /app
 
 # Where the Next.js server finds the Rust API. Next.js bakes rewrites into the build, so this
@@ -13,7 +13,7 @@ RUN npm ci --no-audit --no-fund
 COPY . .
 RUN npm run build
 
-FROM node:22-alpine AS runtime
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS runtime
 WORKDIR /app
 # The server runs `node server.js` only. npm, corepack and yarn ship their own bundled
 # dependencies, which lag their fixed releases and fail the image scan, so they are removed.

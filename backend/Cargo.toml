@@ -27,17 +27,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Auth & Security
-jsonwebtoken = "9"
-argon2 = "0.5"
+# HMAC only: no PEM parsing. aws-lc-rs is already in the build (rustls). Not `rust_crypto`: it would pull in `rsa`, which has a set-aside advisory.
+jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs"] }
+argon2 = "0.6"
 rand = "0.8"
 rand_core = { version = "0.6", features = ["std"] }
 
 # Cryptography
-aes-gcm = "0.10"
-sha2 = "0.10"
-hmac = "0.12"
-hkdf = "0.12"
-sha1 = "0.10"
+aes-gcm = "0.11"
+sha2 = "0.11"
+hmac = "0.13"
+hkdf = "0.13"
+sha1 = "0.11"
 base64 = "0.22"
 hex = "0.4"
 zeroize = { version = "1", features = ["derive"] }
@@ -57,15 +58,14 @@ validator = { version = "0.20", features = ["derive"] }
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.28"
-opentelemetry = { version = "0.27", features = ["trace", "metrics"] }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace", "metrics"] }
-opentelemetry-otlp = { version = "0.27", features = ["trace", "metrics", "grpc-tonic"] }
+tracing-opentelemetry = "0.34"
+opentelemetry = { version = "0.33", features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio", "trace", "metrics"] }
+opentelemetry-otlp = { version = "0.33", features = ["trace", "metrics", "grpc-tonic"] }
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 
 # Config
-config = "0.14"
 dotenvy = "0.15"
 
 # Error handling
@@ -73,8 +73,7 @@ thiserror = "2"
 anyhow = "1"
 
 # API documentation
-utoipa = { version = "4", features = ["axum_extras", "uuid", "chrono", "time"] }
-utoipa-swagger-ui = { version = "6", features = ["axum"] }
+utoipa = { version = "6", features = ["axum_extras", "uuid", "chrono", "time"] }
 
 # TLS. Both rustls crypto providers (ring and aws-lc-rs) are compiled in through our dependencies,
 # so rustls cannot pick one by itself and panics on the first TLS connection that is not made by

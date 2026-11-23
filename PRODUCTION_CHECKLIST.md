@@ -20,12 +20,12 @@ Use this checklist before deploying VectorScrub to production.
 ### Infrastructure
 
 - [ ] Server/VM provisioned with adequate resources (4 CPU, 8GB RAM minimum)
-- [ ] PostgreSQL database provisioned (RDS recommended for AWS)
-- [ ] Redis cache provisioned (ElastiCache recommended for AWS)
+- [ ] PostgreSQL: the compose container, or a managed instance with TLS (`database-roles.md`, "Anywhere else")
+- [ ] Redis: the compose container, or a managed instance with TLS
 - [ ] Backup storage configured (S3, Cloud Storage, etc.)
-- [ ] Monitoring service configured (CloudWatch, Datadog, Grafana, etc.)
+- [ ] Prometheus and Alertmanager running with `infra/monitoring/` and routed to a named person
 - [ ] Log aggregation configured (CloudWatch Logs, ELK, etc.)
-- [ ] Email service configured (SMTP credentials ready)
+- [ ] SMTP credentials ready if email opt-outs to companies are used (no email is sent to customers; see `docs/runbooks/smtp-failures.md`)
 
 ### Environment Variables
 
@@ -34,10 +34,11 @@ Verify all required variables are set:
 - [ ] `DATABASE_URL` - PostgreSQL connection string
 - [ ] `REDIS_URL` - Redis connection string (with password)
 - [ ] `JWT_SECRET` - Strong random secret (48+ bytes)
-- [ ] `PYHSM_IPC_SECRET` and the PyHSM keystore password (`PYHSM_PASSWORD_FILE`). No `MASTER_ENCRYPTION_KEY` in production.
+- [ ] `PYHSM_IPC_SECRET`, the PyHSM keystore password (`PYHSM_PASSWORD_FILE`) and `PYHSM_IMAGE` pinned by digest. No `MASTER_ENCRYPTION_KEY` in production.
+- [ ] `DB_APP_PASSWORD`: the backend connects as the runtime role, not the owner (`docs/runbooks/database-roles.md`); `vectorscrub migrate` runs as the owner
 - [ ] `AGENT_API_KEY` - Internal API authentication
 - [ ] `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` - LLM provider
-- [ ] `SMTP_HOST`, `SMTP_USERNAME`, `SMTP_PASSWORD` - Email service
+- [ ] `SMTP_HOST`, `SMTP_USERNAME`, `SMTP_PASSWORD` - only for email opt-outs to companies
 - [ ] `ALLOWED_ORIGINS` - Frontend domain(s)
 - [ ] `ENVIRONMENT=production`
 
@@ -54,9 +55,8 @@ Verify all required variables are set:
 ### Build & Deploy
 
 - [ ] Docker images built from latest code
-- [ ] Images pushed to container registry (ECR, Docker Hub, etc.)
 - [ ] Database migrations tested in staging environment
-- [ ] Load balancer configured and health checks passing
+- [ ] nginx and TLS in place from `infra/nginx/`; health checks passing
 - [ ] Services deployed (backend, agents, frontend)
 - [ ] Reverse proxy/CDN configured (Nginx, CloudFront, etc.)
 
@@ -76,13 +76,12 @@ Verify all required variables are set:
 
 - [ ] User registration works
 - [ ] User login works
-- [ ] Password reset flow works
+- [ ] Lost-password behaviour understood: there is **no** password reset and no email verification (no mail is sent to customers). A forgotten password locks the account. Decide how support answers that before launch
 - [ ] Identity profile creation works
 - [ ] Scan job submission works
 - [ ] Agents processing jobs (check logs)
 - [ ] Exposures being detected and stored
 - [ ] Removal requests can be authorized
-- [ ] Email notifications sending (if configured)
 
 ## Post-Deployment
 
@@ -124,6 +123,7 @@ Procedure, scripts and the drill log: [docs/runbooks/backup-and-restore.md](docs
 - [ ] SQL injection prevention tested
 - [ ] XSS prevention tested
 - [ ] Audit log working (check `removal_audit_log` table)
+- [ ] `vectorscrub audit verify` passes, and its head is stored daily somewhere the database host cannot write (`docs/runbooks/audit-chain.md`)
 - [ ] PII masking in logs verified (no raw PII in logs)
 
 ### Performance
@@ -199,81 +199,18 @@ Procedure, scripts and the drill log: [docs/runbooks/backup-and-restore.md](docs
 
 ---
 
-## Quick Start Commands
+## Deploying
 
-### Simple VPS Deployment
-
-```bash
-# One-command deployment
-curl -fsSL https://raw.githubusercontent.com/yourusername/VectorScrub/main/infra/scripts/deploy-simple.sh | sudo bash
-```
-
-### AWS ECS Deployment
-
-```bash
-# Build and push images
-cd /path/to/VectorScrub
-./infra/scripts/build-and-push-aws.sh <account-id> <region>
-
-# Deploy infrastructure
-cd infra/aws
-terraform init
-terraform plan
-terraform apply
-```
-
-### Manual Docker Compose
-
-```bash
-cd /path/to/VectorScrub/infra/docker
-
-# Generate secrets
-../scripts/gen_keys.sh
-
-# Edit .env with your values
-nano .env
-
-# Deploy
-docker compose up -d
-
-# Check logs
-docker compose logs -f
-```
-
----
-
-## Emergency Contacts
-
-| Role | Contact | Phone | Email |
-|------|---------|-------|-------|
-| On-Call Engineer | TBD | TBD | TBD |
-| Security Lead | TBD | TBD | TBD |
-| Database Admin | TBD | TBD | TBD |
-| Cloud Operations | TBD | TBD | TBD |
+Docker Compose on a single host is the supported deployment. Follow [DEPLOYMENT.md](DEPLOYMENT.md); `infra/scripts/deploy-simple.sh`
+automates it but has not been run end to end against a real PyHSM image, so read it first. Do not pipe it from the internet into a shell.
 
 ---
 
 ## Rollback Procedure
 
-If deployment fails or critical issues discovered:
-
-```bash
-# Option 1: Rollback to previous Docker images
-docker compose down
-docker compose pull <previous-tag>
-docker compose up -d
-
-# Option 2: Restore from backup (if database corrupted)
-# Follow docs/runbooks/backup-and-restore.md ("Restoring for real"); verify with
-# `vectorscrub verify-backup` before starting the service.
-
-# Option 3: AWS ECS rollback
-aws ecs update-service \
-  --cluster vectorscrub-production \
-  --service vectorscrub-backend \
-  --task-definition vectorscrub-backend:<previous-revision> \
-  --force-new-deployment
-```
+See "Updating" in [DEPLOYMENT.md](DEPLOYMENT.md): check out the previous commit and `docker compose up -d --build`. Migrations only
+go forward; to undo one, restore from backup (`docs/runbooks/backup-and-restore.md`, "Restoring for real"), run
+`infra/scripts/db_roles.sh`, and `vectorscrub verify-backup` before starting the service.
 
 ---
 

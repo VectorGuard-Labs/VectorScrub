@@ -17,12 +17,17 @@
 | Scan job recovery and health probes | **Implemented** |
 | Customer PII never sent to LLMs | **Implemented and tested** (redaction, NER, vocabulary filter, fail-closed). Detection accuracy on real pages not measured. |
 | Role-based access control, admin/operator roles | **Not implemented** (only customer JWT and one shared agent key) |
+| Database least privilege | **Implemented**: the backend connects as a runtime role that owns nothing and cannot drop the audit triggers; migrations run separately as the owner (`vectorscrub migrate`). Production refuses an owner or superuser role unless overridden. The owner and any superuser can still bypass the triggers. `docs/runbooks/database-roles.md` |
+| Audit tamper evidence | **Implemented** as a hash chain over the audit rows (migration 0025, `vectorscrub audit verify`). It detects edits, deletions and missing links; it detects a consistent rewrite by the owner only if the head is stored off the host on a schedule, which is an operator task not yet scheduled. `docs/runbooks/audit-chain.md` |
+| Password strength | **Partly**: 12 to 128 characters plus a local check for common words with digits or symbols, keyboard walks, sequences, repeats and the account's email. **Not** a breached-password lookup (that needs a third-party call). No password reset and no email verification exist. |
+| Evidence screenshots of submitted forms | **Not kept.** An encrypted file store existed but used a static key in the agent process and was not erased with the account; it was removed. |
 | TLS to Postgres and Redis | **Enforced in production** (the backend refuses to start without `sslmode=require` / `rediss://`, unless an explicit private-network override is set; compose uses the override on internal-only networks). Tested against live TLS servers. |
 | mTLS between services, IP allowlisting | **Not implemented** in the repo; deployment concern. Agent-to-backend traffic is plain HTTP on an internal-only network. |
 | Metrics, API docs and agent API not public | **Implemented** (metrics need a token, docs off in production, agent API on its own port, reference proxy blocks all three). Not tested against your real hostname. |
 | Audit identifiers retention | **Implemented**: email, IP and user agent cleared after 180 days (configurable). |
 | Idempotency keys | **Not implemented** |
-| Automated data retention / right-to-erasure | **Not implemented** (see `DATA_RETENTION.md`) |
+| Right to erasure | **Implemented**: `DELETE /me` and `vectorscrub erase-account` pseudonymize the audit trail and delete the customer in one transaction (migration 0017). Backups keep an erased customer until they age out; a restore resurrects them (re-run erasure). See `DATA_RETENTION.md`. |
+| Automated data retention (inactive accounts, expiry of old data) | **Not implemented** (see `DATA_RETENTION.md`). Audit identifiers are cleared after 180 days; sessions, throttle rows and score history are purged. |
 | Circuit breakers | **Partial:** Python agents only, per host, for page fetches |
 | Dependency vulnerability scanning | **Implemented** in `.github/workflows/security.yml` (cargo audit, pip-audit, npm audit; weekly and on every change) plus Dependabot. Set-aside Rust advisories are listed with reasons in `backend/.cargo/audit.toml`. |
 | Backups and restore | **Scripted and drilled, not yet operated.** `infra/scripts/backup.sh`, `restore_verify.sh`, `vectorscrub verify-backup`; procedure and drill log in `docs/runbooks/backup-and-restore.md`. No production schedule, off-site copy or restore drill on real infrastructure is evidenced here. |

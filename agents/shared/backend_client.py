@@ -46,7 +46,7 @@ class BackendClient:
         self._transport = transport  # tests inject httpx.MockTransport
 
     def _client(self, timeout: float = 10) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=timeout, transport=self._transport)
+        return httpx.AsyncClient(timeout=timeout, transport=self._transport, trust_env=False)
 
     # ------------------------------------------------------------------
     # Scans: claim -> progress/heartbeat -> complete | fail

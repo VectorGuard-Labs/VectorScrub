@@ -10,7 +10,6 @@ import logging
 import re
 import smtplib
 import ssl
-import uuid
 from dataclasses import dataclass
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -30,10 +29,8 @@ from tenacity import (
 
 from shared.models import RemovalProcedure, IdentityContext
 from removal.handlers import get_handler
-from shared.captcha_session import get_captcha_session_manager
 from shared.backend_client import BackendClient
 from shared.config import get_config
-from shared.evidence_storage import get_evidence_storage
 from shared.metrics import get_metrics_collector
 from shared.rate_limiter import get_rate_limiter
 
@@ -168,7 +165,6 @@ class RemovalExecutor:
         self.config = get_config()
         self._rate_limiter = get_rate_limiter()
         self._metrics = get_metrics_collector()
-        self._evidence_storage = get_evidence_storage()
 
     async def submit_removal_request(
         self,
@@ -251,9 +247,6 @@ class RemovalExecutor:
         """
         log.info("submit_web_form", opt_out_host=_host(procedure.opt_out_url))
 
-        # Generate removal request ID for evidence tracking
-        removal_request_id = str(uuid.uuid4())
-
         # Check rate limit before starting expensive browser automation
         broker = urlparse(procedure.opt_out_url or "").hostname or "unknown"
         start_time = asyncio.get_event_loop().time()
@@ -296,51 +289,20 @@ class RemovalExecutor:
                     )
                     return self._failed(refusal)
 
-                # Phase 3: CAPTCHA handling - human-in-the-loop or fail
+                # A CAPTCHA is a hard stop. We never solve it and never hand the page to a person
+                # through us: the customer is told to do this opt-out by hand.
                 has_captcha = await handler.has_captcha(page) if handler else await self._has_captcha(page)
                 if has_captcha:
                     log.warning("web_form_captcha", opt_out_host=_host(procedure.opt_out_url))
-
-                    # Check if broker supports human CAPTCHA intervention
-                    if procedure.supports_human_captcha:
-                        # Pause automation and create intervention session
-                        screenshot_bytes = await page.screenshot(full_page=True)
-                        session_manager = get_captcha_session_manager()
-
-                        session = await session_manager.pause_for_captcha(
-                            customer_id=identity.customer_id,
-                            removal_request_id=uuid.UUID(removal_request_id),
-                            broker=procedure.source_name,
-                            context=context,
-                            page=page,
-                            screenshot_bytes=screenshot_bytes,
-                        )
-
-                        log.info(
-                            "captcha_intervention_created",
-                            session_id=str(session.session_id),
-                            session_url=session.session_url,
-                        )
-
-                        # Return pending status with session info
-                        return {
-                            "status": "captcha_intervention",
-                            "session_id": str(session.session_id),
-                            "session_url": session.session_url,
-                            "message": "CAPTCHA detected. Please solve it via the provided link to continue.",
-                            "error": None,
-                        }
-                    else:
-                        # No human intervention supported, fail
-                        await self._metrics.record_removal(
-                            broker=procedure.source_name,
-                            success=False,
-                            captcha_blocked=True,
-                        )
-                        return self._failed(
-                            "CAPTCHA challenge on the opt-out page; this source needs "
-                            "to be completed manually"
-                        )
+                    await self._metrics.record_removal(
+                        broker=procedure.source_name,
+                        success=False,
+                        captcha_blocked=True,
+                    )
+                    return self._failed(
+                        "CAPTCHA challenge on the opt-out page; this source needs "
+                        "to be completed manually"
+                    )
 
                 # Fill form - use site-specific handler if available
                 if handler:
@@ -377,24 +339,6 @@ class RemovalExecutor:
                 await page.wait_for_load_state("networkidle", timeout=20000)
                 await asyncio.sleep(2)  # Allow dynamic content to load
 
-                # Capture screenshot as evidence
-                screenshot_bytes = await page.screenshot(full_page=True)
-                evidence_hash = self.generate_evidence_hash(screenshot_bytes)
-
-                # Store screenshot in encrypted storage
-                try:
-                    await self._evidence_storage.store_evidence(
-                        screenshot_bytes=screenshot_bytes,
-                        customer_id=identity.customer_id,
-                        removal_request_id=removal_request_id,
-                        broker=procedure.source_name,
-                        timestamp=asyncio.get_event_loop().time(),
-                    )
-                    log.debug("evidence_screenshot_stored", evidence_hash=evidence_hash)
-                except Exception as exc:
-                    log.error("evidence_storage_failed", error_type=type(exc).__name__)
-                    # Continue anyway - evidence_hash is still recorded
-
                 # Judge the page from what a person would read on it. One verdict decides:
                 # failure wording vetoes acceptance, even when a reference is also shown.
                 try:
@@ -410,7 +354,7 @@ class RemovalExecutor:
                 verdict = judge_result_page(page_text)
 
                 if not verdict.accepted:
-                    log.warning("web_form_unconfirmed", evidence_hash=evidence_hash, reason=verdict.reason)
+                    log.warning("web_form_unconfirmed", reason=verdict.reason)
                     if verdict.reason == "failure_wording":
                         message = (
                             "The opt-out page reported a problem after the form was submitted "
@@ -421,16 +365,13 @@ class RemovalExecutor:
                             "Form was submitted but no confirmation was detected (the "
                             "request may not have been accepted)"
                         )
-                    result = self._failed(message)
-                    result["evidence_hash"] = evidence_hash
-                    return result
+                    return self._failed(message)
 
                 # Use handler confirmation if available, otherwise use verdict reference
                 confirmation_ref = handler_confirmation or verdict.reference
                 log.info(
                     "web_form_submitted",
                     confirmation_ref=confirmation_ref,
-                    evidence_hash=evidence_hash,
                     reason=verdict.reason,
                     handler_used=handler is not None,
                 )
@@ -450,7 +391,7 @@ class RemovalExecutor:
                 return {
                     "status": "submitted",
                     "confirmation_ref": confirmation_ref,
-                    "evidence_hash": evidence_hash,
+                    "evidence_hash": None,
                     "error": None,
                 }
 
@@ -458,7 +399,6 @@ class RemovalExecutor:
                 log.warning("web_form_timeout", opt_out_host=_host(procedure.opt_out_url), error_type=_why(exc))
                 return self._failed("The opt-out page timed out")
             finally:
-                # Close context first (if not saved for CAPTCHA intervention)
                 try:
                     await context.close()
                 except Exception:
@@ -599,10 +539,6 @@ class RemovalExecutor:
             return True
 
         return False
-
-    def generate_evidence_hash(self, screenshot_bytes: bytes) -> str:
-        """Generates SHA-256 hash of screenshot for tamper-evidence."""
-        return hashlib.sha256(screenshot_bytes).hexdigest()
 
     @retry(
         stop=stop_after_attempt(3),
@@ -904,7 +840,7 @@ This request was submitted via VectorScrub Privacy Protection Platform
             if self.config.drop_enable_sandbox:
                 api_url = api_url.replace("/v1", "/sandbox/v1")
 
-            async with httpx.AsyncClient(timeout=60) as client:
+            async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
                 # Step 1: Authenticate
                 auth_response = await client.post(
                     f"{api_url}/auth/token",

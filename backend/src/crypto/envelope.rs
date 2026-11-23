@@ -17,8 +17,7 @@
 //! read only by the migration tool; `is_v2` tells the two apart.
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
-    Aes256Gcm, Key, Nonce,
+    aead::{Aead, Payload},
 };
 use anyhow::{anyhow, Context, Result};
 use hkdf::Hkdf;
@@ -106,8 +105,8 @@ impl CustomerKeys {
     /// Encrypt `plaintext` as the field `purpose` of this customer.
     pub fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
         let key = self.field_key(purpose);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*key));
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let cipher = super::cipher_for(&*key);
+        let nonce = super::random_nonce();
         let aad = self.aad(purpose);
         let ct = cipher
             .encrypt(&nonce, Payload { msg: plaintext, aad: &aad })
@@ -127,10 +126,10 @@ impl CustomerKeys {
         }
         let (nonce, ct) = blob[MAGIC.len()..].split_at(NONCE_LEN);
         let key = self.field_key(purpose);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*key));
+        let cipher = super::cipher_for(&*key);
         let aad = self.aad(purpose);
         cipher
-            .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: &aad })
+            .decrypt(&super::nonce_from(nonce), Payload { msg: ct, aad: &aad })
             .map_err(|_| anyhow!("Decryption failed"))
     }
 
@@ -235,6 +234,28 @@ mod tests {
             "f72b2253a284fc7012f435dd2856db0ea1bd684884dde91b22a115a66f1018ff"
         );
         assert_ne!(k.field_key(purpose::IDENTITY_FULL_NAME), k.field_key(purpose::IDENTITY_ADDRESS));
+    }
+
+    /// A blob made outside this code base (Python `cryptography`: HKDF-SHA256 field key, AES-256-GCM,
+    /// the documented layout and associated data). Data written by any earlier build must keep
+    /// opening, so this has to pass unchanged across a change of AES-GCM library version.
+    #[test]
+    fn a_blob_sealed_by_an_independent_implementation_opens() {
+        let customer: Uuid = "11111111-2222-3333-4444-555555555555".parse().unwrap();
+        let mut dek = [0u8; 32];
+        for (i, b) in dek.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let k = CustomerKeys::new(customer, dek);
+        let blob = hex::decode("5653026465666768696a6b6c6d6e6f5014ab1f9c5b58473dd5d2a4737e2726069fb0fa2daf86f40891a8be8b").unwrap();
+        assert_eq!(k.open_str(purpose::IDENTITY_FULL_NAME, &blob).unwrap(), "Jane Q. Smith");
+        assert!(k.open_str(purpose::IDENTITY_ADDRESS, &blob).is_err(), "bound to its field");
+        assert!(CustomerKeys::new(Uuid::nil(), dek).open_str(purpose::IDENTITY_FULL_NAME, &blob).is_err(), "bound to its customer");
+        // And what this build seals is something the independent implementation would also open:
+        // same layout, nonce and tag lengths.
+        let mine = k.seal_str(purpose::IDENTITY_FULL_NAME, "Jane Q. Smith").unwrap();
+        assert_eq!(mine.len(), blob.len());
+        assert_eq!(&mine[..3], &blob[..3]);
     }
 
     #[test]

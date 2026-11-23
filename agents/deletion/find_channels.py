@@ -177,7 +177,7 @@ async def scan(
     if client is not None:
         await run(client)
     else:
-        async with httpx.AsyncClient() as c:
+        async with httpx.AsyncClient(trust_env=False) as c:
             await run(c)
     for r in results.values():
         r.candidates.sort(key=lambda c: -c.score)

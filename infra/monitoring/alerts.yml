@@ -1,0 +1,87 @@
+# Prometheus alert rules for VectorScrub. Every metric named here is exported by the backend
+# (`/api/v1/metrics`, which needs METRICS_TOKEN) except `up`, which Prometheus makes itself.
+# Check them with promtool (CI does): promtool check rules infra/monitoring/alerts.yml
+#
+# These rules are what to alert ON. Where the alert goes (a pager, a chat channel) is yours to wire
+# up in Alertmanager; nothing here sends anything. Thresholds are starting points for a small
+# pilot: tune them after a week of real traffic.
+groups:
+  - name: vectorscrub-availability
+    rules:
+      - alert: BackendDown
+        expr: up{job="vectorscrub"} == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: The backend is not answering its metrics scrape
+          runbook: docs/runbooks/incident-response.md
+
+      - alert: HighServerErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_requests_total[5m])), 1e-9) > 0.01
+          and sum(rate(http_requests_total[5m])) > 0.05
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: More than 1% of requests are failing with a 5xx for 10 minutes
+          runbook: docs/runbooks/incident-response.md
+
+      - alert: SlowRequests
+        expr: histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m]))) > 1
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: p99 request latency is above 1 second
+
+  - name: vectorscrub-security-and-integrity
+    rules:
+      # The audit trail is the record of who saw identity data. A failed write means a gap in it.
+      - alert: AuditWritesFailing
+        expr: increase(audit_write_failures_total[15m]) > 0
+        labels: { severity: page }
+        annotations:
+          summary: An audit-log write failed, so there is a gap in the audit trail
+          runbook: docs/runbooks/incident-response.md
+
+      - alert: LoginFloodOrCredentialStuffing
+        expr: sum(rate(http_requests_total{path="/api/v1/auth/login",status="401"}[5m])) > 1
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: Sustained failed logins (more than 1 per second for 10 minutes)
+
+      - alert: RateLimiterRunningOnFallback
+        expr: increase(rate_limit_backend_errors_total[10m]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: The rate limiter cannot reach Redis and is using its per-instance fallback
+          runbook: docs/runbooks/incident-response.md
+
+      - alert: KeyServiceRateLimited
+        expr: increase(key_service_rate_limited_total[10m]) > 0
+        labels: { severity: page }
+        annotations:
+          summary: PyHSM is refusing requests as rate-limited, so customer requests are failing
+          runbook: docs/runbooks/key-service.md
+
+  - name: vectorscrub-work-queues
+    rules:
+      - alert: ScanQueueBacklog
+        expr: redis_queue_length > 50
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: More than 50 scan jobs have been waiting for 30 minutes (are the agents running?)
+
+      - alert: ScanJobsFailingAfterRetries
+        expr: increase(scan_jobs_failed_by_recovery_total[1h]) > 3
+        labels: { severity: ticket }
+        annotations:
+          summary: Scan jobs are being failed by the recovery loop after exhausting their attempts
+
+      - alert: RemovalClaimsAbandoned
+        expr: increase(removal_claims_abandoned_total[1h]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: A worker died while submitting a removal; the request was failed, not retried

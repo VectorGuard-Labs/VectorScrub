@@ -52,14 +52,17 @@ jobs:
       TEST_REDIS_URL: redis://localhost:6379/14
       SQLX_OFFLINE: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Keep in step with the Rust version in infra/docker/Dockerfile.backend.
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@547f64eaa184fd62768e02b77019e5408713ca53 # 1.90.0
         with:
+          # Pinned by commit, so the toolchain must be named here (the action otherwise takes it
+          # from the ref it was called with).
+          toolchain: 1.90.0
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: backend
 
@@ -139,9 +142,9 @@ jobs:
     env:
       TEST_REDIS_URL: redis://localhost:6379/14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
           cache: pip
@@ -173,10 +176,10 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 26
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
@@ -198,7 +201,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: docker compose file is valid (and refuses to start without its secrets)
         working-directory: infra/docker
@@ -208,7 +211,16 @@ jobs:
           fi
           POSTGRES_PASSWORD=p REDIS_PASSWORD=r JWT_SECRET=$(printf 'j%.0s' {1..40}) \
           PYHSM_IPC_SECRET=$(printf 'i%.0s' {1..40}) PYHSM_PASSWORD_FILE=/dev/null \
+          DB_APP_PASSWORD=$(printf 'd%.0s' {1..30}) \
+          PYHSM_IMAGE=pyhsm@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
           AGENT_API_KEY=$(printf 'k%.0s' {1..40}) docker compose config >/dev/null
+
+      - name: Alert rules are valid, and the infra scripts parse
+        run: |
+          docker run --rm -v "$PWD/infra/monitoring:/m:ro" --entrypoint promtool \
+            prom/prometheus@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 check rules /m/alerts.yml
+          for f in infra/scripts/*.sh; do bash -n "$f"; done
+          sh -n infra/scripts/db_roles.sh
 
       # No database exists in this build: the image compiles from backend/.sqlx.
       - name: Backend image builds with no database
@@ -226,7 +238,7 @@ jobs:
       # between two runs with no change here, because the database of known issues keeps growing:
       # fix by rebuilding on a newer base image or updating the dependency.
       - name: Scan the backend image (Trivy)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: vectorscrub-backend
           severity: CRITICAL,HIGH
@@ -235,7 +247,7 @@ jobs:
           format: table
 
       - name: Scan the agents image (Trivy)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: vectorscrub-agents
           severity: CRITICAL,HIGH
@@ -244,7 +256,7 @@ jobs:
           format: table
 
       - name: Scan the frontend image (Trivy)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: vectorscrub-frontend
           severity: CRITICAL,HIGH

@@ -2,6 +2,8 @@
 
 This document states what the system does today, what it does not, and the open design problem. An earlier version described a daily automated cleanup (inactive-account warnings and deletion, exposure and scan expiry, and so on). **None of that ran.** The module (`services/data_retention.rs`) was never started from `main.rs`, and was deleted because, as written, it could not have worked and an automatic deleter of customer data is too risky to ship unverified.
 
+No screenshots of filled-in opt-out forms are taken or stored (they would show the customer's identity), so there is no evidence store to erase from. An earlier file-based store was removed.
+
 ## Account erasure (implemented, migration 0017)
 
 `DELETE /api/v1/me` (password required, refused while a subscription would keep billing; one set to cancel at period end is allowed) and the operator command `vectorscrub erase-account <email>` call `services/account_deletion.rs`. In one transaction it pseudonymizes the customer's rows in `audit_log` (customer, email, IP, user agent cleared, including failed-login rows that carry only the email) and `removal_audit_log` (customer and request links cleared, free-text `details` reset to `{}`), then deletes the customer; everything the customer owns cascades. `stripe_subscriptions` keeps Stripe's identifiers with the customer link cut. The audit triggers still reject every other UPDATE, all DELETEs and TRUNCATE (tested).
@@ -30,23 +32,18 @@ Nothing else is ever deleted automatically: customers, identity profiles, scan j
 - Expiry of scan jobs, exposures, or alerts.
 - Application-log, backup, or Prometheus retention (these belong to the deployment platform).
 
-For a service whose purpose is data protection, this is a gap that has to be closed before launch.
+Deciding how long an inactive account is kept is a policy choice, and the Privacy Policy must state it before any automatic deletion is built.
 
-## The open design problem
+## How erasure and the append-only audit trail were reconciled (done, migration 0017)
 
-Deleting a customer must remove their PII, but the audit trail is meant to be immutable. They conflict in the current schema:
+Deleting a customer must remove their personal data, but the audit trail must not be editable. The schema now does both:
 
-- `removal_audit_log` has triggers/rules that block UPDATE and DELETE, and its `customer_id` column references `customers(id)` without `ON DELETE CASCADE`/`SET NULL`. Deleting any customer who has a removal request would fail.
-- `audit_log` (migration 0004) uses `ON DELETE SET NULL`, and the immutability triggers from migration 0007 deliberately allow exactly that change (clearing `customer_id` / `user_email`), so it can be anonymized without being rewritten.
-- `removal_audit_log.removal_request_id` also references `removal_requests(id)` without cascade, so even cascading the customer's removal requests is blocked while their audit rows exist. The other customer-owned tables cascade from `customers`.
+- `audit_log.customer_id` is `ON DELETE SET NULL`, and the immutability triggers permit exactly one kind of change: clearing the customer link, email, IP address and user agent (pseudonymization). Every other UPDATE, all DELETEs and TRUNCATE are rejected.
+- `removal_audit_log` gained the same exception, and its references to customers and removal requests no longer block deleting them.
+- `DELETE /me` and `vectorscrub erase-account` do the whole thing in one transaction (`services/account_deletion.rs`): pseudonymize the audit rows, then delete the customer, then everything the customer owns cascades.
+- Free-text columns: `removal_audit_log.details` is reset to `{}` on erasure. `audit_log.details` and `error_message` are not rewritten; by convention they hold no names or emails, which the database does not enforce.
 
-A workable approach, not yet built:
-
-1. A new migration (never edit applied ones) changes `removal_audit_log.customer_id` to nullable with `ON DELETE SET NULL` and the `removal_request_id` reference so the request rows can go (or keeps request rows in anonymized form), and extends the immutability trigger to allow only that anonymizing change, as was done for `audit_log`.
-2. Check what `removal_audit_log.details` or similar free-text columns may contain; anything identifying must be scrubbed or never written.
-3. A `DELETE /me` endpoint (re-authenticated, audited) performs the deletion in one transaction in dependency order, and writes a final anonymized audit entry.
-4. A tested erasure of backups follows the platform's backup policy.
-5. Decide retention for inactive accounts and publish it in the privacy policy before implementing any automatic deletion. Automatic deletion should warn first and be tested against a copy of production data.
+Still open: erasure from backups (they age out after `BACKUP_KEEP_DAYS`, and a restore resurrects accounts erased after the backup), and what to do about inactive accounts (below).
 
 ## Intended policy (a proposal, not behaviour)
 

@@ -66,6 +66,18 @@ pub fn site_of(raw: &str) -> Result<(String, String), ListingError> {
     Ok((host, url.to_string()))
 }
 
+/// Is this a link the dashboard may render as a clickable address? Only `http` or `https`, with a
+/// host and no credentials. This is wider than `site_of` on purpose: agents record links found on
+/// data brokers' own sites, which are not always `https` and not always a bare site name. It exists
+/// so that a `javascript:`, `data:` or `file:` address can never be stored and shown as a link.
+pub fn is_plain_web_link(raw: &str) -> bool {
+    let Ok(url) = Url::parse(raw.trim()) else { return false };
+    matches!(url.scheme(), "http" | "https")
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
 /// Track a listing the customer found. `sealed_url` is the link already sealed for this customer;
 /// `site` comes from `site_of`. Creates the exposure and a failed (= manual action required)
 /// removal request in one transaction.
@@ -140,5 +152,31 @@ mod tests {
         }
         assert!(site_of("https://www.spokeo.com/search?q=a").is_ok());
         assert!(site_of("https://thatsthem.com/name/Jane-Smith").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::is_plain_web_link;
+
+    #[test]
+    fn only_plain_web_links_may_be_shown_as_links() {
+        for ok in ["https://www.spokeo.com/Jane-Smith/CA", "http://old-broker.example/p?id=1"] {
+            assert!(is_plain_web_link(ok), "{ok}");
+        }
+        for bad in [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "ftp://example.com/x",
+            "vbscript:msgbox(1)",
+            "https://user:pw@example.com/x",
+            "//example.com/x",
+            "",
+            "not a url",
+        ] {
+            assert!(!is_plain_web_link(bad), "{bad}");
+        }
     }
 }

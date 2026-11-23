@@ -1,0 +1,24 @@
+# Example Prometheus configuration for a single-host compose deployment. Run Prometheus on the same
+# host (or on a private network that can reach the backend's port 8080 on 127.0.0.1), never on the
+# public internet. The metrics endpoint answers 404 unless the backend has METRICS_TOKEN set.
+#   install -m 600 /dev/null /etc/prometheus/vectorscrub-metrics-token   # then write the token into it
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]   # your Alertmanager; routes the alerts to a person
+
+scrape_configs:
+  - job_name: vectorscrub
+    metrics_path: /api/v1/metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/vectorscrub-metrics-token
+    static_configs:
+      - targets: ["127.0.0.1:8080"]

@@ -16,7 +16,8 @@ use crate::models::customer::{CreateAccountRequest, CustomerProfile};
 use crate::middleware::auth_extractor::AuthenticatedCustomer;
 use crate::models::customer::Customer;
 use crate::services::{
-    audit, auth as auth_svc, customer as customer_svc, login_throttle, mfa as mfa_svc, session as session_svc,
+    audit, auth as auth_svc, customer as customer_svc, login_throttle, mfa as mfa_svc, password_policy,
+    session as session_svc,
 };
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
@@ -88,6 +89,10 @@ pub async fn register(
             "You must accept the current Terms of Service and Privacy Policy to create an account.".to_string(),
         ));
     }
+
+    // Length is checked above; this refuses the passwords people pick when only a length is demanded.
+    password_policy::check(&req.password, &req.email)
+        .map_err(|r| (StatusCode::UNPROCESSABLE_ENTITY, r.message().to_string()))?;
 
     // Adults only (Terms: "Who can use VectorScrub"). A declaration, checked here so a client
     // that skips the form cannot skip the question. Nothing is stored for a refused attempt.

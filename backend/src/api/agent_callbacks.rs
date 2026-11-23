@@ -138,6 +138,11 @@ pub async fn record_exposure(
 ) -> Result<StatusCode, (StatusCode, String)> {
     req.validate()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    // The `url` validator accepts any scheme. The dashboard shows this value as a link, so a
+    // `javascript:` or `data:` address must not get stored in the first place.
+    if !crate::services::listing::is_plain_web_link(&req.source_url) {
+        return Err((StatusCode::BAD_REQUEST, "source_url must be an http or https link".into()));
+    }
 
     let owned: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM scan_jobs WHERE id = $1 AND customer_id = $2 AND status = 'running'",

@@ -32,12 +32,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
-    Aes256Gcm, Key, Nonce,
+    aead::{Aead, Payload},
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use sqlx::PgPool;
@@ -139,8 +138,8 @@ impl EnvWrapper {
     }
 
     fn wrap(&self, customer: Uuid, dek: &[u8; 32]) -> Result<Wrapped, KeyError> {
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*self.kek));
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let cipher = crate::crypto::cipher_for(&*self.kek);
+        let nonce = crate::crypto::random_nonce();
         let ct = cipher
             .encrypt(&nonce, Payload { msg: dek, aad: &Self::aad(customer) })
             .map_err(|_| KeyError::Integrity)?;
@@ -154,9 +153,9 @@ impl EnvWrapper {
             return Err(KeyError::Integrity);
         }
         let (nonce, ct) = wrapped.split_at(12);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*self.kek));
+        let cipher = crate::crypto::cipher_for(&*self.kek);
         let plain = cipher
-            .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: &Self::aad(customer) })
+            .decrypt(&crate::crypto::nonce_from(nonce), Payload { msg: ct, aad: &Self::aad(customer) })
             .map_err(|_| KeyError::Integrity)?;
         let plain = Zeroizing::new(plain);
         let mut dek = Zeroizing::new([0u8; 32]);
@@ -241,7 +240,7 @@ impl PyHsmClient {
 
     /// HMAC-SHA256 over PyHSM's version-2 message for an unsigned request.
     fn v2_mac(secret: &[u8], unsigned: &Value) -> [u8; 32] {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts any key length");
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(secret).expect("HMAC accepts any key length");
         mac.update(&auth_message(unsigned));
         mac.finalize().into_bytes().into()
     }
@@ -820,8 +819,8 @@ mod tests {
                     let Some(k) = keys.last() else { return err("no such key") };
                     let version = keys.len() as u32;
                     let aad = format!("pyhsm:v1:{}:{}", req["key_id"].as_str().unwrap_or(""), version);
-                    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(k));
-                    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+                    let cipher = crate::crypto::cipher_for(k);
+                    let nonce = crate::crypto::random_nonce();
                     let ct = cipher
                         .encrypt(&nonce, Payload { msg: req["plaintext"].as_str().unwrap_or("").as_bytes(), aad: aad.as_bytes() })
                         .unwrap();
@@ -839,8 +838,8 @@ mod tests {
                     let version = u32::from_be_bytes([raw[1], raw[2], raw[3], raw[4]]);
                     let Some(k) = keys.get(version as usize - 1) else { return err("unknown key version") };
                     let aad = format!("pyhsm:v1:{}:{}", req["key_id"].as_str().unwrap_or(""), version);
-                    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(k));
-                    match cipher.decrypt(Nonce::from_slice(&raw[5..17]), Payload { msg: &raw[17..], aad: aad.as_bytes() }) {
+                    let cipher = crate::crypto::cipher_for(k);
+                    match cipher.decrypt(&crate::crypto::nonce_from(&raw[5..17]), Payload { msg: &raw[17..], aad: aad.as_bytes() }) {
                         Ok(p) => ok(json!(String::from_utf8(p).unwrap())),
                         Err(_) => err("Decryption failed"),
                     }

@@ -100,7 +100,7 @@ A detection agent analyzes each discovery candidate using a large language model
 Remaining limits: a person whose name is spelled exactly like an allowed structural word would pass through that word alone; and the vocabulary list is curated for English-language pages, so non-English structural words are dropped (safe, but the model loses that signal).
 
 ### 3. Automated Removal Request Submission
-For each confirmed exposure, VectorScrub identifies the correct opt-out procedure for that specific data source — web form or email submission. After explicit customer authorization, VectorScrub automatically submits removal requests using Playwright browser automation for web forms, capturing screenshots as evidence and extracting confirmation references.
+For each confirmed exposure, VectorScrub identifies the correct opt-out procedure for that specific data source — web form or email submission. After explicit customer authorization, VectorScrub automatically submits removal requests using Playwright browser automation for web forms where the site allows it, and extracting confirmation references. No screenshot of the filled-in form is kept.
 
 ### 4. Removal Tracking and Verification
 Every removal request is tracked through its full lifecycle: authorized → submitted → (acknowledged) → verified removed. VectorScrub distinguishes between these states clearly so customers always know the true status of their records — not just that a request was sent, but whether removal was actually confirmed. All actions are logged to an immutable, append-only audit trail enforced at the database level.
@@ -122,8 +122,8 @@ Customers see a live **Privacy Score** (0–100) that reflects their current exp
 ### Know exactly what's out there
 Most people discover they have dozens of active exposures on their first scan. VectorScrub surfaces the full picture in a single dashboard rather than requiring customers to check each site manually.
 
-### Get it removed — with proof
-VectorScrub prepares and submits opt-out requests to data brokers using intelligent browser automation. Every submission is captured with screenshot evidence (SHA-256 hashed for tamper-resistance), confirmation references are extracted, and all actions are logged to an immutable audit trail. Customers see a clear before-and-after record, not just a promise that "we tried."
+### Get it removed — with a record
+VectorScrub prepares and submits opt-out requests to data brokers using browser automation where the site allows it. Confirmation references are extracted, and all actions are logged to an append-only audit trail. No screenshot of a filled-in form is taken or kept, because it would show your identity details. Customers see a clear before-and-after record, not just a promise that "we tried."
 
 ### Stop it from coming back
 Data brokers regularly re-acquire and republish information even after opt-outs. Continuous monitoring catches a returning record and alerts you, so you don't have to keep re-checking the sites yourself. You stay in control: re-removal happens only after you re-authorize it.
@@ -205,7 +205,7 @@ The Rust backend owns all PII. The Python agent layer never has the master encry
 │                        VectorScrub Platform                      │
 │                                                                  │
 │  ┌────────────────┐       ┌──────────────────────────────────┐  │
-│  │  Next.js 15    │──────▶│  Rust API (Axum)                 │  │
+│  │  Next.js 16    │──────▶│  Rust API (Axum)                 │  │
 │  │  Dashboard     │       │  Auth · Encryption · Audit Trail │  │
 │  └────────────────┘       └─────────────┬────────────────────┘  │
 │                                         │  Redis scan queue      │
@@ -224,7 +224,7 @@ The Rust backend owns all PII. The Python agent layer never has the master encry
 |------------|-------------------------------------------------|----------------------------------------------|
 | Backend    | Rust · Axum · SQLx · AES-256-GCM                | API, auth (Argon2id + JWT), PII encryption, audit trail |
 | Agents     | Python · LangChain · httpx · Playwright         | Discovery, detection, removal, monitoring    |
-| Frontend   | Next.js 15.5.29 · Tailwind CSS 4.1.8 · TypeScript 5.8.3 | Landing page, auth, customer dashboard       |
+| Frontend   | Next.js 16.4.6 (exact pin; eslint-config-next 15.5.29) · Tailwind CSS 4.1.8 · TypeScript 5.8.3 | Landing page, auth, customer dashboard       |
 | Database   | PostgreSQL 16                                   | All persistent state — PII stored encrypted  |
 | Queue      | Redis 7                                         | Scan job dispatch from Rust to Python        |
 
@@ -254,8 +254,11 @@ Security is the core architectural constraint, not an afterthought. Every design
 | Agents and backend secrets | The Python agents never receive the master key, JWT secret or database credentials: `agents/shared/config.py` refuses to start if any is in the process environment or the `.env` it would read. This is a guard against misconfiguration, not a sandbox; it cannot stop an operator handing the agents other secrets. |
 | "Removed" evidence | A record is reported removed only on positive evidence: the page is gone (404/410), or a substantial server-rendered page at the SAME address has no sign of the customer, or the model says "not a match" with confidence of at least 0.7. A redirect to a different page, a client-rendered or "enable JavaScript" shell, a bot wall, a stub page, a fetch error, or an unsure model are all inconclusive and retried. |
 | Rate limiting and lockout | Per-client-IP token buckets (GCRA, one atomic Lua script in Redis, so every backend instance shares the same counts; keys `<RATE_LIMIT_KEY_PREFIX>:rl:...` expire by themselves): a strict one on login and register (default 5/minute, burst 5) and a general one on the customer API (20/s, burst 60); 429 responses carry `Retry-After`. Internal agent routes and health probes are exempt. If Redis is unreachable or slower than 250 ms the limiter falls back to the same algorithm in the instance's memory (so the limit is then per instance, up to N times higher with N instances) rather than failing open or taking the API down; it logs once per outage, counts `rate_limit_backend_errors_total`, and retries Redis every 5 s. Client IP is the TCP peer unless `TRUST_PROXY_HEADERS=true`, in which case it is the `X-Forwarded-For` entry added by your own proxy (`TRUSTED_PROXY_HOPS` places from the right, default 1), never the client-controlled left side; the audit trail and the limiter use the same address, and IPv6 clients are limited per /64. Separately, 5 failed logins for an email lock it for 15 minutes, doubling every 5 further failures up to an hour; keyed on a hash of the email in Postgres so a non-existent email locks exactly like a real one, and unknown emails still pay for one Argon2 verification so response time does not reveal which emails are registered. Trade-off: someone who knows a victim's email can lock them out for up to an hour; the per-IP limit bounds how fast one source can do it. Request timeout is 30 s. |
-| Closed by default | `/api/v1/metrics` needs `Authorization: Bearer $METRICS_TOKEN` and answers 404 outside development when no token is set. The interactive API docs (`/docs`) are not served in production. With `INTERNAL_PORT` set, the agent-only `/internal/*` routes are served on that separate port and the public port does not have them at all (compose does this and puts the agents on an internal-only network with the backend). The reference proxy (`infra/nginx/`) answers 404 for all three as a second lock. |
+| Closed by default | `/api/v1/metrics` needs `Authorization: Bearer $METRICS_TOKEN` and answers 404 outside development when no token is set. The OpenAPI description (`/api-docs/openapi.json`) is not served in production (there is no Swagger UI). With `INTERNAL_PORT` set, the agent-only `/internal/*` routes are served on that separate port and the public port does not have them at all (compose does this and puts the agents on an internal-only network with the backend). The reference proxy (`infra/nginx/`) answers 404 for all three as a second lock. |
 | Encrypted connections | In production the backend refuses to start unless `DATABASE_URL` has `sslmode=require` (or `verify-ca`/`verify-full`) and `REDIS_URL` is `rediss://`, unless `DATABASE_ALLOW_PLAINTEXT` / `REDIS_ALLOW_PLAINTEXT` is set to `true` for a private network (compose sets both, because its Postgres and Redis sit on internal-only networks). Both TLS paths were tested against live TLS servers. Agent-to-backend traffic is plain HTTP on that private network. |
+| Audit hash chain | Every audit row gets a link in `audit_chain` (migration 0025): `sha256(previous hash || the row's fixed fields)`. `vectorscrub audit verify` finds the first edit, deletion or missing link, and `audit head` prints the hash to store off the host. Without stored heads, an owner can rewrite the chain consistently; there is no external sink. `docs/runbooks/audit-chain.md`. |
+| Database roles | The backend connects as a runtime role that can read and write rows but owns nothing, so it cannot drop the audit-log triggers; migrations run separately as the owner (`vectorscrub migrate`). Production refuses to start as an owner or superuser unless `DATABASE_ALLOW_OWNER_ROLE=true`. The owner and any Postgres superuser can still bypass the triggers, though edits then show up in the hash chain (below). `docs/runbooks/database-roles.md`. |
+| Passwords | 12 to 128 characters, hashed with Argon2id, plus a local check that refuses common words with digits or symbols, keyboard walks, sequences, repeats and anything containing the account's email. It is **not** a breached-password lookup (that needs a third-party call, which would change the Privacy Policy), and there is **no** password reset or email verification: no email is sent to customers. |
 | Audit identifiers | After `AUDIT_IDENTIFIER_RETENTION_DAYS` (180) the email, IP address and user agent are cleared from `audit_log` rows, including failed logins for emails that never had an account. The row itself (action, result, time) stays. Runs with the scan-recovery housekeeping. |
 | Circuit breakers | Per-host breakers (`agents/shared/circuit_breaker.py`) around the discovery and monitoring page fetches: after 5 failures or 429/5xx answers a host is left alone for 5 minutes, and those checks come back inconclusive instead of piling on. **Not covered**: the opt-out form submission, SMTP, and the DROP API. |
 | Input validation | Request bodies are validated with `validator` (Rust) and `pydantic` (Python); callback ranges and lengths are bounded; agent writes are checked for ownership (an exposure can only be recorded against a running job of that customer; an audit entry only against the request's real owner). Errors that are not the caller's fault return a generic 500 and are logged server-side. A separate Python "PII validation framework" existed but was never connected and was removed. |
@@ -390,7 +393,7 @@ VectorScrub/
 │   └── orchestrator/
 │       └── orchestrator.py           # Redis worker: claim, heartbeat, pipeline, monitoring loop
 │
-├── frontend/                         # Next.js 15 customer dashboard
+├── frontend/                         # Next.js 16 customer dashboard
 │   ├── package.json
 │   ├── next.config.ts                # API proxy rewrites
 │   ├── postcss.config.mjs            # Tailwind CSS 4 PostCSS plugin config
@@ -585,7 +588,7 @@ To verify the end-to-end removal workflow:
    ```
    {"event":"processing_removals","count":1}
    {"event":"submit_web_form","opt_out_url":"https://..."}
-   {"event":"web_form_submitted","confirmation_ref":"...","evidence_hash":"..."}
+   {"event":"web_form_submitted","confirmation_ref":"...","reason":"..."}
    ```
 6. **View removal status**: Navigate to the "Removals" page to see the status change from `authorized` → `submitted`
 7. **Check audit trail**: Each action is logged to `removal_audit_log` with actor and timestamp
@@ -621,6 +624,9 @@ All variables are defined in `.env.example`. Copy it to `.env` before starting a
 | `INTERNAL_PORT` | No | Serve `/internal/*` on this port instead of `PORT`. Must differ from `PORT`. |
 | `INTERNAL_BIND` | No | IP address the internal listener binds to (default `0.0.0.0`). Compose sets the backend's address on its agent-only network so other networks cannot reach the port. |
 | `DATABASE_ALLOW_PLAINTEXT` / `REDIS_ALLOW_PLAINTEXT` | No | `true` lets production run without TLS to Postgres / Redis. Only for a private network. |
+| `RUN_MIGRATIONS` | No | Default `true`: the service applies pending migrations at start. Set `false` when it connects as the runtime role; it then refuses to start until `vectorscrub migrate` (run as the owner) has applied them all. |
+| `DATABASE_ALLOW_OWNER_ROLE` | No | Default `false`. In production the backend refuses to start if its database role is a superuser or owns (or can add triggers to) the audit tables. `true` overrides that; record why. See `docs/runbooks/database-roles.md`. |
+| `DB_APP_PASSWORD`, `PYHSM_IMAGE` | compose | The runtime database role's password, and the PyHSM image by digest (no default). Read by `docker-compose.yml`, not by the backend. |
 | `AUDIT_IDENTIFIER_RETENTION_DAYS` | No | Default `180` (30 to 3650). Days before email, IP and user agent are cleared from audit rows. |
 | `RATE_LIMIT_KEY_PREFIX` | No | Prefix of the limiter's Redis keys (default `vs`; letters, digits, `-`, `_`; at most 32). Give each environment that shares one Redis its own prefix. |
 | `SCAN_RECOVERY_INTERVAL_SECS` | No | How often the recovery loop runs (default: `60`) |
@@ -912,7 +918,7 @@ A customer with no active exposures scores 100. Each critical exposure (e.g., fu
 - Customer authorization workflow with database audit trail
 - Opt-out form submission via Playwright browser automation
 - Generic web form detection and field population
-- Screenshot capture and SHA-256 evidence hashing
+- No screenshots of filled-in forms are taken or stored (they would show the customer's identity); a CAPTCHA stops the automation and the request is reported as needing manual completion
 - Confirmation reference extraction from success pages
 - Removal request status tracking (authorized → submitted → verified_removed)
 - Dual-worker orchestrator (scans + removal jobs in parallel)
