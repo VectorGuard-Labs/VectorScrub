@@ -73,6 +73,17 @@ pub async fn verify(pool: &PgPool) -> Result<ChainReport, sqlx::Error> {
     Ok(ChainReport { links: checked, head, problem })
 }
 
+/// Does the chain still contain link `seq` with exactly this hash? A head stored earlier must stay in
+/// the chain forever; if it is gone or different, the chain was cut or rewritten after it was stored.
+pub async fn contains_head(pool: &PgPool, seq: i64, hash_hex: &str) -> Result<bool, sqlx::Error> {
+    let Ok(want) = hex::decode(hash_hex.trim()) else { return Ok(false) };
+    let stored: Option<Vec<u8>> = sqlx::query_scalar("SELECT link_hash FROM audit_chain WHERE seq = $1")
+        .bind(seq)
+        .fetch_optional(pool)
+        .await?;
+    Ok(stored.is_some_and(|h| h == want))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,11 +157,15 @@ mod tests {
             log(&pool, a).await;
         }
         let before = verify(&pool).await.unwrap().head.unwrap();
+        assert!(contains_head(&pool, before.0, &before.1).await.unwrap(), "before the cut the stored head is present");
+        assert!(!contains_head(&pool, before.0, "00").await.unwrap(), "a different hash is not");
+        assert!(!contains_head(&pool, before.0, "not hex").await.unwrap());
         let mut tx = pool.begin().await.unwrap();
         sqlx::query("ALTER TABLE audit_chain DISABLE TRIGGER audit_chain_no_update_delete").execute(&mut *tx).await.unwrap();
         sqlx::query("DELETE FROM audit_chain WHERE seq = (SELECT max(seq) FROM audit_chain)").execute(&mut *tx).await.unwrap();
         sqlx::query("ALTER TABLE audit_chain ENABLE TRIGGER audit_chain_no_update_delete").execute(&mut *tx).await.unwrap();
         tx.commit().await.unwrap();
+        assert!(!contains_head(&pool, before.0, &before.1).await.unwrap(), "after the cut the stored head is gone");
         let after = verify(&pool).await.unwrap();
         assert_ne!(after.head.unwrap(), before, "the stored head exposes the cut");
         assert!(after.problem.unwrap().contains("no link"), "and the row without a link is reported too");

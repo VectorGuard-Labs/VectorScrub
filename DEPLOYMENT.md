@@ -86,8 +86,10 @@ restore the database from backup (`docs/runbooks/backup-and-restore.md`), then r
 ## Backups, monitoring, incidents
 
 - Backups, restores, targets and the drill log: `docs/runbooks/backup-and-restore.md`. **None of it runs on a schedule until you install it** (`infra/backup/`).
-- Audit chain: run `vectorscrub audit verify` and store `audit head` off the host daily (`docs/runbooks/audit-chain.md`). Nothing schedules it for you.
-- Alerts: `infra/monitoring/alerts.yml` and `prometheus.yml`. They fire only if you run Prometheus and Alertmanager and route them to a person.
+- Audit chain: install the daily audit-head job (`infra/backup/README.md`, step 5; `infra/scripts/audit_head.sh`). It verifies the chain, checks the previous stored head and stores today's off the host.
+- Alerts: `docs/runbooks/alerting.md`. `infra/monitoring/render.sh` routes them to a named person; `docker-compose.monitoring.yml` runs Prometheus and Alertmanager.
+- Staging: `docs/runbooks/staging.md` (`infra/staging/staging.sh`). Deploy there first; run its smoke test and restore drill before each production release.
+- Restore drill: `infra/scripts/restore_drill.sh` (database and keystore together); results in `docs/runbooks/drill-log.md`.
 - Incidents and outages: `docs/runbooks/incident-response.md`.
 - Other runbooks: `docs/runbooks/README.md`.
 
@@ -100,4 +102,4 @@ restore the database from backup (`docs/runbooks/backup-and-restore.md`), then r
 | Backend exits: "The database role in DATABASE_URL is more powerful than the service needs" | `DATABASE_URL` names the owner. Use the runtime role (`database-roles.md`). |
 | Backend exits: "the key service has no key named ..." | `kms init` was not run. It is deliberately not automatic (`key-service.md`). |
 | `/health/ready` 503 with `key_service: false` | PyHSM is down or its socket volume has the wrong owner. |
-| Agents cannot reach the backend | `BACKEND_API_URL` must be `http://backend:8081`, and `AGENT_API_KEY` must match in both. |
+| Agents cannot reach the backend | `BACKEND_API_URL` must be `http://backend-internal:8081` (a name that resolves only on the agent network; plain `backend` can resolve to the web-network address, where the internal port is not listening), and `AGENT_API_KEY` must match in both. |

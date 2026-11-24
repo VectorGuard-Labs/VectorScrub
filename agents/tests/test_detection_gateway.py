@@ -211,3 +211,25 @@ async def test_failures_are_logged_without_the_listing_url_or_exception_text(ide
     assert "detection_llm_error" in text and "runtimeerror" in text
     assert "jane" not in text and "secret.example" not in text and "peoplesearch.example/people" not in text
     assert "peoplesearch.example" in text, "the host is logged; the path is not"
+
+
+def test_the_worker_starts_without_a_model_key_and_a_check_then_fails_as_could_not_check(monkeypatch, identity):
+    """Without a key the agent must still be constructible (the worker also does removals and the
+    nightly page check), and a classification must raise, never report "no match"."""
+    import asyncio
+    from detection.agent import LlmNotConfigured
+    from shared import config as _config
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _config.get_config.cache_clear()
+    try:
+        cfg = _config.get_config()
+        monkeypatch.setattr(cfg, "openai_api_key", "")
+        monkeypatch.setattr(cfg, "anthropic_api_key", "")
+        a = DetectionAgent()
+        a._ner = FakeDetector()
+        with pytest.raises(LlmNotConfigured):
+            asyncio.run(a.classify_strict(candidate(), identity))
+    finally:
+        _config.get_config.cache_clear()

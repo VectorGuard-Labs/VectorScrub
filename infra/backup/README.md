@@ -82,12 +82,56 @@ Both heartbeat checks should turn green, and both files should appear in the buc
 ## 4. The drill on real infrastructure
 
 Do this before the first real customer, then monthly. It is the only thing that proves the setup works.
+`infra/scripts/restore_drill.sh` does the whole of it in one command, on any machine with Docker:
 
-1. On a scratch machine, download the **newest** database backup and keystore backup from the bucket with the read-only key.
-2. Decrypt the keystore backup with its private key, start PyHSM on it with the keystore password **fetched from the secrets manager** (not from a file on your laptop).
-3. Run `infra/scripts/restore_verify.sh` against the database backup with `KEY_PROVIDER=pyhsm`, the PyHSM socket and the IPC secret from the secrets manager. It must end with `RESULT: usable`.
-4. Write the result into the drill log in `docs/runbooks/key-service.md`, with the restore time and the age of the newest audit entry (your real data-loss window).
-5. Wipe the scratch machine.
+```bash
+# On a scratch machine, with the READ-ONLY restore key (never the backup host's write key):
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=<region>
+export GNUPGHOME=/path/to/keyring-with-both-private-keys
+DRILL_S3_DB_URI=s3://<bucket>/db DRILL_S3_KEYSTORE_URI=s3://<bucket>/keystore \
+DRILL_PYHSM_PASSWORD_FILE=/run/secrets/pyhsm-password \
+PYHSM_IMAGE=pyhsm@sha256:<the digest production runs> \
+BACKEND_IMAGE=<the backend image production runs> \
+DRILL_ENVIRONMENT="production backups, scratch VM" \
+infra/scripts/restore_drill.sh
+```
+
+It fetches the newest database and keystore backups, checks both checksums, decrypts both, starts a
+PyHSM container (no network) on the restored keystore with the password from the secrets manager,
+restores the database into a scratch Postgres on an internal network, runs `vectorscrub verify-backup`
+and `vectorscrub audit verify` against it, and appends a line to `docs/runbooks/drill-log.md` with the
+timings. It must end with `RESULT: usable`. It removes every scratch container, volume and decrypted
+file on exit, and never touches the live stack. A wrong keystore password or a damaged backup fails
+loudly (tested). Then wipe the scratch machine.
+
+## 5. The daily audit-head job
+
+The audit hash chain only proves something against the database owner if its head is stored where the
+database host cannot write (`docs/runbooks/audit-chain.md`). `infra/scripts/audit_head.sh` verifies the
+chain, checks that yesterday's stored head is still in it, stores today's head in the bucket under
+`audit-heads/` (the setup script lets the backup identity read and write only that prefix, besides
+writing backups), and pings a heartbeat.
+
+```bash
+sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin vsaudit
+sudo install -d -o vsaudit -g vsaudit -m 700 /var/lib/vectorscrub/audit-heads
+sudo cp infra/backup/systemd/vectorscrub-audit-head.{service,timer} /etc/systemd/system/
+```
+
+`/etc/vectorscrub/audit-head.env` (mode 600, owner vsaudit):
+```
+AUDIT_HEAD_DIR=/var/lib/vectorscrub/audit-heads
+AUDIT_HEAD_S3_URI=s3://<bucket>/audit-heads
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=<region>
+AUDIT_HEAD_HEARTBEAT_URL=https://hc-ping.com/<uuid-3>
+```
+A third heartbeat check, like the two backup ones. Then `sudo systemctl enable --now vectorscrub-audit-head.timer`
+and run it once by hand (`sudo systemctl start vectorscrub-audit-head`; `journalctl -u vectorscrub-audit-head`).
+The job reaches the backend through `docker compose exec`, so `vsaudit` is in the `docker` group, which is
+root-equivalent on that host: keep the account to this job. A failed run says `AUDIT CHAIN BROKEN` or why
+it stopped, and skips the heartbeat, so the missing ping is what alerts you.
 
 ## After a KEK rotation
 

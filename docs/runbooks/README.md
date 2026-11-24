@@ -1,8 +1,8 @@
 # VectorScrub operational runbooks
 
 Step-by-step guides for the situations the system is built to handle. Each one describes what exists in the code and the
-deployment today. **There is no on-call rotation, pager or status page yet**: a person has to be named for that
-(`incident-response.md`, "Contacts") and Alertmanager has to be pointed at them (`infra/monitoring/`).
+deployment today. Alerts go to one named person once `infra/monitoring/render.sh` has been run for them (`alerting.md`).
+There is no rotation, escalation or status page.
 
 | Situation | Runbook |
 |---|---|
@@ -11,6 +11,9 @@ deployment today. **There is no on-call rotation, pager or status page yet**: a 
 | Backups, restores, drills, recovery targets | [backup-and-restore.md](./backup-and-restore.md) |
 | The two database roles (owner and runtime) | [database-roles.md](./database-roles.md) |
 | The audit hash chain: verify it, store its head | [audit-chain.md](./audit-chain.md) |
+| Alert routing to the on-call person, and how to prove it works | [alerting.md](./alerting.md) |
+| The staging environment (production images, fake data) | [staging.md](./staging.md) |
+| Restore drill results | [drill-log.md](./drill-log.md) |
 | A CAPTCHA appears on a broker's opt-out page | [captcha-detection.md](./captcha-detection.md) |
 | Email opt-outs to brokers failing (SMTP) | [smtp-failures.md](./smtp-failures.md) |
 

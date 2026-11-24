@@ -1,0 +1,52 @@
+# Rendered by infra/monitoring/render.sh. Do not edit alertmanager.yml by hand; edit this template.
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: "@SMTP_SMARTHOST@"
+  smtp_from: "@SMTP_FROM@"
+  smtp_auth_username: "@SMTP_USERNAME@"
+  smtp_auth_password_file: /etc/alertmanager/secrets/smtp_password
+  smtp_require_tls: @SMTP_REQUIRE_TLS@
+
+route:
+  receiver: oncall
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # The always-firing Watchdog goes to the dead-man's switch, every 5 minutes, and nowhere else.
+    - matchers: [alertname="Watchdog"]
+      receiver: deadman
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 5m
+    # Pages: email and (if configured) the paging service, re-sent hourly until resolved.
+    - matchers: [severity="page"]
+      receiver: oncall-page
+      repeat_interval: 1h
+    # Tickets: email only, re-sent twice a day.
+    - matchers: [severity="ticket"]
+      receiver: oncall
+      repeat_interval: 12h
+
+inhibit_rules:
+  # When the backend is down, do not also page for everything that follows from it.
+  - source_matchers: [alertname="BackendDown"]
+    target_matchers: [severity="ticket"]
+
+receivers:
+  - name: oncall
+    email_configs:
+      - to: "@ONCALL_EMAIL@"
+        send_resolved: true
+        headers:
+          Subject: '[VectorScrub {{ .Status | toUpper }}] {{ .CommonLabels.alertname }} (for @ONCALL_NAME@)'
+  - name: oncall-page
+    email_configs:
+      - to: "@ONCALL_EMAIL@"
+        send_resolved: true
+        headers:
+          Subject: '[VectorScrub PAGE {{ .Status | toUpper }}] {{ .CommonLabels.alertname }} (for @ONCALL_NAME@)'
+@PAGERDUTY_BLOCK@
+  - name: deadman
+@DEADMAN_BLOCK@

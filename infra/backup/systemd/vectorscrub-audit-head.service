@@ -1,0 +1,20 @@
+# Daily audit hash-chain check and off-host head. Install: see infra/backup/README.md, step 5.
+[Unit]
+Description=VectorScrub audit chain check, and the head stored off the host
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# Runs the check through `docker compose exec` against the running backend, so it needs access to
+# Docker (membership of the docker group is root-equivalent on that host: keep this user to this job).
+User=vsaudit
+Group=vsaudit
+SupplementaryGroups=docker
+EnvironmentFile=/etc/vectorscrub/audit-head.env
+ExecStart=/opt/vectorscrub/infra/scripts/audit_head.sh
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/vectorscrub/audit-heads

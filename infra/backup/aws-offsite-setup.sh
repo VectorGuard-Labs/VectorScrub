@@ -13,8 +13,9 @@
 #     or a stolen credential from erasing the history;
 #   * a lifecycle rule that deletes backups after EXPIRE_DAYS (default 400) and old versions
 #     soon after, so retention is bounded and the privacy policy can state it;
-#   * an IAM user that can only PUT objects under two prefixes (db/ and keystore/). It cannot
-#     read, list or delete. Its access key goes into /etc/vectorscrub/*.env on the backup host.
+#   * an IAM user that can only PUT objects under two prefixes (db/ and keystore/), and under
+#     audit-heads/ can also list and read (the daily audit-head job compares with the previous head;
+#     those objects are hashes, no data). It can read nothing else and delete nothing. Its access key goes into /etc/vectorscrub/*.env on the backup host.
 #     Restores use a different, read-only credential that you keep offline.
 # It prints what it did and the access key once. It refuses to run against an existing bucket
 # (Object Lock can only be turned on at creation), so it is safe to run twice.
@@ -66,9 +67,14 @@ aws iam put-user-policy --user-name "$USER_NAME" --policy-name write-only-backup
   \"Version\": \"2012-10-17\",
   \"Statement\": [
     {\"Sid\": \"PutBackupsOnly\", \"Effect\": \"Allow\", \"Action\": [\"s3:PutObject\"],
-     \"Resource\": [\"arn:aws:s3:::$BUCKET/db/*\", \"arn:aws:s3:::$BUCKET/keystore/*\"]}
+     \"Resource\": [\"arn:aws:s3:::$BUCKET/db/*\", \"arn:aws:s3:::$BUCKET/keystore/*\", \"arn:aws:s3:::$BUCKET/audit-heads/*\"]},
+    {\"Sid\": \"ReadAuditHeads\", \"Effect\": \"Allow\", \"Action\": [\"s3:GetObject\"],
+     \"Resource\": [\"arn:aws:s3:::$BUCKET/audit-heads/*\"]},
+    {\"Sid\": \"ListAuditHeads\", \"Effect\": \"Allow\", \"Action\": [\"s3:ListBucket\"],
+     \"Resource\": [\"arn:aws:s3:::$BUCKET\"], \"Condition\": {\"StringLike\": {\"s3:prefix\": [\"audit-heads/*\"]}}}
   ]
 }"
 echo "aws-offsite-setup: bucket ready. Access key for the backup host (shown once, store it in /etc/vectorscrub/*.env, mode 600):"
 aws iam create-access-key --user-name "$USER_NAME" --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text
-echo "aws-offsite-setup: set BACKUP_S3_URI=s3://$BUCKET/db in backup.env and s3://$BUCKET/keystore in keystore-backup.env"
+echo "aws-offsite-setup: set BACKUP_S3_URI=s3://$BUCKET/db in backup.env, s3://$BUCKET/keystore in keystore-backup.env,"
+echo "aws-offsite-setup: and AUDIT_HEAD_S3_URI=s3://$BUCKET/audit-heads in audit-head.env"

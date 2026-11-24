@@ -123,7 +123,10 @@ Procedure, scripts and the drill log: [docs/runbooks/backup-and-restore.md](docs
 - [ ] SQL injection prevention tested
 - [ ] XSS prevention tested
 - [ ] Audit log working (check `removal_audit_log` table)
-- [ ] `vectorscrub audit verify` passes, and its head is stored daily somewhere the database host cannot write (`docs/runbooks/audit-chain.md`)
+- [ ] Daily audit-head job installed and its heartbeat alerting (`infra/backup/README.md`, step 5)
+- [ ] Staging smoke test passes against this release (`infra/staging/staging.sh smoke`)
+- [ ] Restore drill from the **real** off-site bucket ends `RESULT: usable` (`infra/scripts/restore_drill.sh`)
+- [ ] Alerts rendered for a named person and the BackendDown test page received by them (`docs/runbooks/alerting.md`, step 5)
 - [ ] PII masking in logs verified (no raw PII in logs)
 
 ### Performance

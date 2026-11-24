@@ -134,7 +134,10 @@ services:
   redis:
     image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
     <<: *hardening
-    cap_add: [SETGID, SETUID]
+    # Runs as the image's own redis user from the start. (The image's entrypoint would switch to it,
+    # but only when the command is redis-server itself; here it is a shell that writes the config.)
+    # That user owns /data, so no capability is added back.
+    user: redis
     read_only: true
     tmpfs:
       - /tmp
@@ -199,6 +202,9 @@ services:
       web: {}
       agent_api:
         ipv4_address: 172.30.77.10
+        # The agents must reach the internal listener by a name that resolves ONLY on this network.
+        # Plain "backend" can resolve to the backend's address on `web`, where nothing listens on 8081.
+        aliases: [backend-internal]
     volumes:
       - pyhsm_socket:/run/pyhsm
     depends_on:
@@ -278,7 +284,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      BACKEND_API_URL: http://backend:8081
+      BACKEND_API_URL: http://backend-internal:8081
       AGENT_API_KEY: ${AGENT_API_KEY}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

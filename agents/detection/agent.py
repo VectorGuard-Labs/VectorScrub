@@ -140,6 +140,13 @@ def _evidence_block(ev: Evidence) -> str:
     )
 
 
+class LlmNotConfigured(RuntimeError):
+    """No model key is configured. The page could not be checked; it is not a "no match"."""
+
+    def __init__(self) -> None:
+        super().__init__("no LLM API key is configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+
+
 class DetectionAgent:
     """
     Uses an LLM to classify PII exposures from discovery candidates.
@@ -149,20 +156,33 @@ class DetectionAgent:
     def __init__(self) -> None:
         self.cfg = get_config()
         cfg = self.cfg
+        # Built on first use, not here. Without a model key the worker must still start: removals,
+        # monitoring checks that need no model, and the nightly opt-out page check do not depend on
+        # it. A classification then fails as "could not check" (LlmNotConfigured), never as "no match".
+        self._llm = None
+        self._ner = PersonDetector(cfg.pii_ner_model)
+
+    def _model(self):
+        """The chat model, created the first time it is needed. Raises LlmNotConfigured with no key."""
+        if self._llm is not None:
+            return self._llm
+        cfg = self.cfg
         if cfg.default_llm_provider == "anthropic" and cfg.anthropic_api_key:
             self._llm = ChatAnthropic(
-                model=self.cfg.default_llm_model,
+                model=cfg.default_llm_model,
                 api_key=cfg.anthropic_api_key,
                 max_tokens=512,
             )
-        else:
+        elif cfg.openai_api_key:
             self._llm = ChatOpenAI(
                 model=cfg.default_llm_model,
                 api_key=cfg.openai_api_key,
                 max_tokens=512,
                 temperature=0,
             )
-        self._ner = PersonDetector(cfg.pii_ner_model)
+        else:
+            raise LlmNotConfigured()
+        return self._llm
 
     def _redact(self, snippet: str, identity: IdentityContext):
         """
@@ -211,7 +231,7 @@ class DetectionAgent:
         # ...and nothing outside the structural vocabulary (third-party text) remains.
         assert_vocabulary_only(redacted.text)
 
-        structured_llm = self._llm.with_structured_output(LLMClassification)
+        structured_llm = self._model().with_structured_output(LLMClassification)
         classification = await structured_llm.ainvoke([
             SystemMessage(content=DETECTION_SYSTEM_PROMPT),
             HumanMessage(content=user_message),

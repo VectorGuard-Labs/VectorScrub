@@ -182,6 +182,6 @@ PyHSM's socket is mode 600 and owned by the user PyHSM runs as, so the backend m
 - [ ] Keystore password and IPC secret in a secrets manager, readable by two people, not by the backup operator
 - [ ] Keystore backup schedule installed with its own heartbeat monitor; first backup taken before the first customer
 - [ ] Keystore backups stored in a different account or provider from database backups, under a different GPG key
-- [ ] The drill run on real infrastructure with the real secrets, and logged above
+- [ ] The drill run on real infrastructure with the real secrets (`infra/scripts/restore_drill.sh` restores the keystore and the database together), and logged in `drill-log.md`
 - [ ] A named person responsible for rotation, and a calendar reminder
 - [ ] Decision recorded: PyHSM is a software key service (no FIPS validation, no tamper-resistant hardware), or a plan to replace it behind the same interface

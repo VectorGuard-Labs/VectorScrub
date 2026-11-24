@@ -103,6 +103,7 @@ After a restore, run `infra/scripts/db_roles.sh` as the database owner before st
 | Date | Environment | Backup | Restore time | Result | Notes |
 |------|-------------|--------|--------------|--------|-------|
 | 2026-11-17 | Developer machine, scratch Postgres 16, one test customer with identity and two-factor | encrypted dump, 14 KB | 1 s | usable with the right key; **not usable** with a wrong key (exit 1); corrupted file rejected by checksum | Proves the scripts and the checks work. Says nothing about production size, network, or the real key store. |
+| 2026-11-24 | Staging stack on a developer machine (`infra/staging/staging.sh`: production images, `ENVIRONMENT=production`, real PyHSM 2.4.0), backups written by the production `backup.sh` and `backup_keystore.sh`, GPG-encrypted, uploaded to and fetched from a **local S3-compatible stand-in** | db 25 KB + keystore, both from the store | 0 s restore, 8 s total | usable: 1 data key unwrapped through a PyHSM started on the restored keystore, identity and listing opened, audit chain holds | First drill of database **and** keystore together, from object storage, with `restore_drill.sh`. Wrong keystore password and a damaged backup both fail. Still not: a real off-site bucket, production size, or the real secrets manager. Further runs append to `drill-log.md`. |
 
 ## Before you rely on this (all open)
 
@@ -111,7 +112,7 @@ After a restore, run `infra/scripts/db_roles.sh` as the database owner before st
 - [ ] Daily schedule installed; heartbeat monitor alerting
 - [ ] Off-site copy in a bucket with versioning and a retention rule, in a different account or provider than the database
 - [ ] Managed point-in-time recovery enabled (if on a managed database)
-- [ ] First drill run against the off-site copy with the key from the secrets manager; logged above
+- [ ] First drill run against the **real** off-site bucket with the key from the secrets manager (`infra/scripts/restore_drill.sh`); logged in `drill-log.md`. (Done against staging with a local stand-in, 2026-11-24.)
 - [ ] PyHSM keystore backed up on a schedule and after every rotation (`backup_keystore.sh`), its password and IPC secret in a secrets manager, and a second person able to reach them
 - [ ] RTO and RPO written down from the drill
 - [ ] Erasure record process agreed (previous section) and the Privacy Policy states the backup retention

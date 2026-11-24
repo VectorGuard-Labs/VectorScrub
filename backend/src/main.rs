@@ -335,7 +335,7 @@ async fn wait_for_key_service(keys: &services::keys::KeyService) -> anyhow::Resu
     Ok(())
 }
 
-/// `vectorscrub audit verify | head`. `verify` exits non-zero if the chain does not hold. `head` prints
+/// `vectorscrub audit verify | head | check-head`. `verify` exits non-zero if the chain does not hold. `head` prints
 /// the sequence number and hash of the newest link: store it where the database host cannot write.
 async fn audit_cli(args: &[String]) -> anyhow::Result<()> {
     let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
@@ -361,7 +361,19 @@ async fn audit_cli(args: &[String]) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        _ => anyhow::bail!("usage: vectorscrub audit verify | head"),
+        // `audit check-head <seq> <hash>`: a head stored earlier must still be in the chain.
+        Some("check-head") => {
+            let seq: i64 = args.get(1).context("usage: audit check-head <seq> <hash>")?.parse().context("seq must be a number")?;
+            let hash = args.get(2).context("usage: audit check-head <seq> <hash>")?;
+            anyhow::ensure!(report.problem.is_none(), "AUDIT CHAIN BROKEN: the chain does not verify; run `audit verify`");
+            anyhow::ensure!(
+                services::audit_chain::contains_head(&pool, seq, hash).await?,
+                "AUDIT CHAIN BROKEN: the stored head {seq} is no longer in the chain (it was cut or rewritten after the head was stored)"
+            );
+            println!("the stored head {seq} is still in the chain");
+            Ok(())
+        }
+        _ => anyhow::bail!("usage: vectorscrub audit verify | head | check-head <seq> <hash>"),
     }
 }
 

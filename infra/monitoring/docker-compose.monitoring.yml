@@ -1,0 +1,66 @@
+# Prometheus and Alertmanager for a VectorScrub compose stack, on the same host.
+#
+#   1. infra/monitoring/render.sh          (alertmanager.yml for the named on-call person)
+#   2. METRICS_TOKEN_FILE=/path/to/file    (the backend's METRICS_TOKEN, mode 600)
+#   3. docker compose -f infra/monitoring/docker-compose.monitoring.yml -p <app project>-monitoring up -d
+#
+# APP_PROJECT is the app's compose project name (default `vectorscrub`, as deploy-simple.sh sets);
+# Prometheus joins that project's `web` network to scrape the backend. Neither UI is published
+# beyond 127.0.0.1: reach them through an SSH tunnel, never the internet.
+x-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  read_only: true
+  pids_limit: 256
+  restart: unless-stopped
+
+networks:
+  app_web:
+    external: true
+    name: ${APP_PROJECT:-vectorscrub}_web
+  monitoring:
+    internal: false
+
+volumes:
+  prometheus_data: {}
+  alertmanager_data: {}
+
+secrets:
+  metrics_token:
+    file: ${METRICS_TOKEN_FILE:?METRICS_TOKEN_FILE is required (a file holding the backend METRICS_TOKEN, mode 600)}
+
+services:
+  prometheus:
+    image: prom/prometheus@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
+    <<: *hardening
+    networks: [app_web, monitoring]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=:9090
+    volumes:
+      - ./prometheus.compose.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    secrets:
+      - source: metrics_token
+        target: /etc/prometheus/secrets/metrics_token
+    ports: ["127.0.0.1:9090:9090"]
+    mem_limit: 512m
+
+  alertmanager:
+    image: prom/alertmanager@sha256:e638797febd034838eca8b98cdbd46f951e9bf7f178777aa8669167406a9946c
+    <<: *hardening
+    # Sends mail and webhooks, so it needs to reach the internet; it is not on the app's network.
+    networks: [monitoring]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.listen-address=:9093
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./secrets:/etc/alertmanager/secrets:ro
+      - alertmanager_data:/alertmanager
+    ports: ["127.0.0.1:9093:9093"]
+    mem_limit: 256m

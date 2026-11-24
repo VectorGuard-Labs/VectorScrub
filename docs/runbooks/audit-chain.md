@@ -16,19 +16,23 @@ Rows written before migration 0025 are not covered. The chain starts at the firs
 ```bash
 docker compose exec backend ./vectorscrub audit verify    # exit 0: "the audit chain holds"; non-zero: AUDIT CHAIN BROKEN: ...
 docker compose exec backend ./vectorscrub audit head      # prints: <sequence> <hash>
+docker compose exec backend ./vectorscrub audit check-head <seq> <hash>   # a stored head is still in the chain
 ```
 Both only read, so the runtime role can run them.
 
-## The part that makes it worth having: store the head somewhere else
-An owner can recompute every link after an edit, so a chain that verifies proves the owner did not tamper **unless** you also
-hold an earlier head. Once a day (the same schedule as the database backup is natural):
-1. Run `audit verify`; if it fails, treat it as an incident (`incident-response.md`, "Audit trail altered").
-2. Run `audit head` and append the line, with the date, to a place the database host cannot write: a bucket with object lock, a
-   different provider's storage, an append-only mailbox, a ticket. Not the database host's own disk.
+## The part that makes it worth having: the head stored somewhere else
+An owner can recompute every link after an edit, or cut links off the end, and the chain still verifies.
+Only a head stored earlier, off the host, shows it. `infra/scripts/audit_head.sh` does this daily
+(install: `infra/backup/README.md`, step 5):
+1. `vectorscrub audit verify`: the chain holds.
+2. `vectorscrub audit check-head <seq> <hash>` with the head stored by the previous run: it is still in the chain.
+3. `vectorscrub audit head`, stored as a new object under `audit-heads/` in the off-site bucket (Object Lock keeps it).
+4. A heartbeat ping, only if all of that succeeded.
 
-To check an old head later: the head you stored must still be the hash of a link in the current chain
-(`SELECT seq, encode(link_hash,'hex') FROM audit_chain WHERE seq = <stored seq>`) and `audit verify` must hold. A cut-off tail or a
-rewritten chain shows up as a stored head that is no longer there or no longer matches.
+A failure prints `AUDIT CHAIN BROKEN` and skips the ping: treat it as an incident (`incident-response.md`,
+"Audit trail altered"). Tested on staging (2026-11-24): an owner disabled the triggers, deleted the newest audit row and its
+link, and re-enabled them; `audit verify` alone still said the chain holds, and the job's next run failed with
+"the head stored on ... is gone".
 
 ## Who can write the chain
 Only the trigger, which runs as the owner (`SECURITY DEFINER`). The runtime role has read access and nothing else

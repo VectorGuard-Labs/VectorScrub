@@ -2,10 +2,21 @@
 # (`/api/v1/metrics`, which needs METRICS_TOKEN) except `up`, which Prometheus makes itself.
 # Check them with promtool (CI does): promtool check rules infra/monitoring/alerts.yml
 #
-# These rules are what to alert ON. Where the alert goes (a pager, a chat channel) is yours to wire
-# up in Alertmanager; nothing here sends anything. Thresholds are starting points for a small
+# These rules are what to alert ON. Where they go is alertmanager.yml, rendered by render.sh for a
+# named person (see docs/runbooks/alerting.md). Thresholds are starting points for a small
 # pilot: tune them after a week of real traffic.
 groups:
+  - name: vectorscrub-meta
+    rules:
+      # Always firing. Alertmanager sends it to a dead-man's switch every few minutes; when the pings
+      # stop, the switch alerts the on-call person by itself. That is how you learn that monitoring,
+      # not the service, is what broke.
+      - alert: Watchdog
+        expr: vector(1)
+        labels: { severity: none }
+        annotations:
+          summary: Monitoring is working (this alert always fires; its absence is the alarm)
+
   - name: vectorscrub-availability
     rules:
       - alert: BackendDown

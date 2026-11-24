@@ -219,8 +219,13 @@ jobs:
         run: |
           docker run --rm -v "$PWD/infra/monitoring:/m:ro" --entrypoint promtool \
             prom/prometheus@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 check rules /m/alerts.yml
-          for f in infra/scripts/*.sh; do bash -n "$f"; done
+          for f in infra/scripts/*.sh infra/staging/*.sh infra/monitoring/*.sh infra/backup/*.sh; do bash -n "$f"; done
           sh -n infra/scripts/db_roles.sh
+          # The Alertmanager template renders to a valid config, and refuses to render without a person.
+          ONCALL_NAME="CI Check" ONCALL_EMAIL=oncall@example.invalid ALERT_SMTP_SMARTHOST=smtp.example.invalid:587 \
+            ALERT_SMTP_FROM=alerts@example.invalid ALERT_DEADMAN_URL=https://deadman.example.invalid/ping \
+            infra/monitoring/render.sh
+          if ALERT_SMTP_SMARTHOST=x:1 infra/monitoring/render.sh 2>/dev/null; then echo "render.sh accepted no on-call person"; exit 1; fi
 
       # No database exists in this build: the image compiles from backend/.sqlx.
       - name: Backend image builds with no database

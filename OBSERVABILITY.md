@@ -257,5 +257,5 @@ curl http://localhost:8080/api/v1/metrics
 
 `infra/monitoring/alerts.yml` holds the Prometheus alert rules (backend down, 5xx rate, p99 latency, audit-write failures,
 failed-login floods, rate limiter on its fallback, PyHSM rate limiting, scan queue backlog, abandoned removal claims) and
-`infra/monitoring/prometheus.yml` an example scrape configuration. CI validates the rules with `promtool`. They only
-notify someone if Prometheus and Alertmanager run and Alertmanager is routed to a person: nothing in the repository sends a page.
+`infra/monitoring/prometheus.yml` an example scrape configuration. CI validates the rules with `promtool`. Routing to a
+named person, the monitoring compose stack and the end-to-end test are in `docs/runbooks/alerting.md`.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily VectorScrub audit chain check and off-host head
+
+[Timer]
+# After the database backup (02:17) so a restore and its head describe the same night.
+OnCalendar=*-*-* 03:07:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
