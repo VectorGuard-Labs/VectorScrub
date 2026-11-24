@@ -47,7 +47,7 @@ Contain first, understand second.
 Stop. Do **not** run `kms init`: it creates a new key and orphans every stored data key. Restore the keystore from its backup (`key-service.md`, "Restoring for real"), run `vectorscrub verify-backup`, and only then start the backend. If no backup exists, customer data is unrecoverable; say so to counsel before saying anything to customers.
 
 ## Audit trail altered or the runtime role misused (Critical)
-The audit triggers and the two-role arrangement (`database-roles.md`) mean this needs the **owner** role or a superuser. Rotate the owner password, list who holds it, restore the triggers from migrations 0007, 0010 and 0017, and compare the table with the last backup (`pg_restore` into a scratch database).
+The audit triggers and the two-role arrangement (`database-roles.md`) mean this needs the **owner** role or a superuser. Rotate the owner password, list who holds it, restore the triggers from migrations 0007, 0010 and 0017, and compare the table with the last backup (`pg_restore` into a scratch database). The daily audit-head job reports this case as `AUDIT CHAIN BROKEN` (including a cut-off tail, via `audit check-head`); to check by hand, run `vectorscrub audit verify` and `audit check-head <seq> <hash>` with a head from the off-site `audit-heads/` prefix (`audit-chain.md`).
 
 ## Outage (High)
 | Symptom | Look at |

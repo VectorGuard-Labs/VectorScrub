@@ -256,7 +256,7 @@ Security is the core architectural constraint, not an afterthought. Every design
 | Rate limiting and lockout | Per-client-IP token buckets (GCRA, one atomic Lua script in Redis, so every backend instance shares the same counts; keys `<RATE_LIMIT_KEY_PREFIX>:rl:...` expire by themselves): a strict one on login and register (default 5/minute, burst 5) and a general one on the customer API (20/s, burst 60); 429 responses carry `Retry-After`. Internal agent routes and health probes are exempt. If Redis is unreachable or slower than 250 ms the limiter falls back to the same algorithm in the instance's memory (so the limit is then per instance, up to N times higher with N instances) rather than failing open or taking the API down; it logs once per outage, counts `rate_limit_backend_errors_total`, and retries Redis every 5 s. Client IP is the TCP peer unless `TRUST_PROXY_HEADERS=true`, in which case it is the `X-Forwarded-For` entry added by your own proxy (`TRUSTED_PROXY_HOPS` places from the right, default 1), never the client-controlled left side; the audit trail and the limiter use the same address, and IPv6 clients are limited per /64. Separately, 5 failed logins for an email lock it for 15 minutes, doubling every 5 further failures up to an hour; keyed on a hash of the email in Postgres so a non-existent email locks exactly like a real one, and unknown emails still pay for one Argon2 verification so response time does not reveal which emails are registered. Trade-off: someone who knows a victim's email can lock them out for up to an hour; the per-IP limit bounds how fast one source can do it. Request timeout is 30 s. |
 | Closed by default | `/api/v1/metrics` needs `Authorization: Bearer $METRICS_TOKEN` and answers 404 outside development when no token is set. The OpenAPI description (`/api-docs/openapi.json`) is not served in production (there is no Swagger UI). With `INTERNAL_PORT` set, the agent-only `/internal/*` routes are served on that separate port and the public port does not have them at all (compose does this and puts the agents on an internal-only network with the backend). The reference proxy (`infra/nginx/`) answers 404 for all three as a second lock. |
 | Encrypted connections | In production the backend refuses to start unless `DATABASE_URL` has `sslmode=require` (or `verify-ca`/`verify-full`) and `REDIS_URL` is `rediss://`, unless `DATABASE_ALLOW_PLAINTEXT` / `REDIS_ALLOW_PLAINTEXT` is set to `true` for a private network (compose sets both, because its Postgres and Redis sit on internal-only networks). Both TLS paths were tested against live TLS servers. Agent-to-backend traffic is plain HTTP on that private network. |
-| Audit hash chain | Every audit row gets a link in `audit_chain` (migration 0025): `sha256(previous hash || the row's fixed fields)`. `vectorscrub audit verify` finds the first edit, deletion or missing link, and `audit head` prints the hash to store off the host. Without stored heads, an owner can rewrite the chain consistently; there is no external sink. `docs/runbooks/audit-chain.md`. |
+| Audit hash chain | Every audit row gets a link in `audit_chain` (migration 0025): `sha256(previous hash || the row's fixed fields)`. `vectorscrub audit verify` finds the first edit, deletion or missing link, and `audit head` prints the hash to store off the host, and `audit check-head <seq> <hash>` confirms a stored head is still in the chain (a cut-off tail passes `verify` but fails this). `infra/scripts/audit_head.sh` runs all three daily and stores the head in the off-site bucket, but only once an operator installs it (`infra/backup/README.md`, step 5); without stored heads an owner can rewrite the chain consistently. `docs/runbooks/audit-chain.md`. |
 | Database roles | The backend connects as a runtime role that can read and write rows but owns nothing, so it cannot drop the audit-log triggers; migrations run separately as the owner (`vectorscrub migrate`). Production refuses to start as an owner or superuser unless `DATABASE_ALLOW_OWNER_ROLE=true`. The owner and any Postgres superuser can still bypass the triggers, though edits then show up in the hash chain (below). `docs/runbooks/database-roles.md`. |
 | Passwords | 12 to 128 characters, hashed with Argon2id, plus a local check that refuses common words with digits or symbols, keyboard walks, sequences, repeats and anything containing the account's email. It is **not** a breached-password lookup (that needs a third-party call, which would change the Privacy Policy), and there is **no** password reset or email verification: no email is sent to customers. |
 | Audit identifiers | After `AUDIT_IDENTIFIER_RETENTION_DAYS` (180) the email, IP address and user agent are cleared from `audit_log` rows, including failed logins for emails that never had an account. The row itself (action, result, time) stays. Runs with the scan-recovery housekeeping. |
@@ -423,9 +423,14 @@ VectorScrub/
 │   │   ├── Dockerfile.backend        # Multi-stage Rust build
 │   │   ├── Dockerfile.agents         # Python + Playwright
 │   │   └── Dockerfile.frontend       # Next.js standalone build
-│   └── scripts/
-│       ├── gen_keys.sh               # Generates JWT secret, master key, agent key, DB/Redis passwords
-│       └── sqlx_prepare.sh           # Regenerates / checks backend/.sqlx
+│   ├── scripts/
+│   │   ├── gen_keys.sh               # Generates JWT secret, master key, agent key, DB/Redis passwords
+│   │   ├── sqlx_prepare.sh           # Regenerates / checks backend/.sqlx
+│   │   ├── audit_head.sh             # Daily: verify audit chain, check the previous head, store the new one off-site
+│   │   └── restore_drill.sh          # Restores database + keystore from the off-site store and verifies them
+│   ├── backup/                       # Backup scripts, systemd timers, off-site setup (see its README)
+│   ├── monitoring/                   # Alert rules, Alertmanager template, render.sh, monitoring compose stack
+│   └── staging/                      # staging.sh and smoke_test.sh: production images, fake data only
 │
 ├── .github/workflows/ci.yml          # CI: backend, agents, frontend, image builds
 ├── .env.example                      # All required environment variables with descriptions
@@ -484,7 +489,7 @@ VectorScrub requires a JWT signing secret, an agent key, and a key service (PyHS
 bash infra/scripts/gen_keys.sh
 ```
 
-This prints the secrets you need: `JWT_SECRET`, `AGENT_API_KEY`, `PYHSM_IPC_SECRET`, a PyHSM keystore password, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, and a development-only `MASTER_ENCRYPTION_KEY`. Copy them — you will need them in the next step.
+This prints the secrets you need: `JWT_SECRET`, `AGENT_API_KEY`, `PYHSM_IPC_SECRET`, a PyHSM keystore password, `POSTGRES_PASSWORD`, `DB_APP_PASSWORD`, `REDIS_PASSWORD`, and a development-only `MASTER_ENCRYPTION_KEY`. Copy them — you will need them in the next step.
 
 ### Step 3 — Create your .env file
 
@@ -494,30 +499,63 @@ cp .env.example .env
 
 Open `.env` and fill in the values from Step 2. See [Environment Variables](#environment-variables) for a full description of every variable.
 
+Docker Compose refuses to start **any** service, even just Postgres and Redis, unless these four are set, because it checks the whole compose file first. They are commented out in `.env.example`, so uncomment and fill them in:
+
+| Variable | What to put |
+|---|---|
+| `DB_APP_PASSWORD` | The runtime database role's password (24+ characters, hex; from `gen_keys.sh`) |
+| `PYHSM_IPC_SECRET` | 32+ characters (`openssl rand -hex 32`) |
+| `PYHSM_PASSWORD_FILE` | Path to a file (mode 600) holding the PyHSM keystore password, e.g. `install -m 600 /dev/null ~/.vectorscrub-dev/pyhsm-password`, then write the password into it |
+| `PYHSM_IMAGE` | The PyHSM image by digest (`pyhsm@sha256:...`, `docs/runbooks/key-service.md`). With `KEY_PROVIDER=env` the `pyhsm` service is never started, so a placeholder such as `pyhsm@sha256:` followed by 64 zeros is enough for local development. Never in production. |
+
 ### Step 4 — Start PostgreSQL and Redis
 
+Run this from the repo root. Compose looks for `.env` next to the compose file (`infra/docker/`), not in the repo root, so pass it explicitly.
+
+The production compose file keeps Postgres and Redis on internal-only Docker networks with no published port, so a backend started with `cargo run` on your machine cannot reach them. You have two ways to run the backend. Pick one:
+
+**Option A — backend on your machine (`cargo run`), the usual way to develop.** Add the development override, which publishes Postgres on `127.0.0.1:5432` and Redis on `127.0.0.1:6379` (this machine only; `infra/docker/docker-compose.dev.yml`). Development only: never on a server or with real customer data.
+
 ```bash
-cd infra/docker
-docker compose up postgres redis -d
+export DC="docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.dev.yml --env-file .env"
+$DC up -d --wait postgres redis    # returns once both are healthy
 ```
 
-Both services have health checks. Wait until `docker compose ps` shows them as `healthy` before continuing.
+In `.env`, `DATABASE_URL` must use `localhost:5432` and `REDIS_URL` must be `redis://:<REDIS_PASSWORD>@localhost:6379`. The colon before the password matters: without it the password is read as a user name, and `/api/v1/health/ready` reports `"redis":false`. Continue with Step 5.
+
+**Option B — backend in Docker, the way production runs.** It uses a real PyHSM key service and the runtime database role, and publishes only the backend on `127.0.0.1:8080` and the web app on `127.0.0.1:3000`. Skip Step 5 and see "Backend in Docker (with PyHSM)" below.
 
 ```bash
-docker compose ps
+export DC="docker compose -f infra/docker/docker-compose.yml --env-file .env"
+```
+
+The Python worker (Step 6) started on your machine needs Option A: in Option B the backend's agent-only `/internal` API exists only on a Docker network the host cannot reach, so a host worker fails with `HTTPStatusError`. In Option B the agents run in Docker too (`$DC up -d agents`). `agents/.env` needs the same `redis://:<password>@localhost:6379` form as the root `.env`.
+
+Do not run both at once: they use the same containers and port 8080. To switch, run `$DC up -d --wait postgres redis` with the other `DC`; Compose recreates the containers and keeps the data.
+
+Once the containers exist, `docker start vectorscrub-postgres vectorscrub-redis` restarts them without Compose or the env file.
+
+If Compose reports `required variable ... is missing a value`, one of the four variables in Step 3 is not set.
+
+```bash
+$DC ps
 # NAME                       STATUS
 # vectorscrub-postgres       running (healthy)
 # vectorscrub-redis          running (healthy)
 ```
 
-### Step 5 — Start the Rust backend
+### Step 5 — Start the Rust backend (Option A)
+
+Using Option B? The backend is already running; go to Step 6.
 
 The backend automatically applies all database migrations on startup.
 
 ```bash
 cd backend
-cargo run
+SQLX_OFFLINE=true cargo run
 ```
+
+`SQLX_OFFLINE=true` is needed because the one compile-time-checked query (`services/audit.rs`) would otherwise try to connect to the database while compiling; with it, Cargo uses the metadata checked in under `backend/.sqlx/`. Without it you get `error communicating with database: Connection refused`.
 
 On first run, Cargo downloads and compiles all dependencies (this takes a few minutes). Subsequent runs start in seconds. You should see:
 
@@ -635,7 +673,7 @@ All variables are defined in `.env.example`. Copy it to `.env` before starting a
 | `SCAN_MAX_ATTEMPTS` | No | Attempts before a scan is marked `failed` and the customer is alerted (default: `3`) |
 | `TEST_REDIS_URL` | Tests only | Redis URL for the Rust API tests (default `redis://127.0.0.1:6379/14`). A Redis server must be reachable; the tests only delete the scan queue key in that database, but use a scratch database anyway. |
 | `BACKEND_API_URL` | No | URL the Python agents use to reach the Rust API (default: `http://localhost:8080`) |
-| `OPENAI_API_KEY` | Recommended | OpenAI API key for the detection agent. One of OpenAI or Anthropic required. |
+| `OPENAI_API_KEY` | Recommended | OpenAI API key for the detection agent. One of OpenAI or Anthropic required to classify pages. Without either, the worker still starts (removals and the nightly page check run) and each classification fails as "could not check", never as "no match". |
 | `ANTHROPIC_API_KEY` | Optional | Anthropic API key as an alternative to OpenAI |
 | `DEFAULT_LLM_PROVIDER` | No | `openai` or `anthropic` (default: `anthropic`) |
 | `DEFAULT_LLM_MODEL` | No | Model name for the LLM provider (e.g., `claude-3-5-sonnet-20241022`, `gpt-4o`) |
@@ -743,14 +781,48 @@ npm run build
 npm start
 ```
 
+### Backend in Docker (with PyHSM)
+
+This is Step 4, Option B. It runs the backend as production does: customer data keys are wrapped by PyHSM, and the backend connects as the runtime database role, which owns nothing. Run everything from the repo root.
+
+1. **PyHSM image.** Build PyHSM v2.4.0 or later and set `PYHSM_IMAGE=pyhsm@sha256:<image id>` in `.env` (`docs/runbooks/key-service.md`, step 1). `PYHSM_SRC=/path/to/PyHSM infra/staging/staging.sh up` builds one as `pyhsm:staging-<commit>`; `docker image inspect <tag> --format '{{.Id}}'` gives its id. Also check that `PYHSM_IPC_SECRET`, `PYHSM_PASSWORD_FILE` (mode 600) and `DB_APP_PASSWORD` are set (Step 3).
+2. **Volumes, once.** The PyHSM volumes must belong to uid 1000 before the first start. The prefix is the Compose project name, `docker` for this file:
+   ```bash
+   docker volume create docker_pyhsm_data && docker volume create docker_pyhsm_socket
+   docker run --rm -v docker_pyhsm_data:/d -v docker_pyhsm_socket:/s alpine:3 \
+     sh -c 'chown 1000:1000 /d /s && chmod 750 /d && chmod 700 /s'
+   ```
+3. **Start the key service, database, Redis and migrations, then create the key (once).**
+   ```bash
+   export DC="docker compose -f infra/docker/docker-compose.yml --env-file .env"
+   $DC up -d --wait pyhsm postgres redis
+   $DC up migrate                                   # applies migrations as the schema owner, then exits
+   $DC build backend
+   $DC run --rm --no-deps backend kms init          # "Created key 'vectorscrub-kek'"
+   ```
+   The key is never created automatically: a backend that finds PyHSM without it refuses to start, so a new key cannot silently orphan existing data.
+4. **Start the backend and check it.**
+   ```bash
+   $DC up -d --wait backend
+   curl -s http://127.0.0.1:8080/api/v1/health/ready      # {"database":true,"key_service":true,"redis":true,"status":"ready"}
+   $DC exec backend ./vectorscrub kms status              # key 'vectorscrub-kek' exists: true
+   ```
+5. **Back up the keystore now.** If the `docker_pyhsm_data` volume or its password is lost, all customer data becomes permanently unreadable (`docs/runbooks/key-service.md`, step 4). The keystore password file is `PYHSM_PASSWORD_FILE`; keep a copy outside this machine.
+
+Use `$DC exec backend ...` for operator commands on a running stack, not `$DC run` (the backend has a fixed address on the agent network). To stop: `$DC down` (keeps volumes; `down -v` deletes the database and the keystore).
+
+Data created under `KEY_PROVIDER=env` (Option A) is not readable by this backend, which uses PyHSM. Use a fresh database, or move the data once as described in the key-service runbook.
+
 ### Full Stack with Docker
 
 To run the entire stack in containers:
 
 ```bash
-cd infra/docker
-docker compose up --build
+# From the repo root, with DC set as in Step 4
+$DC up --build
 ```
+
+The full stack also needs a real `PYHSM_IMAGE` and a started key service (`docs/runbooks/key-service.md`); the placeholder from Step 3 is only enough for Postgres and Redis.
 
 All five services (PostgreSQL, Redis, backend, agents, frontend) start together. The backend waits for PostgreSQL to be healthy before starting.
 

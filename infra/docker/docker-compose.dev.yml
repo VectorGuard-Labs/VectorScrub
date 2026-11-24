@@ -1,0 +1,29 @@
+# DEVELOPMENT ONLY. Lets `cargo run` and `python -m ...` on your own machine reach the containers.
+#
+#   export DC="docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.dev.yml --env-file .env"
+#   $DC up -d --wait postgres redis
+#
+# The production file keeps Postgres and Redis on internal-only networks with no published port, so
+# nothing outside the stack can reach them. This file gives each of them a second, ordinary network
+# and publishes one port on 127.0.0.1 (this machine only, never 0.0.0.0). Passwords still apply.
+#
+# Do not use it on a server, in staging, or with real customer data: it removes the isolation
+# described at the top of docker-compose.yml. The `host_dev` network also has outbound internet
+# access, which the production data and queue networks do not.
+#
+# Point .env at them:
+#   DATABASE_URL=postgres://vectorscrub:<POSTGRES_PASSWORD>@localhost:5432/vectorscrub
+#   REDIS_URL=redis://:<REDIS_PASSWORD>@localhost:6379          (note the colon before the password)
+services:
+  postgres:
+    networks: [data, host_dev]
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    networks: [queue, host_dev]
+    ports:
+      - "127.0.0.1:6379:6379"
+
+networks:
+  host_dev: {}
