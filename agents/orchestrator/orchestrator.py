@@ -686,7 +686,10 @@ class Orchestrator:
                 # Cannot even read it, so it is not claimed or sent. Type only: a payload can carry names.
                 log.error("deletion_request_unreadable", error_type=type(exc).__name__)
                 continue
-            if not await self.backend.claim_deletion_request(str(request.id)):
+            # The Message-ID is recorded with the claim, before sending, so an interrupted send can be
+            # traced in the mail provider's logs (`vectorscrub deletion interrupted`).
+            planned_id = sender.new_message_id()
+            if not await self.backend.claim_deletion_request(str(request.id), planned_id):
                 continue  # another worker has it
 
             sent, message_id, error = False, None, None
@@ -694,7 +697,7 @@ class Orchestrator:
                 identity = self._identity_context(
                     str(request.customer_id), await self.backend.fetch_deletion_identity(str(request.id))
                 )
-                sent, message_id, error = await sender.send(request, identity)
+                sent, message_id, error = await sender.send(request, identity, planned_id)
             except IdentityDenied:
                 error = "The details for this request were not available, so nothing was sent."
             except Exception as exc:

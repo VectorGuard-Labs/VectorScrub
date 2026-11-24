@@ -158,7 +158,7 @@ export default function OptOutsPage() {
   const brokers = [...BROKER_OPT_OUTS].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
 
   return (
-    <div className="min-h-screen">
+    <div className="flex-1">
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-white font-bold">VectorScrub</span>

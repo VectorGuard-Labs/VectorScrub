@@ -83,7 +83,7 @@ export default function SecurityPage() {
   }, []);
 
   return (
-    <main className="min-h-screen px-6 py-10">
+    <main className="flex-1 px-6 py-10">
       <div className="max-w-2xl mx-auto">
         <button
           onClick={() => router.push("/dashboard")}

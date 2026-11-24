@@ -221,6 +221,8 @@ export interface OptOutHealth {
 export interface DeletionChannel {
   id: string;
   company: string;
+  /** The company's number in California's data broker registry, if it is listed there. */
+  registry_id: string | null;
   /** Where the request would be sent: the address the company itself publishes. */
   address: string;
   /** The company's own page that publishes it, a short quote from it, and when we last checked. */
@@ -238,23 +240,59 @@ export interface DeletionChannel {
   ineligible_reason: string | null;
 }
 
+export type DeletionKind = "delete" | "opt_out_sale";
+
 export interface DeletionInfo {
   authorization: { version: string; text: string };
   plan_ok: boolean;
+  /** The states whose residents may use this pilot, and whether the signed-in customer is one. */
+  pilot_states: string[];
+  in_pilot: boolean;
+  request_kinds: DeletionKind[];
   cooldown_days: number;
   channels: DeletionChannel[];
 }
 
-export type DeletionStatus = "queued" | "sending" | "sent" | "failed" | "replied" | "removed" | "denied";
+export type DeletionStatus = "queued" | "sending" | "sent" | "failed" | "replied" | "removed" | "denied" | "withdrawn";
 
 export interface DeletionRequest {
   id: string;
+  campaign_id: string;
   channel_id: string;
   company: string;
   status: DeletionStatus;
+  /** What was asked of this company. */
+  requests: DeletionKind[];
   queued_at: string;
   sent_at: string | null;
   outcome_at: string | null;
+  /** 45 or more days since it was sent with no answer reported. Not a finding that the company is late. */
   follow_up_due: boolean;
+  /** 90 or more days since it was sent with no answer reported: even an extended period has passed. */
+  extended_period_over: boolean;
   error: string | null;
+}
+
+/** What the customer accepted and signed for one campaign, and what became of each request. */
+export interface DeletionAuthorizationRecord {
+  campaign_id: string;
+  authorized_at: string;
+  authorization_version: string;
+  authorization_text: string;
+  authorization_sha256: string;
+  include_address: boolean;
+  request_kinds: DeletionKind[];
+  /** The signed document (names the customer and their email), and the SHA-256 of its text. */
+  signed_document: string | null;
+  signed_document_sha256: string | null;
+  esign_consent_at: string | null;
+  withdrawn_at: string | null;
+  companies: {
+    request_id: string;
+    company: string;
+    to_address: string | null;
+    status: DeletionStatus;
+    sent_at: string | null;
+    withdrawn_at: string | null;
+  }[];
 }

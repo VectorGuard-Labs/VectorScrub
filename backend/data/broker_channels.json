@@ -35,7 +35,7 @@
         "delete"
       ],
       "agent_requirements": "The page asks for the person's current address and email address, and any prior addresses they want opted out. It does not mention authorized agents.",
-      "notes": "A marketing-data company. The page says the request removes the person from its marketing databases, not from other companies that hold the same data. VectorScrub shares the current address (which this company needs) and email, not previous addresses.",
+      "notes": "A marketing-data company. The page says the request removes the person from its marketing databases, not from other companies that hold the same data. VectorScrub shares the current address (which this company needs) and email, not previous addresses, so a request through VectorScrub does not cover a previous address. To opt out a previous address, write to the company yourself.",
       "requires_address": true
     },
     {

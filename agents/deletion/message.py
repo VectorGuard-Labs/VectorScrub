@@ -71,6 +71,15 @@ def render(request: QueuedDeletion, identity: IdentityContext) -> tuple[str, str
     # The authorization is quoted line by line, so nothing in it can break out of the quote.
     quoted = "\n".join("  > " + one_line(line, 400) if line.strip() else "  >" for line in request.authorization_text.splitlines())
 
+    # The signed copy stays with the customer; the company gets its fingerprint and can ask for it.
+    fingerprint = one_line(request.signed_document_sha256, 64)
+    signed = ""
+    if re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        signed = (
+            f"{name} signed this authorization electronically (document fingerprint, SHA-256: {fingerprint}). "
+            f"If you need proof of their signed permission, ask {name} at {email} for the signed copy.\n\n"
+        )
+
     body = f"""To the privacy team at {company},
 
 I am writing as the authorized agent of {name}, through VectorScrub (a product of VectorGuard Labs). This request is made under {basis}.
@@ -85,15 +94,17 @@ So that you can find their records:
 
 {quoted}
 
-You may contact {name} directly at {email} to verify their identity or to confirm that they authorized this request. Please send your answer to that address.
+{signed}You may contact {name} directly at {email} to verify their identity or to confirm that they authorized this request. Please send your answer to that address.
 
 Thank you,
 VectorScrub, for {name}
 """
     if request.subject and one_line(request.subject, 100):
         subject = one_line(request.subject, 100)       # the company asked for this exact subject line
-    elif "opt_out_sale" in request.requests:
+    elif "opt_out_sale" in request.requests and "delete" in request.requests:
         subject = f"Privacy request from {name}: deletion and opt-out of sale"
+    elif "opt_out_sale" in request.requests:
+        subject = f"Privacy request from {name}: opt-out of sale or sharing"
     else:
         subject = f"Privacy request from {name}: deletion"
     return one_line(subject, 200), body

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import SiteFooter from "@/components/SiteFooter";
 
 export const metadata: Metadata = {
   title: "VectorScrub — Your personal information. Under your control.",
@@ -20,8 +21,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="min-h-screen bg-gray-950 text-gray-100 antialiased">
-        <ErrorBoundary>{children}</ErrorBoundary>
+      <body className="min-h-screen flex flex-col bg-gray-950 text-gray-100 antialiased">
+        {/* The page grows to fill the screen, so the footer sits at the bottom of short pages too. */}
+        <div className="flex-1 flex flex-col">
+          <ErrorBoundary>{children}</ErrorBoundary>
+        </div>
+        <SiteFooter />
       </body>
     </html>
   );

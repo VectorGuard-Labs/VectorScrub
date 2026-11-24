@@ -3,7 +3,7 @@
 ## What is set up
 | File | Role |
 |---|---|
-| `infra/monitoring/alerts.yml` | The rules: backend down, 5xx rate, latency, audit-write failures, login floods, rate limiter on its fallback, PyHSM rate limiting, scan backlog, failed scans, abandoned removals, and **Watchdog** (always firing) |
+| `infra/monitoring/alerts.yml` | The rules: backend down, 5xx rate, latency, audit-write failures, login floods, rate limiter on its fallback, PyHSM rate limiting, scan backlog, failed scans, abandoned removals, interrupted or failed deletion-request emails, and **Watchdog** (always firing) |
 | `infra/monitoring/alertmanager.yml.tmpl` | Routing: `severity=page` to the on-call person by email (and PagerDuty if configured), re-sent hourly; `severity=ticket` by email, twice a day; Watchdog to a dead-man's switch every 5 minutes; tickets muted while the backend is down |
 | `infra/monitoring/render.sh` | Writes `alertmanager.yml` for one **named** person, checks it with `amtool`, and prints where each kind of alert goes. It refuses to run without a name, an email address and a dead-man's switch URL |
 | `infra/monitoring/docker-compose.monitoring.yml` | Prometheus and Alertmanager beside the app, both on 127.0.0.1 only |

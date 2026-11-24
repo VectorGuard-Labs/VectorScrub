@@ -5,7 +5,9 @@
 import type {
   AuthResponse,
   BillingInfo,
+  DeletionAuthorizationRecord,
   DeletionInfo,
+  DeletionKind,
   DeletionRequest,
   CustomerProfile,
   Exposure,
@@ -275,9 +277,13 @@ export async function listDeletionRequests(): Promise<DeletionRequest[]> {
 
 export async function createDeletionCampaign(payload: {
   channel_ids: string[];
+  request_kinds: DeletionKind[];
   include_address: boolean;
   consent: boolean;
   authorization_version: string;
+  /** The full name typed as a signature. */
+  signature: string;
+  esign_consent: boolean;
 }): Promise<{ message: string }> {
   const res = await csrfFetch(`${BASE}/deletion-campaigns`, {
     method: "POST",
@@ -285,6 +291,24 @@ export async function createDeletionCampaign(payload: {
     body: JSON.stringify(payload),
   });
   return handleResponse(res);
+}
+
+/** Cancel a request that has not been sent. Fails with 409 once it is being sent or was sent. */
+export async function withdrawDeletionRequest(id: string): Promise<void> {
+  const res = await csrfFetch(`${BASE}/deletion-requests/${id}/withdraw`, { method: "POST", headers: jsonHeaders() });
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+}
+
+/** Cancel every request of a campaign that has not been sent. Answers how many were cancelled. */
+export async function withdrawDeletionCampaign(id: string): Promise<number> {
+  const res = await csrfFetch(`${BASE}/deletion-campaigns/${id}/withdraw`, { method: "POST", headers: jsonHeaders() });
+  const body = await handleResponse<{ withdrawn: number }>(res);
+  return body.withdrawn;
+}
+
+export async function getDeletionAuthorizationRecord(campaignId: string): Promise<DeletionAuthorizationRecord> {
+  const res = await csrfFetch(`${BASE}/deletion-campaigns/${campaignId}/authorization`, { headers: jsonHeaders() });
+  return handleResponse<DeletionAuthorizationRecord>(res);
 }
 
 export async function reportDeletionOutcome(id: string, outcome: "replied" | "removed" | "denied"): Promise<void> {

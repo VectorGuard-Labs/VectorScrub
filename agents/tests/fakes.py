@@ -36,6 +36,7 @@ class FakeBackend:
         self.deletion_identity: dict | Exception = {
             "full_name": "Jane Marie Smith", "email_addresses": ["jane.smith@example.com"], "current_address": ""}
         self.deletion_results: list[tuple] = []
+        self.deletion_claim_message_ids: list = []
         self.deletion_result_errors: list[Exception] = []
 
     def _log(self, *call):
@@ -49,8 +50,9 @@ class FakeBackend:
         self._log("list_deletion_requests")
         return list(self.deletion_queue)
 
-    async def claim_deletion_request(self, request_id):
+    async def claim_deletion_request(self, request_id, message_id=None):
         self._log("claim_deletion_request", request_id)
+        self.deletion_claim_message_ids.append(message_id)
         return request_id not in self.deletion_claims_lost
 
     async def fetch_deletion_identity(self, request_id):

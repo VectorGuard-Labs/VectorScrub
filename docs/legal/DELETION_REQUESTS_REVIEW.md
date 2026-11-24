@@ -1,6 +1,17 @@
 # Deletion requests: material for legal review
 
 Status: **DRAFT, for review by counsel. The feature is switched off and no email has been sent to any company.**
+
+> **Second update, 2026-11-24.** After counsel's second review: signed authorization with a downloadable PDF,
+> withdrawal that also blocks the authorization, operator recovery of interrupted sends by Message-ID, delivery
+> alerts, a DROP note, and the catalog re-checked. Authorization `2026-11-draft-3`, Terms `2026-11-pilot-6`.
+> Section 10 is now the prioritized checklist.
+>
+> **Update, 2026-11-24.** A lawyer's recommendations were applied: authorization version `2026-11-draft-2`, a
+> California-only pilot, separate choices for deletion and opt-out of sale or sharing, a withdrawal control, a
+> retrievable authorization record, "no answer reported" wording after 45 days, and rewritten Terms and Privacy
+> Policy (`TERMS_VERSION` `2026-11-pilot-5`). Sections 2 to 6 below describe the **first** draft and are kept for
+> the record. The current text is in the code. Section 10 tracks the launch checklist.
 Prepared from the code on 2026-11-24 (authorization version `2026-11-draft-1`). The text below is copied from
 the code, not summarized. Nothing here is legal advice, and where this document says what a law requires,
 that is a question for counsel, not a finding.
@@ -172,3 +183,49 @@ Only then set the two switches for a limited pilot. Update `docs/COMPLIANCE_CHEC
 - `frontend/src/app/dashboard/requests/page.tsx`
 - `frontend/src/app/terms/page.tsx`, `frontend/src/app/privacy/page.tsx`
 - `docs/COMPLIANCE_CHECKLIST.md`, `DATA_RETENTION.md`
+
+## 10. Prioritized launch checklist (from counsel's two reviews, 2026-11-24)
+
+**Both switches stay OFF** (`DELETION_REQUESTS_ENABLED`, `DELETION_REQUESTS_SEND_ENABLED`) until every Legal item
+is ticked by counsel. A box is ticked only where code, a test or a recorded check shows it; the evidence is named.
+
+### Legal (counsel decides; engineering cannot tick these)
+
+| # | Priority | Item | State |
+|---|---|---|---|
+| L1 | Blocker | Is a typed-name electronic signature plus the stored, fingerprinted document "signed permission" under 11 CCR §7063, and does it meet ESIGN/UETA? If not, which mechanism? | Mechanism built (E1); **not approved** |
+| L2 | Blocker | Approve the authorization text (`2026-11-draft-3`) and the signed-document layout (`services/deletion.rs`, `signed_document`) | Drafted; not approved |
+| L3 | Blocker | Approve the Terms (sections 1 to 8) and Privacy Policy (sections 1 to 7, 9) at `TERMS_VERSION` `2026-11-pilot-6` | Drafted; not approved |
+| L4 | Blocker | VectorGuard Labs (a Delaware corporation) as an authorized agent: California Secretary of State registration and any other agent requirement | Open |
+| L5 | Blocker | Approve the California-only scope, and the legal basis each of the six emails cites. Three entries cite only the company's own policy "and any privacy law that applies"; for Californians, should they cite the CCPA? | Scope enforced (E5); citations open |
+| L6 | Blocker | Approve the six-company catalog, per company: accepts agent requests? accepts email? signed permission required (Whitepages says it may be)? extra identification? which of delete / opt-out it supports? | Addresses re-checked (E8); the rest open |
+| L7 | High | DROP: all six are in California's data broker registry (registry ids in the catalog), so all six must process DROP requests. Is the direct email additional coverage worth sending, and can VectorScrub act as a DROP agent (agent name, email and trade name disclosed through the consumer's DROP account)? | Page now says "use both"; legal question open |
+| L8 | Medium | Statutory versus voluntary rights in Privacy section 9 | Reworded; not approved |
+
+### Engineering
+
+| # | Priority | Item | State and evidence |
+|---|---|---|---|
+| E1 | Blocker | Signed authorization: name, email, agent, each kind AUTHORIZED / NOT AUTHORIZED, companies and scope, time, version, e-sign consent, typed signature; downloadable PDF | [x] Migration 0027; test `each_campaign_is_signed_and_the_signed_document_is_kept_encrypted...`; refusals in `every_refusal_leaves_nothing_behind`. PDF is the browser's print-to-PDF of `/dashboard/requests/authorization/:id`, not a server-made file |
+| E2 | Blocker | Withdrawal in the dashboard; cancels unsent requests; withdrawn authorization blocks future sends; timestamps; audit | [x] Tests `a_request_that_has_not_been_sent_can_be_withdrawn...`, `a_whole_campaign_can_be_withdrawn...`, `nothing_is_sent_under_a_withdrawn_authorization...` |
+| E3 | Blocker | Separate permission for deletion and for opt-out of sale/sharing | [x] `request_kinds` (migration 0026), shown per kind in the signed document; tests `deleting_and_opting_out...`, agents `test_a_request_to_stop_selling_alone...` |
+| E4 | Blocker | Interrupted-send recovery an operator can act on | [x] Message-ID recorded at claim; `vectorscrub deletion interrupted / resolve`; tests `an_interrupted_send_keeps_its_message_id...`, `...under_a_withdrawn_authorization_is_never_put_back`, agents `test_the_worker_claims_with_the_message_id...` |
+| E5 | Blocker | California-only eligibility | [x] `DELETION_PILOT_STATES` default `CA`; tests `the_default_pilot_is_open_to_californians_only...`, config test |
+| E6 | Blocker | End-to-end test with a real mail provider (send, bounce, interrupted send found in its logs) | [ ] Not done. Only unit and API tests with a fake SMTP |
+| E7 | High | Delivery monitoring | [x] Counters `deletion_requests_sent_total`, `_failed_total`, `_interrupted_total`; alerts `DeletionRequestsNotSent`, `DeletionRequestSendInterrupted` (`promtool` passes). [ ] Not yet routed and tested end to end (`docs/runbooks/alerting.md`) |
+| E8 | High | Catalog revalidated | [x] `python -m deletion.verify_channels`, 2026-11-24: all six `confirmed` (address still on the company's own page). `verified_on` dates left at 2026-11-12 for a person to update after reading each page (the tool never edits them). Stirista note now says previous addresses are not covered |
+| E9 | High | Retention and erasure | [x] Test `deleting_the_account_erases_every_campaign_and_request...` (covers the signed copy, which is in the campaign row). Not covered: the mail provider's sent copies and 30-day backups. `vectorscrub verify-backup` does not yet trial-decrypt signed documents |
+| E10 | Medium | Duplicate-send protection, SMTP failure handling, catalog validation, PII-free logs, outcome tracking, customer-visible history | [x] Existing tests (claim once, never retried, fixed-phrase errors, log tests, outcome tests) |
+| E11 | Medium | Rate limiting | [x] API rate limits apply to these routes; 50 companies per campaign; 90-day cooldown per company; the worker spaces sends (`deletion_send_delay_seconds`). No per-day cap per customer |
+| E12 | Medium | Emergency kill switch | [x] Off-by-default covered by tests. [ ] Not tried on a running deployment. Procedure: set `DELETION_REQUESTS_SEND_ENABLED=false` on the agents and restart them (nothing is claimed); for a full stop also set `DELETION_REQUESTS_ENABLED=false` on the backend (all routes 404, the queue is empty). Queued requests stay queued |
+| E13 | High | Existing accounts accept updated Terms | [ ] No re-acceptance flow; only new registrations accept `pilot-6`. Every campaign does require the current authorization version |
+
+### Launch (after Legal and Engineering)
+
+| # | Item | State |
+|---|---|---|
+| R1 | Version numbers incremented | [x] `AUTHORIZATION_VERSION` `2026-11-draft-3`, `TERMS_VERSION` `2026-11-pilot-6` |
+| R2 | California customers only, six approved companies only | Enforced for state (E5); catalog approval is L6 |
+| R3 | Customer-facing limitations published | Drafted (requests page, Terms, Privacy); publish after L2 and L3 |
+| R4 | Marketing wording: "automated privacy-request submission and tracking", never "guaranteed removal" | No marketing copy for this feature exists yet; the steering file forbids describing it as live |
+| R5 | Pilot monitoring, manual review of exceptions, escalation to a named person | Alerts exist (E7); a named person and a review routine are open (`docs/runbooks/alerting.md`) |

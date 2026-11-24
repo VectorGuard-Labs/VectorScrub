@@ -4,9 +4,9 @@
  * send the current value. Change both when either document changes in a way customers must
  * agree to again.
  */
-export const TERMS_VERSION = "2026-11-pilot-4";
+export const TERMS_VERSION = "2026-11-pilot-6";
 
-export const LEGAL_UPDATED = "November 19, 2026";
+export const LEGAL_UPDATED = "November 24, 2026";
 
 /** Where customers write for support and data requests (set CONTACT_EMAIL on the web server). */
 export function contactEmail(): string | null {

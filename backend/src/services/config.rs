@@ -61,6 +61,11 @@ pub struct AppConfig {
     /// the endpoints answer 404 and nothing is queued. The authorization wording needs a privacy
     /// lawyer's review before it is turned on for real customers.
     pub deletion_requests_enabled: bool,
+    /// The US states whose residents may use deletion requests (`DELETION_PILOT_STATES`, default
+    /// `CA`). A customer whose saved address is in another state, or whose state cannot be told, is
+    /// not offered any company, whatever the company's own page says. There is no "everyone" value:
+    /// widening the pilot means naming the states.
+    pub deletion_pilot_states: Vec<String>,
     /// Stop accepting new accounts once this many exist (`MAX_ACCOUNTS`). Unset means no limit.
     /// Used to keep a pilot small. The check is not atomic, so a burst of simultaneous
     /// registrations can overshoot by a few.
@@ -271,6 +276,24 @@ impl Environment {
             ),
         }
     }
+}
+
+/// `DELETION_PILOT_STATES`: two-letter US state codes separated by commas, default `CA`. A value that
+/// names no state is refused, so a typo cannot open the feature to everyone.
+fn parse_pilot_states(raw: Option<&str>) -> Result<Vec<String>> {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else { return Ok(vec!["CA".to_string()]) };
+    let mut states: Vec<String> = Vec::new();
+    for part in raw.split(',') {
+        let s = part.trim().to_ascii_uppercase();
+        anyhow::ensure!(
+            s.len() == 2 && s.chars().all(|c| c.is_ascii_alphabetic()),
+            "DELETION_PILOT_STATES must be two-letter state codes separated by commas (for example CA,NV)"
+        );
+        if !states.contains(&s) {
+            states.push(s);
+        }
+    }
+    Ok(states)
 }
 
 /// Whether an allowed-origin entry points at this machine.
@@ -513,6 +536,7 @@ impl AppConfig {
             scan_max_attempts: env_parse(&get, "SCAN_MAX_ATTEMPTS", 3)?,
             stripe: StripeConfig::from_lookup(&get)?,
             deletion_requests_enabled: env_parse(&get, "DELETION_REQUESTS_ENABLED", false)?,
+            deletion_pilot_states: parse_pilot_states(get("DELETION_PILOT_STATES").as_deref())?,
             metrics_token: match get("METRICS_TOKEN").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
                 Some(t) => {
                     anyhow::ensure!(t.len() >= MIN_SECRET_LEN, "METRICS_TOKEN must be at least {MIN_SECRET_LEN} characters");
@@ -586,6 +610,22 @@ mod tests {
     }
     fn load(vars: &HashMap<&'static str, String>) -> Result<AppConfig> {
         AppConfig::from_lookup(|k| vars.get(k).cloned())
+    }
+
+    #[test]
+    fn the_deletion_pilot_is_california_only_unless_states_are_named() {
+        assert_eq!(load(&good()).unwrap().deletion_pilot_states, vec!["CA"]);
+        let mut v = good();
+        v.insert("DELETION_PILOT_STATES", " ca, nv ,CA".into());
+        assert_eq!(load(&v).unwrap().deletion_pilot_states, vec!["CA", "NV"]);
+        for bad in ["*", "all", "California", "CA;NV", "C", "1A"] {
+            let mut v = good();
+            v.insert("DELETION_PILOT_STATES", bad.into());
+            assert!(load(&v).is_err(), "{bad} must not open the pilot");
+        }
+        let mut blank = good();
+        blank.insert("DELETION_PILOT_STATES", "  ".into());
+        assert_eq!(load(&blank).unwrap().deletion_pilot_states, vec!["CA"], "blank means the default, never everyone");
     }
 
     #[test]

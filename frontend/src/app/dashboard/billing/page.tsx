@@ -101,7 +101,7 @@ export default function BillingPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="flex-1 flex items-center justify-center">
         <div className="text-gray-400 text-sm animate-pulse">Loading billing…</div>
       </div>
     );
@@ -121,7 +121,7 @@ export default function BillingPage() {
   }
 
   return (
-    <div className="min-h-screen">
+    <div className="flex-1">
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-white font-bold">VectorScrub</span>

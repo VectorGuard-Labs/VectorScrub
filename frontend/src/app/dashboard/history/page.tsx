@@ -196,7 +196,7 @@ export default function HistoryPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="flex-1 flex items-center justify-center">
         <div className="text-gray-400 text-sm animate-pulse">
           Loading exposure history…
         </div>
@@ -205,7 +205,7 @@ export default function HistoryPage() {
   }
 
   return (
-    <div className="min-h-screen">
+    <div className="flex-1">
       {/* Top nav */}
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-2">

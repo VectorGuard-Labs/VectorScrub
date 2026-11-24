@@ -258,6 +258,10 @@ pub mod actions {
     pub const DELETION_SENT: &str = "deletion.sent";
     /// The customer reported what a company answered.
     pub const DELETION_OUTCOME: &str = "deletion.outcome";
+    /// The customer withdrew a request (or a whole campaign) that had not been sent yet.
+    pub const DELETION_WITHDRAW: &str = "deletion.withdraw";
+    /// An operator decided, from the mail provider's logs, whether an interrupted send left.
+    pub const DELETION_OPERATOR_RESOLVE: &str = "deletion.operator_resolve";
 
     // Account
     /// The customer erased their account. Written after erasure, with no customer attached.

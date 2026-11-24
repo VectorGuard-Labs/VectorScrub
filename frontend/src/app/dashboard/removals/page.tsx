@@ -58,7 +58,7 @@ export default function RemovalsPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="flex-1 flex items-center justify-center">
         <div className="text-gray-400 text-sm animate-pulse">
           Loading removal requests…
         </div>
@@ -67,7 +67,7 @@ export default function RemovalsPage() {
   }
 
   return (
-    <div className="min-h-screen">
+    <div className="flex-1">
       {/* Top nav */}
       <nav className="border-b border-gray-800 bg-black/40 backdrop-blur-sm sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">

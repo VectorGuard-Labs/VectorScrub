@@ -137,10 +137,14 @@ class BackendClient:
         resp.raise_for_status()
         return list(resp.json().get("requests", []))
 
-    async def claim_deletion_request(self, request_id: str) -> bool:
-        """Take a queued request. True for exactly one caller; the worker must not send otherwise."""
+    async def claim_deletion_request(self, request_id: str, message_id: str | None = None) -> bool:
+        """Take a queued request. True for exactly one caller; the worker must not send otherwise.
+        `message_id` is recorded with the claim, before anything is sent."""
+        body = {"message_id": message_id} if message_id else None
         async with self._client() as client:
-            resp = await client.post(f"{self._base}/internal/deletion-requests/{request_id}/claim", headers=self._headers)
+            resp = await client.post(
+                f"{self._base}/internal/deletion-requests/{request_id}/claim", json=body, headers=self._headers
+            )
         if resp.status_code == 409:
             return False
         resp.raise_for_status()

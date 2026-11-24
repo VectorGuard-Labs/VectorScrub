@@ -146,6 +146,12 @@ pub fn find(id: &str) -> Option<&'static Channel> {
     catalog().iter().find(|c| c.id == id)
 }
 
+/// Whether a customer whose saved address is in `state` is inside the pilot (`DELETION_PILOT_STATES`).
+/// A state that cannot be told is never inside it.
+pub fn in_pilot(state: Option<&str>, pilot_states: &[String]) -> bool {
+    state.is_some_and(|s| pilot_states.iter().any(|p| p.eq_ignore_ascii_case(s)))
+}
+
 /// Whether a customer whose saved address is in `state` may be offered this channel.
 pub fn eligible(channel: &Channel, state: Option<&str>) -> bool {
     channel.applies_to.is_empty() || state.is_some_and(|s| channel.applies_to.iter().any(|a| a.eq_ignore_ascii_case(s)))

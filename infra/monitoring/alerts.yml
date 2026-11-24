@@ -96,3 +96,17 @@ groups:
         labels: { severity: ticket }
         annotations:
           summary: A worker died while submitting a removal; the request was failed, not retried
+
+      # Deletion requests emailed to companies (off unless DELETION_REQUESTS_ENABLED). Each of these is
+      # one customer's request that did not go out as authorized, so they ticket on the first one.
+      - alert: DeletionRequestSendInterrupted
+        expr: increase(deletion_requests_interrupted_total[1h]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: A deletion-request email was interrupted mid-send; check the mail logs for its Message-ID (`vectorscrub deletion interrupted`, then `resolve`)
+
+      - alert: DeletionRequestsNotSent
+        expr: increase(deletion_requests_failed_total[1h]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: The worker reported deletion-request emails as not sent (SMTP or configuration); the customer sees "Not sent" with the reason

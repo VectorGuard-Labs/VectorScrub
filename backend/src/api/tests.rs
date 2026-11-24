@@ -1572,7 +1572,17 @@ mod deletion_requests {
     use crate::models::customer::SubmitIdentityRequest;
     use crate::services::{customer as customer_svc, deletion};
 
+    /// Switched on, with a pilot that covers California and Texas so the per-company state rules can be
+    /// tested on their own. The default pilot (California only) is tested in `pilot_app`.
     fn enabled_app(pool: PgPool) -> (Router, AppConfig) {
+        let mut c = relaxed();
+        c.deletion_requests_enabled = true;
+        c.deletion_pilot_states = vec!["CA".into(), "TX".into()];
+        app_with(pool, c, &redis_url())
+    }
+
+    /// Switched on with the shipped default: the pilot is California only.
+    fn pilot_app(pool: PgPool) -> (Router, AppConfig) {
         let mut c = relaxed();
         c.deletion_requests_enabled = true;
         app_with(pool, c, &redis_url())
@@ -1597,8 +1607,13 @@ mod deletion_requests {
     }
 
     fn body(ids: &[&str], address: bool) -> Value {
-        json!({ "channel_ids": ids, "include_address": address, "consent": true,
-                "authorization_version": deletion::AUTHORIZATION_VERSION })
+        json!({ "channel_ids": ids, "request_kinds": ["delete", "opt_out_sale"], "include_address": address, "consent": true,
+                "authorization_version": deletion::AUTHORIZATION_VERSION, "signature": "Jane Marie Smith", "esign_consent": true })
+    }
+
+    fn body_kinds(ids: &[&str], kinds: &[&str]) -> Value {
+        json!({ "channel_ids": ids, "request_kinds": kinds, "include_address": true, "consent": true,
+                "authorization_version": deletion::AUTHORIZATION_VERSION, "signature": "Jane Marie Smith", "esign_consent": true })
     }
 
     async fn campaign(pool: &PgPool, app: &Router, cfg: &AppConfig, c: Uuid, b: Value) -> Reply {
@@ -1624,6 +1639,14 @@ mod deletion_requests {
             assert_eq!(send(&app, method, uri, &who, None).await.status, StatusCode::NOT_FOUND, "{uri}");
         }
         assert_eq!(campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await.status, StatusCode::NOT_FOUND);
+        let any = Uuid::new_v4();
+        for (method, uri) in [
+            ("POST", format!("/deletion-requests/{any}/withdraw")),
+            ("POST", format!("/deletion-campaigns/{any}/withdraw")),
+            ("GET", format!("/deletion-campaigns/{any}/authorization")),
+        ] {
+            assert_eq!(send(&app, method, &uri, &who, None).await.status, StatusCode::NOT_FOUND, "{uri} is off too");
+        }
         let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await;
         assert_eq!((q.status, q.json()["requests"].clone()), (StatusCode::OK, json!([])), "the worker just sees nothing");
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM deletion_requests").fetch_one(&pool).await.unwrap();
@@ -1704,22 +1727,44 @@ mod deletion_requests {
         save_identity(&pool, tx, "1 Main St, Austin, TX 78701").await;
         let unknown = ts::customer(&pool, "personal", true).await;
         save_identity(&pool, unknown, "12 Rue de Rivoli, Paris, France").await;
+        let nevada = ts::customer(&pool, "personal", true).await;
+        save_identity(&pool, nevada, "1 Strip Ave, Las Vegas, NV 89101").await;
 
         let mut no_consent = body(&["whitepages"], false);
         no_consent["consent"] = json!(false);
         let mut old_text = body(&["whitepages"], false);
         old_text["authorization_version"] = json!("2020-01-old");
+        let mut unsigned = body(&["whitepages"], false);
+        unsigned["signature"] = json!("");
+        let mut no_esign = body(&["whitepages"], false);
+        no_esign["esign_consent"] = json!(false);
+        let mut wrong_name = body(&["whitepages"], false);
+        wrong_name["signature"] = json!("John Doe");
+        let no_email = ts::customer(&pool, "personal", true).await;
+        customer_svc::save_identity(&pool, &keys(&pool), &SubmitIdentityRequest {
+            full_name: "Jane Marie Smith".into(), current_address: "1 Main St, Los Angeles, CA 90001".into(),
+            previous_addresses: vec![], phone_numbers: vec![], email_addresses: vec![], date_of_birth: None,
+        }, no_email).await.unwrap();
 
         for (what, who, tier, b, want) in [
             ("no consent", c, "personal", no_consent, StatusCode::UNPROCESSABLE_ENTITY),
+            ("not signed", c, "personal", unsigned, StatusCode::UNPROCESSABLE_ENTITY),
+            ("no agreement to sign electronically", c, "personal", no_esign, StatusCode::UNPROCESSABLE_ENTITY),
+            ("a signature that is not the saved name", c, "personal", wrong_name, StatusCode::UNPROCESSABLE_ENTITY),
+            ("no email address saved to send the requests in", no_email, "personal", body(&["whitepages"], false), StatusCode::UNPROCESSABLE_ENTITY),
             ("an older authorization text", c, "personal", old_text, StatusCode::CONFLICT),
             ("nothing selected", c, "personal", body(&[], false), StatusCode::UNPROCESSABLE_ENTITY),
             ("a company that is not in the catalog", c, "personal", body(&["whitepages", "evil-corp"], false), StatusCode::UNPROCESSABLE_ENTITY),
             ("a free plan", free, "free", body(&["whitepages"], false), StatusCode::FORBIDDEN),
             ("a state the page does not offer it to", tx, "personal", body(&["whitepages"], false), StatusCode::FORBIDDEN),
             ("a state that cannot be told", unknown, "personal", body(&["whitepages"], false), StatusCode::FORBIDDEN),
+            ("a state outside the pilot", nevada, "personal", body(&["realsource"], false), StatusCode::FORBIDDEN),
+            ("no kind of request chosen", c, "personal", body_kinds(&["whitepages"], &[]), StatusCode::UNPROCESSABLE_ENTITY),
+            ("a kind of request that does not exist", c, "personal", body_kinds(&["whitepages"], &["delete", "sell"]), StatusCode::UNPROCESSABLE_ENTITY),
+            ("a company that offers only deletion, asked to stop selling", c, "personal", body_kinds(&["stirista"], &["opt_out_sale"]), StatusCode::UNPROCESSABLE_ENTITY),
             ("too many companies", c, "personal", json!({ "channel_ids": (0..51).map(|i| format!("c{i}")).collect::<Vec<_>>(),
-                "include_address": false, "consent": true, "authorization_version": deletion::AUTHORIZATION_VERSION }), StatusCode::UNPROCESSABLE_ENTITY),
+                "include_address": false, "consent": true, "authorization_version": deletion::AUTHORIZATION_VERSION,
+                "signature": "Jane Marie Smith", "esign_consent": true }), StatusCode::UNPROCESSABLE_ENTITY),
         ] {
             let r = send(&app, "POST", "/deletion-campaigns", &bearer(&pool, &cfg, who, tier).await, Some(b)).await;
             assert_eq!(r.status, want, "{what}: {}", r.body);
@@ -1798,7 +1843,7 @@ mod deletion_requests {
         let california = vec!["dealmachine", "realsource", "recruitbot", "snovio", "stirista", "whitepages"];
         assert_eq!(eligible_for(ca).await, california);
         assert_eq!(eligible_for(tx).await, general, "the pages offer the other routes to California residents");
-        assert_eq!(eligible_for(unknown).await, general, "an unknown state is never assumed to be California");
+        assert!(eligible_for(unknown).await.is_empty(), "an unknown state is never assumed to be in the pilot");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1997,7 +2042,7 @@ mod deletion_requests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn the_dashboard_says_when_a_company_is_overdue_and_shows_a_failure_in_plain_words(pool: PgPool) {
+    async fn the_dashboard_says_no_answer_reported_not_overdue_and_marks_when_even_an_extension_has_run_out(pool: PgPool) {
         let (app, cfg) = enabled_app(pool.clone());
         let c = californian(&pool).await;
         campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;
@@ -2006,9 +2051,15 @@ mod deletion_requests {
         sqlx::query("UPDATE deletion_requests SET status = 'sent', sent_at = NOW() - interval '30 days' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
         assert_eq!(send(&app, "GET", "/deletion-requests", &who, None).await.json()["requests"][0]["follow_up_due"], false);
         sqlx::query("UPDATE deletion_requests SET sent_at = NOW() - interval '46 days' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
-        assert_eq!(send(&app, "GET", "/deletion-requests", &who, None).await.json()["requests"][0]["follow_up_due"], true);
+        let j = send(&app, "GET", "/deletion-requests", &who, None).await.json();
+        assert_eq!((j["requests"][0]["follow_up_due"].clone(), j["requests"][0]["extended_period_over"].clone()), (json!(true), json!(false)),
+            "45 days with nothing reported: the company may have answered or extended, so it is not called late");
+        sqlx::query("UPDATE deletion_requests SET sent_at = NOW() - interval '91 days' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
+        let j = send(&app, "GET", "/deletion-requests", &who, None).await.json();
+        assert_eq!((j["requests"][0]["follow_up_due"].clone(), j["requests"][0]["extended_period_over"].clone()), (json!(true), json!(true)));
         sqlx::query("UPDATE deletion_requests SET status = 'removed', outcome_at = NOW() WHERE id = $1").bind(id).execute(&pool).await.unwrap();
-        assert_eq!(send(&app, "GET", "/deletion-requests", &who, None).await.json()["requests"][0]["follow_up_due"], false, "answered: not overdue");
+        let j = send(&app, "GET", "/deletion-requests", &who, None).await.json();
+        assert_eq!((j["requests"][0]["follow_up_due"].clone(), j["requests"][0]["extended_period_over"].clone()), (json!(false), json!(false)), "answered");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -2018,6 +2069,314 @@ mod deletion_requests {
         campaign(&pool, &app, &cfg, a, body(&["whitepages"], false)).await;
         assert_eq!(send(&app, "GET", "/deletion-requests", &bearer(&pool, &cfg, a, "personal").await, None).await.json()["requests"].as_array().unwrap().len(), 1);
         assert_eq!(send(&app, "GET", "/deletion-requests", &bearer(&pool, &cfg, b, "personal").await, None).await.json()["requests"], json!([]));
+    }
+
+    // ---- the California-only pilot ----------------------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_default_pilot_is_open_to_californians_only_whatever_a_companys_page_says(pool: PgPool) {
+        let (app, cfg) = pilot_app(pool.clone());
+        let ca = californian(&pool).await;
+        let tx = ts::customer(&pool, "personal", true).await;
+        save_identity(&pool, tx, "1 Main St, Austin, TX 78701").await;
+
+        let j = send(&app, "GET", "/deletion-requests/info", &bearer(&pool, &cfg, tx, "personal").await, None).await.json();
+        assert_eq!((j["in_pilot"].clone(), j["pilot_states"].clone()), (json!(false), json!(["CA"])));
+        assert!(j["channels"].as_array().unwrap().iter().all(|c| c["eligible"] == false),
+            "not even the companies whose pages are open to everyone");
+        assert!(j["channels"][0]["ineligible_reason"].as_str().unwrap().contains("not open in your state"));
+        let r = campaign(&pool, &app, &cfg, tx, body(&["realsource"], false)).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+
+        let j = send(&app, "GET", "/deletion-requests/info", &bearer(&pool, &cfg, ca, "personal").await, None).await.json();
+        assert_eq!(j["in_pilot"], true);
+        assert_eq!(campaign(&pool, &app, &cfg, ca, body(&["realsource"], false)).await.status, StatusCode::ACCEPTED);
+    }
+
+    // ---- choosing what to ask for -----------------------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn deleting_and_opting_out_of_sale_are_chosen_separately_and_each_company_is_asked_only_for_what_was_chosen(pool: PgPool) {
+        let (app, cfg) = enabled_app(pool.clone());
+        let c = californian(&pool).await;
+        // Whitepages offers both; the customer wants only the opt-out of sale or sharing.
+        let r = campaign(&pool, &app, &cfg, c, body_kinds(&["whitepages"], &["opt_out_sale"])).await;
+        assert_eq!(r.status, StatusCode::ACCEPTED, "{}", r.body);
+        // RealSource offers deletion only; the customer wants deletion only from it.
+        let r = campaign(&pool, &app, &cfg, c, body_kinds(&["realsource"], &["delete"])).await;
+        assert_eq!(r.status, StatusCode::ACCEPTED, "{}", r.body);
+        // Both kinds chosen: Whitepages again is refused by the cooldown, DealMachine offers both.
+        assert_eq!(campaign(&pool, &app, &cfg, c, body_kinds(&["dealmachine"], &["opt_out_sale", "delete", "delete"])).await.status, StatusCode::ACCEPTED);
+
+        let stored: Vec<(String, Vec<String>)> = sqlx::query_as(
+            "SELECT r.channel_id, c.request_kinds FROM deletion_requests r JOIN deletion_campaigns c ON c.id = r.campaign_id ORDER BY r.channel_id")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(stored, vec![
+            ("dealmachine".to_string(), vec!["delete".to_string(), "opt_out_sale".to_string()]),
+            ("realsource".to_string(), vec!["delete".to_string()]),
+            ("whitepages".to_string(), vec!["opt_out_sale".to_string()]),
+        ], "each kind once, in a fixed order, as chosen");
+
+        let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await.json();
+        let asked: std::collections::BTreeMap<String, Value> = q["requests"].as_array().unwrap().iter()
+            .map(|r| (r["channel_id"].as_str().unwrap().to_string(), r["requests"].clone())).collect();
+        assert_eq!(asked["whitepages"], json!(["opt_out_sale"]), "no deletion request goes to a company the customer only asked to stop selling");
+        assert_eq!(asked["realsource"], json!(["delete"]));
+        assert_eq!(asked["dealmachine"], json!(["delete", "opt_out_sale"]));
+
+        let list = send(&app, "GET", "/deletion-requests", &bearer(&pool, &cfg, c, "personal").await, None).await.json();
+        let shown: Vec<&Value> = list["requests"].as_array().unwrap().iter().filter(|r| r["channel_id"] == "whitepages").map(|r| &r["requests"]).collect();
+        assert_eq!(shown, vec![&json!(["opt_out_sale"])], "and the customer is shown the same");
+        let audit: Value = sqlx::query_scalar("SELECT details FROM audit_log WHERE action = 'deletion.authorize' AND customer_id = $1 ORDER BY created_at LIMIT 1")
+            .bind(c).fetch_one(&pool).await.unwrap();
+        assert_eq!(audit["request_kinds"], json!(["opt_out_sale"]));
+    }
+
+    // ---- withdrawing ------------------------------------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_request_that_has_not_been_sent_can_be_withdrawn_and_is_then_never_sent(pool: PgPool) {
+        let (app, cfg) = enabled_app(pool.clone());
+        let c = californian(&pool).await;
+        let other = californian(&pool).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages", "realsource"], false)).await;
+        let ids: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, channel_id FROM deletion_requests WHERE customer_id = $1 ORDER BY channel_id")
+            .bind(c).fetch_all(&pool).await.unwrap();
+        let (real, white) = (ids[0].0, ids[1].0);
+        let me = bearer(&pool, &cfg, c, "personal").await;
+        let withdraw = |id: Uuid| format!("/deletion-requests/{id}/withdraw");
+
+        assert_eq!(send(&app, "POST", &withdraw(real), &bearer(&pool, &cfg, other, "personal").await, None).await.status, StatusCode::NOT_FOUND, "someone else's");
+        assert_eq!(send(&app, "POST", &withdraw(real), &[], None).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(send(&app, "POST", &withdraw(real), &me, None).await.status, StatusCode::NO_CONTENT);
+        assert_eq!(status_of(&pool, real).await, "withdrawn");
+        assert_eq!(send(&app, "POST", &withdraw(real), &me, None).await.status, StatusCode::CONFLICT, "twice");
+
+        let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await.json();
+        let queued: Vec<&str> = q["requests"].as_array().unwrap().iter().map(|r| r["channel_id"].as_str().unwrap()).collect();
+        assert_eq!(queued, vec!["whitepages"], "the worker is never handed a withdrawn request");
+        assert_eq!(send(&app, "POST", &format!("/internal/deletion-requests/{real}/claim"), &agent(&cfg), None).await.status, StatusCode::CONFLICT,
+            "and cannot claim it even if it asks");
+
+        // Once a request is being sent, or was sent, it cannot be recalled.
+        send(&app, "POST", &format!("/internal/deletion-requests/{white}/claim"), &agent(&cfg), None).await;
+        assert_eq!(send(&app, "POST", &withdraw(white), &me, None).await.status, StatusCode::CONFLICT, "being sent");
+        sqlx::query("UPDATE deletion_requests SET status = 'sent', sent_at = NOW() WHERE id = $1").bind(white).execute(&pool).await.unwrap();
+        let r = send(&app, "POST", &withdraw(white), &me, None).await;
+        assert_eq!(r.status, StatusCode::CONFLICT, "sent");
+        assert!(r.body.contains("no longer be withdrawn"));
+        assert_eq!(status_of(&pool, white).await, "sent");
+
+        // A withdrawn request never left, so the company is not under the 90-day cooldown.
+        assert_eq!(campaign(&pool, &app, &cfg, c, body(&["realsource"], false)).await.status, StatusCode::ACCEPTED);
+        let logged: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'deletion.withdraw' AND customer_id = $1").bind(c).fetch_one(&pool).await.unwrap();
+        assert_eq!(logged, 1, "only the withdrawal that happened is logged");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_whole_campaign_can_be_withdrawn_but_only_what_has_not_been_sent(pool: PgPool) {
+        let (app, cfg) = enabled_app(pool.clone());
+        let c = californian(&pool).await;
+        let other = californian(&pool).await;
+        let r = campaign(&pool, &app, &cfg, c, body(&["whitepages", "realsource", "dealmachine"], false)).await;
+        let campaign_id = r.json()["campaign_id"].as_str().unwrap().to_string();
+        let me = bearer(&pool, &cfg, c, "personal").await;
+        let uri = format!("/deletion-campaigns/{campaign_id}/withdraw");
+
+        sqlx::query("UPDATE deletion_requests SET status = 'sent', sent_at = NOW() WHERE channel_id = 'whitepages'").execute(&pool).await.unwrap();
+        assert_eq!(send(&app, "POST", &uri, &bearer(&pool, &cfg, other, "personal").await, None).await.status, StatusCode::NOT_FOUND);
+        let r = send(&app, "POST", &uri, &me, None).await;
+        assert_eq!((r.status, r.json()["withdrawn"].clone()), (StatusCode::OK, json!(2)));
+        let statuses: Vec<(String, String)> = sqlx::query_as("SELECT channel_id, status FROM deletion_requests ORDER BY channel_id").fetch_all(&pool).await.unwrap();
+        assert_eq!(statuses, vec![
+            ("dealmachine".to_string(), "withdrawn".to_string()),
+            ("realsource".to_string(), "withdrawn".to_string()),
+            ("whitepages".to_string(), "sent".to_string()),
+        ]);
+        let again = send(&app, "POST", &uri, &me, None).await;
+        assert_eq!((again.status, again.json()["withdrawn"].clone()), (StatusCode::OK, json!(0)), "nothing left to withdraw");
+        let missing = send(&app, "POST", &format!("/deletion-campaigns/{}/withdraw", Uuid::new_v4()), &me, None).await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    }
+
+    // ---- the authorization record -----------------------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn each_campaign_is_signed_and_the_signed_document_is_kept_encrypted_and_retrievable_by_its_owner(pool: PgPool) {
+        let (app, cfg) = enabled_app(pool.clone());
+        let c = californian(&pool).await;
+        let other = californian(&pool).await;
+        let mut b = body_kinds(&["whitepages", "realsource"], &["delete"]);
+        b["signature"] = json!("  jane   marie SMITH ");                          // case and spacing do not matter
+        let r = campaign(&pool, &app, &cfg, c, b).await;
+        assert_eq!(r.status, StatusCode::ACCEPTED, "{}", r.body);
+        let campaign_id = r.json()["campaign_id"].as_str().unwrap().to_string();
+        let uri = format!("/deletion-campaigns/{campaign_id}/authorization");
+
+        let got = send(&app, "GET", &uri, &bearer(&pool, &cfg, c, "personal").await, None).await;
+        assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+        let j = got.json();
+        assert_eq!(j["authorization_version"], deletion::AUTHORIZATION_VERSION);
+        assert_eq!(j["authorization_text"], deletion::AUTHORIZATION_TEXT);
+        assert_eq!((j["request_kinds"].clone(), j["include_address"].clone()), (json!(["delete"]), json!(true)));
+        assert_eq!(j["esign_consent_at"], j["authorized_at"]);
+        let doc = j["signed_document"].as_str().unwrap();
+        for want in [
+            "Consumer: Jane Marie Smith", "Consumer's email address: jane.smith@example.com",
+            "Authorized agent: VectorScrub, a product of VectorGuard Labs",
+            "[AUTHORIZED] a request that the company delete", "[NOT AUTHORIZED] a request that the company stop selling",
+            "Whitepages, Inc (privacyrequest@whitepages.com): delete my personal information",
+            "RealSource, Inc (privacy@realsourcedata.com): delete my personal information",
+            "My street address is included in the requests: yes", "Signature: Jane Marie Smith",
+            deletion::AUTHORIZATION_VERSION,
+        ] {
+            assert!(doc.contains(want), "the signed document must state: {want}\n{doc}");
+        }
+        assert!(doc.contains(j["authorized_at"].as_str().unwrap()), "with the time it was signed");
+        assert!(doc.contains(deletion::AUTHORIZATION_TEXT), "and the full authorization text");
+        use sha2::Digest;
+        assert_eq!(j["signed_document_sha256"].as_str().unwrap(), hex::encode(sha2::Sha256::digest(doc.as_bytes())), "its fingerprint checks out");
+        for never in ["Evergreen", "90210", "512-555-0147", "1984-03-09", "second@example.com", "Dallas"] {
+            assert!(!got.body.contains(never), "only the name and the email the requests use: {never}");
+        }
+
+        // At rest the document is encrypted with the customer's key; the queue carries only its fingerprint.
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT signed_document_enc FROM deletion_campaigns WHERE customer_id = $1").bind(c).fetch_one(&pool).await.unwrap();
+        assert!(!String::from_utf8_lossy(&stored).contains("Jane") && !String::from_utf8_lossy(&stored).contains("jane.smith"));
+        let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await;
+        assert_eq!(q.json()["requests"][0]["signed_document_sha256"], j["signed_document_sha256"]);
+        assert!(!q.body.contains("Jane") && !q.body.contains("jane.smith"), "the queue holds no personal data");
+
+        assert_eq!(send(&app, "GET", &uri, &bearer(&pool, &cfg, other, "personal").await, None).await.status, StatusCode::NOT_FOUND, "not someone else's");
+        assert_eq!(send(&app, "GET", &uri, &[], None).await.status, StatusCode::UNAUTHORIZED);
+        let audit: Value = sqlx::query_scalar("SELECT details FROM audit_log WHERE action = 'deletion.authorize' AND customer_id = $1").bind(c).fetch_one(&pool).await.unwrap();
+        assert!(!audit.to_string().contains("Jane") && !audit.to_string().to_lowercase().contains("smith"), "the signature is never in the audit trail");
+    }
+
+    // ---- a withdrawn authorization stays withdrawn ------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn nothing_is_sent_under_a_withdrawn_authorization_even_a_request_put_back_in_the_queue(pool: PgPool) {
+        let (app, cfg) = enabled_app(pool.clone());
+        let c = californian(&pool).await;
+        let r = campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;
+        let campaign_id = r.json()["campaign_id"].as_str().unwrap().to_string();
+        let id = only_request(&pool, c).await;
+        send(&app, "POST", &format!("/deletion-campaigns/{campaign_id}/withdraw"), &bearer(&pool, &cfg, c, "personal").await, None).await;
+        let at: Option<time::OffsetDateTime> = sqlx::query_scalar("SELECT withdrawn_at FROM deletion_campaigns WHERE id = $1::uuid").bind(&campaign_id).fetch_one(&pool).await.unwrap();
+        assert!(at.is_some(), "the withdrawal time is recorded on the authorization");
+
+        // Even if something puts the request back to 'queued', it is not listed and cannot be claimed.
+        sqlx::query("UPDATE deletion_requests SET status = 'queued' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
+        assert_eq!(send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await.json()["requests"], json!([]));
+        assert_eq!(send(&app, "POST", &format!("/internal/deletion-requests/{id}/claim"), &agent(&cfg), None).await.status, StatusCode::CONFLICT);
+        let rec = send(&app, "GET", &format!("/deletion-campaigns/{campaign_id}/authorization"), &bearer(&pool, &cfg, c, "personal").await, None).await.json();
+        assert!(rec["withdrawn_at"].is_string(), "and the customer sees it");
+    }
+
+    // ---- interrupted sends: traced by Message-ID, resolved by an operator ---------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_interrupted_send_keeps_its_message_id_and_an_operator_decides_from_the_mail_logs(pool: PgPool) {
+        let (app, cfg) = enabled_app(pool.clone());
+        let c = californian(&pool).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages", "realsource"], false)).await;
+        let ids: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, channel_id FROM deletion_requests ORDER BY channel_id").fetch_all(&pool).await.unwrap();
+        let (real, white) = (ids[0].0, ids[1].0);
+        let claim = |id: Uuid, b: Value| {
+            let (app, cfg) = (app.clone(), cfg.clone());
+            async move { send(&app, "POST", &format!("/internal/deletion-requests/{id}/claim"), &agent(&cfg), Some(b)).await.status }
+        };
+        assert_eq!(claim(white, json!({ "message_id": "two\r\nBcc: x@y" })).await, StatusCode::UNPROCESSABLE_ENTITY, "one plain Message-ID only");
+        assert_eq!(status_of(&pool, white).await, "queued", "a refused claim takes nothing");
+        assert_eq!(claim(white, json!({ "message_id": "<w1@mail.vectorscrub.example>" })).await, StatusCode::NO_CONTENT);
+        assert_eq!(claim(real, json!({ "message_id": "<r1@mail.vectorscrub.example>" })).await, StatusCode::NO_CONTENT);
+        let mid: Option<String> = sqlx::query_scalar("SELECT message_id FROM deletion_requests WHERE id = $1").bind(white).fetch_one(&pool).await.unwrap();
+        assert_eq!(mid.as_deref(), Some("<w1@mail.vectorscrub.example>"), "recorded before anything is sent");
+
+        // Both workers die mid-send.
+        sqlx::query("UPDATE deletion_requests SET claimed_at = NOW() - interval '2 hours'").execute(&pool).await.unwrap();
+        send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await;
+        let listed = deletion::interrupted(&pool).await.unwrap();
+        let mids: Vec<Option<String>> = listed.iter().map(|i| i.message_id.clone()).collect();
+        assert_eq!(listed.len(), 2);
+        assert!(mids.contains(&Some("<w1@mail.vectorscrub.example>".into())) && mids.contains(&Some("<r1@mail.vectorscrub.example>".into())));
+
+        // The operator finds the first one in the mail logs: it left.
+        deletion::resolve_interrupted(&pool, white, deletion::MailLogFinding::Sent).await.unwrap();
+        let (status, sent_at, claimed_at): (String, Option<time::OffsetDateTime>, Option<time::OffsetDateTime>) =
+            sqlx::query_as("SELECT status, sent_at, claimed_at FROM deletion_requests WHERE id = $1").bind(white).fetch_one(&pool).await.unwrap();
+        assert_eq!((status.as_str(), sent_at), ("sent", claimed_at));
+        // The second never left: it goes back in the queue, to be sent once, with a new Message-ID.
+        deletion::resolve_interrupted(&pool, real, deletion::MailLogFinding::NotSent).await.unwrap();
+        assert_eq!(status_of(&pool, real).await, "queued");
+        let q = send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await.json();
+        assert_eq!(q["requests"].as_array().unwrap().len(), 1);
+        assert_eq!(claim(real, json!({ "message_id": "<r2@mail.vectorscrub.example>" })).await, StatusCode::NO_CONTENT);
+
+        // Only an interrupted request can be resolved, and only once.
+        assert!(matches!(deletion::resolve_interrupted(&pool, white, deletion::MailLogFinding::NotSent).await, Err(deletion::DeletionError::IllegalTransition)),
+            "a sent request is never put back");
+        assert!(matches!(deletion::resolve_interrupted(&pool, real, deletion::MailLogFinding::Sent).await, Err(deletion::DeletionError::IllegalTransition)));
+        assert!(matches!(deletion::resolve_interrupted(&pool, Uuid::new_v4(), deletion::MailLogFinding::Sent).await, Err(deletion::DeletionError::NotFound)));
+        assert!(deletion::interrupted(&pool).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_interrupted_send_under_a_withdrawn_authorization_is_never_put_back(pool: PgPool) {
+        let (app, cfg) = enabled_app(pool.clone());
+        let c = californian(&pool).await;
+        let r = campaign(&pool, &app, &cfg, c, body(&["whitepages"], false)).await;
+        let campaign_id = r.json()["campaign_id"].as_str().unwrap().to_string();
+        let id = only_request(&pool, c).await;
+        send(&app, "POST", &format!("/internal/deletion-requests/{id}/claim"), &agent(&cfg), None).await;
+        sqlx::query("UPDATE deletion_requests SET claimed_at = NOW() - interval '2 hours'").execute(&pool).await.unwrap();
+        send(&app, "GET", "/internal/deletion-requests", &agent(&cfg), None).await;
+        send(&app, "POST", &format!("/deletion-campaigns/{campaign_id}/withdraw"), &bearer(&pool, &cfg, c, "personal").await, None).await;
+        assert!(matches!(deletion::resolve_interrupted(&pool, id, deletion::MailLogFinding::NotSent).await, Err(deletion::DeletionError::CampaignWithdrawn)));
+        assert_eq!(status_of(&pool, id).await, "failed");
+        deletion::resolve_interrupted(&pool, id, deletion::MailLogFinding::Sent).await.unwrap();
+        assert_eq!(status_of(&pool, id).await, "sent", "recording that it did leave is still allowed");
+    }
+
+    // ---- erasing the account ----------------------------------------------------------------
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn deleting_the_account_erases_every_campaign_and_request_and_leaves_only_unlinked_audit_entries(pool: PgPool) {
+        let (app, cfg) = enabled_app(pool.clone());
+        let c = californian(&pool).await;
+        let bystander = californian(&pool).await;
+        campaign(&pool, &app, &cfg, c, body(&["whitepages", "realsource", "dealmachine"], true)).await;
+        campaign(&pool, &app, &cfg, bystander, body(&["whitepages"], false)).await;
+        let sent: Uuid = sqlx::query_scalar("SELECT id FROM deletion_requests WHERE customer_id = $1 AND channel_id = 'whitepages'").bind(c).fetch_one(&pool).await.unwrap();
+        send(&app, "POST", &format!("/internal/deletion-requests/{sent}/claim"), &agent(&cfg), None).await;
+        send(&app, "PUT", &format!("/internal/deletion-requests/{sent}/result"), &agent(&cfg), Some(json!({ "sent": true, "message_id": "<x@vectorscrub.example>" }))).await;
+        let dm: Uuid = sqlx::query_scalar("SELECT id FROM deletion_requests WHERE customer_id = $1 AND channel_id = 'dealmachine'").bind(c).fetch_one(&pool).await.unwrap();
+        send(&app, "POST", &format!("/deletion-requests/{dm}/withdraw"), &bearer(&pool, &cfg, c, "personal").await, None).await;
+
+        let email: String = sqlx::query_scalar("SELECT email FROM customers WHERE id = $1").bind(c).fetch_one(&pool).await.unwrap();
+        crate::services::account_deletion::delete_account(&pool, c).await.unwrap();
+
+        let (campaigns, requests): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM deletion_campaigns WHERE customer_id = $1), (SELECT count(*) FROM deletion_requests WHERE customer_id = $1)")
+            .bind(c).fetch_one(&pool).await.unwrap();
+        assert_eq!((campaigns, requests), (0, 0), "the authorization text, its hash, the companies and every delivery record are gone");
+        let others: i64 = sqlx::query_scalar("SELECT count(*) FROM deletion_requests WHERE customer_id = $1").bind(bystander).fetch_one(&pool).await.unwrap();
+        assert_eq!(others, 1, "nobody else's records are touched");
+
+        let linked: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE customer_id = $1 OR lower(user_email) = lower($2)")
+            .bind(c).bind(&email).fetch_one(&pool).await.unwrap();
+        assert_eq!(linked, 0, "no audit entry still points at the customer or carries their email");
+        let kept: Vec<(String, Value)> = sqlx::query_as("SELECT action, details FROM audit_log WHERE action LIKE 'deletion.%' AND customer_id IS NULL AND user_email IS NULL ORDER BY created_at")
+            .fetch_all(&pool).await.unwrap();
+        let actions: Vec<&str> = kept.iter().map(|(a, _)| a.as_str()).collect();
+        for want in ["deletion.authorize", "deletion.sent", "deletion.withdraw"] {
+            assert!(actions.contains(&want), "the trail still says that {want} happened");
+        }
+        let all = serde_json::to_string(&kept).unwrap();
+        for never in ["Jane", "Evergreen", "90210", "jane.smith@example.com", email.as_str()] {
+            assert!(!all.contains(never), "what remains holds no personal data: {never}");
+        }
     }
 }
 

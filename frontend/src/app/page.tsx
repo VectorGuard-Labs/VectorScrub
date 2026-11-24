@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { Shield, Search, Trash2, Bell, BarChart3, Lock } from "lucide-react";
 import RenewalNotice from "@/components/RenewalNotice";
-import { postalAddress } from "@/lib/legal";
 import { fetchPublicCoverage, planCoverage, type PlanTier } from "@/lib/coverage";
 
 const features = [
@@ -138,7 +137,7 @@ export default async function LandingPage() {
   // on the web server). Until then the page does not advertise something nobody can buy.
   const showPaidPlan = process.env.SHOW_PAID_PLAN === "true";
   return (
-    <main className="flex flex-col min-h-screen">
+    <main className="flex flex-col flex-1">
       {/* Nav */}
       <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between max-w-7xl mx-auto w-full">
         <div className="flex items-center gap-2">
@@ -363,18 +362,6 @@ export default async function LandingPage() {
           </p>
         </div>
       </section>
-
-      {/* Footer */}
-      <footer className="px-6 py-6 border-t border-gray-800 text-center">
-        <p className="text-gray-600 text-xs">
-          © 2026 VectorGuard Labs. All rights reserved.
-          &nbsp;·&nbsp;
-          <Link href="/privacy" className="hover:text-gray-400 transition-colors">Privacy Policy</Link>
-          &nbsp;·&nbsp;
-          <Link href="/terms" className="hover:text-gray-400 transition-colors">Terms of Service</Link>
-        </p>
-        {postalAddress() && <p className="text-gray-600 text-xs mt-2">{postalAddress()}</p>}
-      </footer>
     </main>
   );
 }

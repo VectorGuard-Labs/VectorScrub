@@ -201,6 +201,7 @@ pub fn test_config() -> crate::services::config::AppConfig {
         scan_max_attempts: 3,
         stripe: None,
         deletion_requests_enabled: false,
+        deletion_pilot_states: vec!["CA".to_string()],
         max_accounts: None,
         metrics_token: None,
         internal_port: None,

@@ -71,7 +71,7 @@ pub struct CleartextIdentity {
 /// Version of the Terms of Service and Privacy Policy that registration must accept. Change it
 /// (together with `TERMS_VERSION` in frontend/src/lib/legal.ts) whenever either document changes
 /// in a way customers must agree to again.
-pub const TERMS_VERSION: &str = "2026-11-pilot-4";
+pub const TERMS_VERSION: &str = "2026-11-pilot-6";
 
 /// Request body for account creation.
 #[derive(Debug, Deserialize, Validate, ToSchema)]

@@ -43,6 +43,8 @@ pub mod purpose {
     pub const MFA_SECRET: &str = "mfa.totp_secret";
     pub const LISTING_LINK: &str = "listing.source_url";
     pub const SCAN_TOKEN: &str = "token.scan";
+    /// The signed authorization of a deletion-request campaign (names the customer and their email).
+    pub const DELETION_SIGNED_AUTHORIZATION: &str = "deletion.signed_authorization";
 }
 
 /// Does this blob carry the format-2 prefix?

@@ -88,6 +88,34 @@ def test_a_request_for_deletion_alone_does_not_claim_to_ask_for_more():
     assert subject.endswith(": deletion") and "Stop selling" not in body
 
 
+def test_a_request_to_stop_selling_alone_does_not_ask_for_deletion():
+    """The customer chooses the two kinds separately; the company is asked for only what was chosen."""
+    subject, body = render(QueuedDeletion(**queued(requests=["opt_out_sale"])), ident())
+    assert subject.endswith(": opt-out of sale or sharing")
+    assert "Stop selling or sharing their personal information." in body
+    assert "Delete the personal information" not in body and "deletion" not in subject
+
+
+def test_the_email_points_to_the_signed_copy_by_its_fingerprint_only_when_there_is_one():
+    digest = "a" * 64
+    _, body = render(QueuedDeletion(**queued(signed_document_sha256=digest)), ident())
+    assert f"SHA-256: {digest}" in body and "ask Jane Marie Smith at jane.smith@example.com for the signed copy" in body
+    _, unsigned = render(QueuedDeletion(**queued()), ident())
+    assert "SHA-256" not in unsigned, "no claim of a signature that does not exist"
+    _, odd = render(QueuedDeletion(**queued(signed_document_sha256="not a hash\r\nBcc: x@y")), ident())
+    assert "SHA-256" not in odd and "Bcc" not in odd
+
+
+async def test_the_message_id_made_before_the_claim_is_the_one_sent():
+    ex = FakeExecutor()
+    sender = DeletionSender(ex)
+    planned = sender.new_message_id()
+    assert planned.startswith("<") and planned.endswith("@vectorscrub.example>")
+    ok, message_id, _ = await sender.send(QueuedDeletion(**queued()), ident(), planned)
+    assert ok and message_id == planned and ex.sent[0][0]["Message-ID"] == planned
+    assert DeletionSender(FakeExecutor(sender="not an address", user="")).new_message_id() is None
+
+
 @pytest.mark.parametrize("evil", [
     "Jane\r\nBcc: attacker@evil.example", "Jane\nSubject: hijacked", "Jane\u2028Bcc: x@y.example", "Jane\x00\x1b[31m",
 ])
@@ -188,8 +216,12 @@ class FakeSender:
     def __init__(self, outcome=(True, "<m@x>", None), crash=None):
         self.outcome, self.crash, self.calls = outcome, crash, []
 
-    async def send(self, request, identity):
+    def new_message_id(self):
+        return "<planned@x>"
+
+    async def send(self, request, identity, message_id=None):
         self.calls.append((request, identity))
+        self.message_ids = getattr(self, "message_ids", []) + [message_id]
         if self.crash:
             raise self.crash
         return self.outcome
@@ -203,6 +235,14 @@ def orch(monkeypatch):
     monkeypatch.setattr(o.cfg, "deletion_poll_seconds", 0)
     monkeypatch.setattr(orch_mod, "_REPORT_WAIT", __import__("tenacity").wait_none())
     return o
+
+
+async def test_the_worker_claims_with_the_message_id_it_then_sends_with(orch):
+    orch.backend.deletion_queue = [queued()]
+    sender = FakeSender()
+    await orch._run_deletion_cycle(sender)
+    assert orch.backend.deletion_claim_message_ids == ["<planned@x>"]
+    assert sender.message_ids == ["<planned@x>"], "the email uses the Message-ID recorded at claim time"
 
 
 async def test_a_queued_request_is_claimed_then_its_details_fetched_then_sent_then_reported_in_that_order(orch):
@@ -306,7 +346,7 @@ async def test_when_switched_on_the_loop_survives_a_failing_cycle(orch, monkeypa
 # ---- the backend client -------------------------------------------------------------------------------
 
 async def test_the_client_speaks_the_protocol():
-    seen = []
+    seen, claims = [], []
 
     def handler(req: httpx.Request) -> httpx.Response:
         seen.append((req.method, req.url.path, req.headers.get("x-agent-key", "")[:10]))
@@ -314,6 +354,7 @@ async def test_the_client_speaks_the_protocol():
         if path.endswith("/internal/deletion-requests"):
             return httpx.Response(200, json={"requests": [{"id": "1"}]})
         if path.endswith("/claim"):
+            claims.append(req.content)
             return httpx.Response(409 if "lost" in path else 204)
         if path.endswith("/identity"):
             return httpx.Response(403 if "denied" in path else 200, json={"full_name": "Jane"})
@@ -324,6 +365,8 @@ async def test_the_client_speaks_the_protocol():
     c = BackendClient(transport=httpx.MockTransport(handler))
     assert await c.list_deletion_requests() == [{"id": "1"}]
     assert await c.claim_deletion_request("ok") is True and await c.claim_deletion_request("lost") is False
+    assert await c.claim_deletion_request("ok", "<m1@x>") is True
+    assert claims[-1] == b'{"message_id":"<m1@x>"}' or __import__("json").loads(claims[-1]) == {"message_id": "<m1@x>"}
     assert (await c.fetch_deletion_identity("ok"))["full_name"] == "Jane"
     with pytest.raises(IdentityDenied):
         await c.fetch_deletion_identity("denied")

@@ -22,9 +22,17 @@ class DeletionSender:
         self._executor = executor or RemovalExecutor()
         self._config = self._executor.config
 
-    async def send(self, request: QueuedDeletion, identity: IdentityContext) -> tuple[bool, str | None, str | None]:
+    def new_message_id(self) -> str | None:
+        """A Message-ID for the next email, made before it is claimed so the backend can record it and
+        an operator can trace an interrupted send in the mail logs. None if the sender is misconfigured."""
+        sender = self._config.smtp_from_email or self._config.smtp_username
+        return make_msgid(domain=sender.rpartition("@")[2]) if is_plain_address(sender or "") else None
+
+    async def send(
+        self, request: QueuedDeletion, identity: IdentityContext, message_id: str | None = None
+    ) -> tuple[bool, str | None, str | None]:
         """Returns (sent, message_id, error). The error is a fixed phrase: never exception text,
-        which can carry addresses."""
+        which can carry addresses. `message_id` is the one recorded at claim time, if any."""
         if not is_plain_address(request.to_address):
             return False, None, "The company's address was not a single plain email address, so nothing was sent."
         if not identity.full_name.strip() or not (identity.email or "").strip():
@@ -41,7 +49,7 @@ class DeletionSender:
         msg["From"] = sender
         msg["To"] = request.to_address
         msg["Reply-To"] = one_line(identity.email, 200)
-        msg["Message-ID"] = make_msgid(domain=sender.rpartition("@")[2])
+        msg["Message-ID"] = message_id or make_msgid(domain=sender.rpartition("@")[2])
 
         try:
             message_id = await self._executor._send_smtp_email(msg, request.to_address)

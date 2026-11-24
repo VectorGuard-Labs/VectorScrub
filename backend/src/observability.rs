@@ -153,6 +153,14 @@ fn register_custom_metrics() {
     );
     describe_counter!("jobs_failed_total", "Total number of failed jobs");
 
+    // Deletion requests emailed to companies (authorized-agent requests)
+    describe_counter!("deletion_requests_sent_total", "Deletion-request emails the worker reports as sent");
+    describe_counter!("deletion_requests_failed_total", "Deletion-request emails the worker reports as not sent");
+    describe_counter!(
+        "deletion_requests_interrupted_total",
+        "Deletion-request sends interrupted mid-send; an operator must check the mail logs"
+    );
+
     // Agent metrics
     describe_counter!(
         "agent_api_calls_total",

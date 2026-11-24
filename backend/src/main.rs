@@ -61,6 +61,9 @@ async fn main() -> anyhow::Result<()> {
     if args.get(1).map(String::as_str) == Some("assistance") {
         return assistance_cli(&args[2..]).await;
     }
+    if args.get(1).map(String::as_str) == Some("deletion") {
+        return deletion_cli(&args[2..]).await;
+    }
 
     let config = services::config::AppConfig::from_env()
         .context("Failed to load application configuration")?;
@@ -474,6 +477,58 @@ async fn erase_account_cli(email: Option<&str>) -> anyhow::Result<()> {
         .await;
     println!("Account erased.");
     Ok(())
+}
+
+/// `vectorscrub deletion interrupted | resolve <request-id> sent|not-sent`
+/// Deletion-request emails whose send was interrupted are failed, never retried by the worker,
+/// because it is not known whether they left. `interrupted` lists them with the Message-ID each was
+/// sent with (no personal data). Search the mail provider's logs for that Message-ID, then `resolve`:
+/// `sent` records it as sent; `not-sent` puts it back in the queue to be sent once. Both are audited.
+async fn deletion_cli(args: &[String]) -> anyhow::Result<()> {
+    use services::{audit, deletion};
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let pool = PgPoolOptions::new().max_connections(2).connect(&url).await?;
+    match args.first().map(String::as_str) {
+        Some("interrupted") => {
+            let items = deletion::interrupted(&pool).await?;
+            if items.is_empty() {
+                println!("No interrupted deletion-request sends.");
+            }
+            for i in items {
+                let claimed = i.claimed_at.and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok()).unwrap_or_default();
+                println!(
+                    "{}  {:<14} claimed {}  message-id {}",
+                    i.id, i.channel_id, claimed, i.message_id.as_deref().unwrap_or("(none recorded: treat as possibly sent)")
+                );
+            }
+            Ok(())
+        }
+        Some("resolve") => {
+            let id: uuid::Uuid = args.get(1).context("missing request id")?.parse().context("not a valid request id")?;
+            let finding = match args.get(2).map(String::as_str) {
+                Some("sent") => deletion::MailLogFinding::Sent,
+                Some("not-sent") => deletion::MailLogFinding::NotSent,
+                _ => anyhow::bail!("usage: vectorscrub deletion resolve <request-id> sent|not-sent"),
+            };
+            let customer = deletion::resolve_interrupted(&pool, id, finding).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            audit::AuditEntry::builder(audit::actions::DELETION_OPERATOR_RESOLVE, audit::resources::DELETION_REQUEST)
+                .customer_id(customer)
+                .resource_id(id)
+                .details(serde_json::json!({
+                    "by": "operator",
+                    "finding": if finding == deletion::MailLogFinding::Sent { "sent" } else { "not_sent" },
+                }))
+                .log(&pool)
+                .await
+                .context("the decision was applied but could not be audited")?;
+            println!(
+                "{}",
+                if finding == deletion::MailLogFinding::Sent { "Recorded as sent." } else { "Back in the queue. It will be sent once." }
+            );
+            Ok(())
+        }
+        _ => anyhow::bail!("usage: vectorscrub deletion interrupted | resolve <request-id> sent|not-sent"),
+    }
 }
 
 /// `vectorscrub assistance list | contact <id> | start <id> | finish <id> <minutes> | decline <id> | summary`

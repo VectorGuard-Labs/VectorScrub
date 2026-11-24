@@ -51,7 +51,7 @@ export default function ReportPage() {
   const checked = (scan?.coverage?.length ?? 0) - unchecked.length;
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 print:bg-white print:text-black">
+    <div className="flex-1 bg-gray-950 text-gray-100 print:bg-white print:text-black">
       <main className="max-w-4xl mx-auto px-6 py-10">
         <div className="flex items-center justify-between mb-8 print:hidden">
           <Link href="/dashboard" className="inline-flex items-center gap-2 text-gray-400 hover:text-white text-sm">

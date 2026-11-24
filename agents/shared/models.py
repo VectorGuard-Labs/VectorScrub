@@ -124,6 +124,8 @@ class QueuedDeletion(BaseModel):
     authorized_at: str
     authorization_version: str
     authorization_text: str
+    # SHA-256 of the signed authorization the customer holds (no personal data). Quoted in the email.
+    signed_document_sha256: Optional[str] = None
 
 
 class DiscoveryReport(BaseModel):

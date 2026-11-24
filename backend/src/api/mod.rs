@@ -78,6 +78,9 @@ pub fn public_router(state: AppState) -> Router {
             .route("/deletion-requests", get(deletion::list))
             .route("/deletion-campaigns", post(deletion::create_campaign))
             .route("/deletion-requests/:id/outcome", post(deletion::outcome))
+            .route("/deletion-requests/:id/withdraw", post(deletion::withdraw_request))
+            .route("/deletion-campaigns/:id/withdraw", post(deletion::withdraw_campaign))
+            .route("/deletion-campaigns/:id/authorization", get(deletion::authorization_record))
             // Billing: plans on offer and current subscription
             .route("/me/billing", get(billing::get_billing))
             // Stripe calls this; authenticated by its signature, not a session (see handler)
